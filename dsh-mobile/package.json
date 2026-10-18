@@ -8,10 +8,10 @@
     "android": "react-native run-android",
     "ios": "react-native run-ios",
     "typecheck": "tsc --noEmit",
-    "test:fold": "node tests/fold-spec.mjs",
+    "test:fold": "tsx tests/fold-spec.mjs",
     "test:cwd": "node tests/cwd-spec.mjs",
-    "test:pairing": "node tests/pairing-spec.mjs",
-    "test:e2e": "node tests/e2e.mjs",
+    "test:pairing": "tsx tests/pairing-spec.mjs",
+    "test:e2e": "tsx tests/e2e.mjs",
     "test": "npm run test:fold && npm run test:cwd && npm run test:pairing && npm run typecheck"
   },
   "dependencies": {
@@ -36,6 +36,7 @@
     "@react-native/metro-config": "0.81.4",
     "@react-native/typescript-config": "0.81.4",
     "@types/react": "^19.1.0",
+    "tsx": "^4.23.15",
     "typescript": "^5.8.3"
   },
   "engines": {

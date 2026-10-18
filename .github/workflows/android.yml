@@ -17,6 +17,8 @@ jobs:
 
       - uses: actions/setup-node@v4
         with:
+          # 测试通过 tsx 运行（esbuild 做类型剥离），不依赖 Node 原生 TS 支持，
+          # 所以 Node 20 就能跑。用 LTS 更稳。
           node-version: 20
           cache: npm
           cache-dependency-path: dsh-mobile/package-lock.json
@@ -26,14 +28,40 @@ jobs:
           distribution: temurin
           java-version: 21
 
-      - name: Setup Android SDK
-        uses: android-actions/setup-android@v3
-
-      # 项目用了 New Architecture + 若干原生模块，必须装 NDK 才能编译
-      - name: Install NDK and platform
+      # 不用 android-actions/setup-android：它会执行 `sdkmanager tools`，
+      # 而 runner 预装的 cmdline-tools 16.0 已经移除了这个包，直接报错退出。
+      # GitHub 的 ubuntu-latest 本来就带好了 SDK / build-tools，直接用即可。
+      - name: Inspect Android SDK
         run: |
-          sdkmanager --install "ndk;27.1.12297006" "platforms;android-36" "build-tools;36.0.0"
-          echo "ANDROID_NDK_HOME=$ANDROID_SDK_ROOT/ndk/27.1.12297006" >> "$GITHUB_ENV"
+          echo "ANDROID_SDK_ROOT=${ANDROID_SDK_ROOT:-$ANDROID_HOME}"
+          ls "$ANDROID_SDK_ROOT/platforms" || true
+          ls "$ANDROID_SDK_ROOT/ndk" || true
+          ls "$ANDROID_SDK_ROOT/build-tools" || true
+
+      # 项目需要 NDK 27.1.12297006（New Architecture 编译必需）、
+      # platform 36、build-tools 36.0.0；缺哪个补哪个（已存在则秒过）。
+      - name: Ensure NDK and SDK packages
+        run: |
+          SDK="${ANDROID_SDK_ROOT:-$ANDROID_HOME}"
+          SDKMANAGER="$SDK/cmdline-tools/latest/bin/sdkmanager"
+          if [ ! -x "$SDKMANAGER" ]; then
+            SDKMANAGER=$(find "$SDK/cmdline-tools" -name sdkmanager -type f | head -1)
+          fi
+          echo "sdkmanager: $SDKMANAGER"
+
+          need=""
+          [ -d "$SDK/ndk/27.1.12297006" ] || need="$need ndk;27.1.12297006"
+          [ -d "$SDK/platforms/android-36" ] || need="$need platforms;android-36"
+          [ -d "$SDK/build-tools/36.0.0" ] || need="$need build-tools;36.0.0"
+
+          if [ -n "$need" ]; then
+            echo "安装缺少的包:$need"
+            yes | "$SDKMANAGER" --install $need
+          else
+            echo "NDK / platform / build-tools 都已存在，跳过下载"
+          fi
+
+          echo "ANDROID_NDK_HOME=$SDK/ndk/27.1.12297006" >> "$GITHUB_ENV"
 
       - name: Cache Gradle
         uses: actions/cache@v4
@@ -84,7 +112,6 @@ jobs:
           fi
           mkdir -p out
           cp dsh-mobile/android/app/build/outputs/apk/release/app-release.apk "out/dsh-pocket-${VERSION}.apk"
-          echo "name=dsh-pocket-${VERSION}.apk" >> "$GITHUB_OUTPUT"
           ls -lh out/
 
       - name: Upload artifact
