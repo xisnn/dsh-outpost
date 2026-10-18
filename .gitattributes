@@ -1,0 +1,45 @@
+# 统一换行符，避免 Windows / macOS / Linux 之间整个文件显示为「已修改」
+#
+# Git 默认（core.autocrlf）在 Windows 上会把 LF 转成 CRLF 提交前又转回来，
+# 跨平台协作时容易产生大量无意义的 diff。这里统一规定：
+#   - 文本文件在仓库里永远存 LF
+#   - 二进制文件不做任何转换
+
+* text=auto eol=lf
+
+# 二进制（禁止换行符转换与 diff）
+*.png  binary
+*.jpg  binary
+*.jpeg binary
+*.webp binary
+*.gif  binary
+*.ico  binary
+*.ttf  binary
+*.jar  binary
+*.apk  binary
+*.aab  binary
+*.keystore binary
+*.so   binary
+
+# Windows 脚本保持 CRLF：cmd 对 LF 的处理有兼容问题
+*.ps1  text eol=crlf
+*.cmd  text eol=crlf
+*.bat  text eol=crlf
+
+# 常见文本类型（显式声明，方便 diff 与语言识别）
+*.md   text
+*.ts   text
+*.tsx  text
+*.js   text
+*.mjs  text
+*.json text
+*.yml  text
+*.yaml text
+*.xml  text
+*.gradle text
+*.kt   text
+*.swift text
+*.pbxproj text
+
+# lock 文件：不要参与 diff 统计
+package-lock.json -diff linguist-generated
