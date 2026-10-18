@@ -1,0 +1,11 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <!-- 自适应图标背景：与品牌图边缘的白色底一致，遮罩边缘看不出接缝 -->
+    <color name="ic_launcher_background">#FFFFFF</color>
+    <!--
+      启动兜底色：取品牌图顶部天空的颜色（#1C4492）。
+      系统闪屏（Android 12+）和 SplashActivity 的第一帧都用它，
+      这样「系统闪屏 → 鲸尾图」之间看不出切换。
+    -->
+    <color name="splash_background">#1C4492</color>
+</resources>

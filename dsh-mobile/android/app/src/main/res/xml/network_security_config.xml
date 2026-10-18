@@ -1,0 +1,18 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+  DSH 的 Web 服务默认走明文 HTTP：
+    · Tailscale 内部已经有 WireGuard 加密
+    · 局域网模式就是普通 http
+  所以必须允许 cleartext，否则 Android 9+ 会让请求静默失败
+  （表现为 TypeError: Network request failed，非常难排查）。
+
+  注意：不要用 manifestPlaceholders 控制这个值 —— release 构建的
+  manifest 合并流程会把它覆盖掉，导致 debug 能用、release 用不了。
+-->
+<network-security-config>
+    <base-config cleartextTrafficPermitted="true">
+        <trust-anchors>
+            <certificates src="system" />
+        </trust-anchors>
+    </base-config>
+</network-security-config>
