@@ -5,10 +5,6 @@ on:
     tags:
       - 'v*'
   workflow_dispatch:
-    inputs:
-      version_name:
-        description: '版本名（如 1.0.0），留空则用 run number'
-        required: false
 
 permissions:
   contents: write
@@ -30,7 +26,23 @@ jobs:
           distribution: temurin
           java-version: 21
 
-      - uses: android-actions/setup-android@v3
+      - name: Setup Android SDK
+        uses: android-actions/setup-android@v3
+
+      # 项目用了 New Architecture + 若干原生模块，必须装 NDK 才能编译
+      - name: Install NDK and platform
+        run: |
+          sdkmanager --install "ndk;27.1.12297006" "platforms;android-36" "build-tools;36.0.0"
+          echo "ANDROID_NDK_HOME=$ANDROID_SDK_ROOT/ndk/27.1.12297006" >> "$GITHUB_ENV"
+
+      - name: Cache Gradle
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.gradle/caches
+            ~/.gradle/wrapper
+          key: gradle-${{ runner.os }}-${{ hashFiles('dsh-mobile/android/**/*.gradle*', 'dsh-mobile/android/gradle.properties') }}
+          restore-keys: gradle-${{ runner.os }}-
 
       - name: Install dependencies
         working-directory: dsh-mobile
@@ -53,31 +65,49 @@ jobs:
           if [ -n "$DSH_KEYSTORE_BASE64" ]; then
             echo "使用仓库配置的签名密钥"
             echo "$DSH_KEYSTORE_BASE64" | base64 -d > app/release.keystore
-            ./gradlew assembleRelease \
+            ./gradlew assembleRelease --no-daemon \
               -PDSH_STORE_FILE=app/release.keystore \
               -PDSH_STORE_PASSWORD="$DSH_KEYSTORE_PASSWORD" \
               -PDSH_KEY_ALIAS="$DSH_KEY_ALIAS" \
               -PDSH_KEY_PASSWORD="$DSH_KEY_PASSWORD"
           else
-            echo "没有配置签名密钥，使用 debug 签名构建"
-            ./gradlew assembleRelease
+            echo "未配置签名密钥，使用 debug 签名构建（可侧载，不可上架）"
+            ./gradlew assembleRelease --no-daemon
           fi
 
-      - name: Rename APK
+      - name: Prepare artifact
+        id: artifact
         run: |
+          VERSION="${GITHUB_REF_NAME}"
+          if [ -z "$VERSION" ] || [ "$VERSION" = "main" ]; then
+            VERSION="build-${GITHUB_RUN_NUMBER}"
+          fi
           mkdir -p out
-          cp dsh-mobile/android/app/build/outputs/apk/release/app-release.apk \
-             "out/dsh-mobile-${{ github.ref_name || format('build{n}', github.run_number) }}.apk"
+          cp dsh-mobile/android/app/build/outputs/apk/release/app-release.apk "out/dsh-pocket-${VERSION}.apk"
+          echo "name=dsh-pocket-${VERSION}.apk" >> "$GITHUB_OUTPUT"
+          ls -lh out/
 
-      - uses: actions/upload-artifact@v4
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
         with:
-          name: apk
+          name: dsh-pocket-apk
           path: out/*.apk
-          retention-days: 14
+          retention-days: 30
 
-      - name: Attach to release
+      - name: Publish release
         if: startsWith(github.ref, 'refs/tags/v')
         uses: softprops/action-gh-release@v2
         with:
           files: out/*.apk
           generate_release_notes: true
+          body: |
+            ## 安装
+
+            1. 下载下面的 `dsh-pocket-*.apk`
+            2. 手机上允许「安装未知来源应用」后安装
+            3. 电脑上运行 `start-dsh-web.ps1` 启动 DSH 服务
+            4. 打开 App 扫码配对
+
+            详细步骤见 [README](https://github.com/xisnn/dsh-pocket#5-分钟上手)。
+
+            > 本 APK 由 GitHub Actions 自动构建。若未配置签名密钥，使用 debug 签名，仅适合个人侧载使用。
