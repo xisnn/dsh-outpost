@@ -1,0 +1,48 @@
+# 依赖
+node_modules/
+package-lock.json.bak
+
+# React Native / Metro
+.metro-health-check*
+*.tsbuildinfo
+dsh-mobile/.bundle/
+
+# Android 构建产物与本机配置
+dsh-mobile/android/.gradle/
+dsh-mobile/android/build/
+dsh-mobile/android/app/build/
+dsh-mobile/android/local.properties
+dsh-mobile/android/.cxx/
+*.apk
+*.aab
+*.jks
+*.keystore
+!dsh-mobile/android/app/debug.keystore
+release.keystore
+
+# iOS
+dsh-mobile/ios/Pods/
+dsh-mobile/ios/build/
+dsh-mobile/ios/**/xcuserdata/
+
+# 本机临时产物
+_extract/
+probes/_*
+probes/pairing-qr.png
+*.log
+.DS_Store
+Thumbs.db
+*.swp
+
+# 含本机真实数据的截图，不发布（仅本地参考）
+docs/screenshots-local/
+
+# 编辑器
+.vscode/
+.idea/
+
+# 与本 App 无关的本机工具
+share/
+
+# 开发期调试脚本（写死了本机环境，不发布）
+probes/

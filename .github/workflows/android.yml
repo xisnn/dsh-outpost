@@ -1,0 +1,83 @@
+name: Android APK
+
+on:
+  push:
+    tags:
+      - 'v*'
+  workflow_dispatch:
+    inputs:
+      version_name:
+        description: '版本名（如 1.0.0），留空则用 run number'
+        required: false
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+          cache-dependency-path: dsh-mobile/package-lock.json
+
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: 21
+
+      - uses: android-actions/setup-android@v3
+
+      - name: Install dependencies
+        working-directory: dsh-mobile
+        run: npm ci
+
+      - name: Unit tests
+        working-directory: dsh-mobile
+        run: npm test
+
+      - name: Build release APK
+        working-directory: dsh-mobile/android
+        env:
+          # 未配置签名密钥时回退到 debug 签名（能装、不能上架）
+          DSH_KEYSTORE_BASE64: ${{ secrets.KEYSTORE_BASE64 }}
+          DSH_KEYSTORE_PASSWORD: ${{ secrets.KEYSTORE_PASSWORD }}
+          DSH_KEY_ALIAS: ${{ secrets.KEY_ALIAS }}
+          DSH_KEY_PASSWORD: ${{ secrets.KEY_PASSWORD }}
+        run: |
+          chmod +x gradlew
+          if [ -n "$DSH_KEYSTORE_BASE64" ]; then
+            echo "使用仓库配置的签名密钥"
+            echo "$DSH_KEYSTORE_BASE64" | base64 -d > app/release.keystore
+            ./gradlew assembleRelease \
+              -PDSH_STORE_FILE=app/release.keystore \
+              -PDSH_STORE_PASSWORD="$DSH_KEYSTORE_PASSWORD" \
+              -PDSH_KEY_ALIAS="$DSH_KEY_ALIAS" \
+              -PDSH_KEY_PASSWORD="$DSH_KEY_PASSWORD"
+          else
+            echo "没有配置签名密钥，使用 debug 签名构建"
+            ./gradlew assembleRelease
+          fi
+
+      - name: Rename APK
+        run: |
+          mkdir -p out
+          cp dsh-mobile/android/app/build/outputs/apk/release/app-release.apk \
+             "out/dsh-mobile-${{ github.ref_name || format('build{n}', github.run_number) }}.apk"
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: apk
+          path: out/*.apk
+          retention-days: 14
+
+      - name: Attach to release
+        if: startsWith(github.ref, 'refs/tags/v')
+        uses: softprops/action-gh-release@v2
+        with:
+          files: out/*.apk
+          generate_release_notes: true

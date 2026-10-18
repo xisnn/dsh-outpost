@@ -1,0 +1,2769 @@
+{
+ "permission/preset": [
+  {
+   "seq": 0,
+   "time": 1792252401551,
+   "data": {
+    "preset": "workspace-write"
+   }
+  },
+  {
+   "seq": 63,
+   "time": 1792252552078,
+   "data": {
+    "preset": "danger-full-access"
+   }
+  }
+ ],
+ "sandbox/mode": [
+  {
+   "seq": 1,
+   "time": 1792252401552,
+   "data": {
+    "mode": "workspace-write"
+   }
+  },
+  {
+   "seq": 64,
+   "time": 1792252552079,
+   "data": {
+    "mode": "danger-full-access"
+   }
+  }
+ ],
+ "approval/policy": [
+  {
+   "seq": 2,
+   "time": 1792252401552,
+   "data": {
+    "policy": "ask"
+   }
+  },
+  {
+   "seq": 65,
+   "time": 1792252552080,
+   "data": {
+    "policy": "never"
+   }
+  }
+ ],
+ "agent/inbox/spliced": [
+  {
+   "seq": 3,
+   "time": 1792252496461,
+   "data": {
+    "target": "next-turn",
+    "start": 0,
+    "inserted": [
+     {
+      "content": [
+       "示例文本"
+      ],
+      "source": {
+       "kind": "user",
+       "rpcId": "65cb72e3-04ef-4a97-8d92-0e07b0f79da6",
+       "clientTimeZone": "Asia/Tokyo"
+      },
+      "role": "user",
+      "id": "320f2f0d-60c6-45be-b2f5-b28fbe800412"
+     }
+    ]
+   }
+  },
+  {
+   "seq": 5,
+   "time": 1792252496471,
+   "data": {
+    "target": "next-turn",
+    "start": 0,
+    "removedCount": 1,
+    "inserted": []
+   }
+  }
+ ],
+ "turn/start": [
+  {
+   "seq": 4,
+   "time": 1792252496464,
+   "data": {
+    "turn": 1
+   }
+  },
+  {
+   "seq": 829,
+   "time": 1792255103931,
+   "data": {
+    "turn": 2
+   }
+  }
+ ],
+ "step/start": [
+  {
+   "seq": 6,
+   "time": 1792252496560,
+   "data": {
+    "turn": 1,
+    "step": 1
+   }
+  },
+  {
+   "seq": 25,
+   "time": 1792252503984,
+   "data": {
+    "turn": 1,
+    "step": 2
+   }
+  }
+ ],
+ "system/message": [
+  {
+   "seq": 7,
+   "time": 1792252496566,
+   "data": {
+    "turn": 1,
+    "step": 1,
+    "message": {
+     "role": "system",
+     "content": [
+      "示例文本"
+     ],
+     "source": {
+      "kind": "system-prompt"
+     },
+     "id": "fb4533ee-4be1-4405-b02f-e993c8d75d18"
+    }
+   }
+  }
+ ],
+ "user/message": [
+  {
+   "seq": 8,
+   "time": 1792252496568,
+   "data": {
+    "content": [
+     "示例文本"
+    ],
+    "source": {
+     "kind": "user",
+     "rpcId": "65cb72e3-04ef-4a97-8d92-0e07b0f79da6",
+     "clientTimeZone": "Asia/Tokyo"
+    },
+    "role": "user",
+    "id": "320f2f0d-60c6-45be-b2f5-b28fbe800412"
+   }
+  },
+  {
+   "seq": 9,
+   "time": 1792252496575,
+   "data": {
+    "content": [
+     "示例文本"
+    ],
+    "source": {
+     "kind": "runtime-context",
+     "form": "snapshot",
+     "sections": [
+      {
+       "name": "示例文本",
+       "text": "C:\\\\workspace\\\\demo"
+      },
+      {
+       "name": "示例文本",
+       "text": "C:\\\\workspace\\\\demo"
+      },
+      {
+       "name": "示例文本",
+       "text": "示例文本"
+      },
+      {
+       "name": "示例文本",
+       "text": "示例文本"
+      },
+      {
+       "name": "示例文本",
+       "text": "C:\\\\workspace\\\\demo"
+      },
+      {
+       "name": "示例文本",
+       "text": "示例文本"
+      }
+     ]
+    },
+    "role": "user",
+    "id": "58783a90-bb73-4a8e-926e-85dcc714ccf9"
+   }
+  }
+ ],
+ "request/header": [
+  {
+   "seq": 12,
+   "time": 1792252496579,
+   "data": {
+    "header": {
+     "config": {
+      "provider": "magpie",
+      "model": "group/auto-deepseek-v4-1-flash",
+      "reasoningEffort": "high",
+      "maxTokens": 128000
+     },
+     "adapterDefaults": {
+      "maxTokens": true
+     },
+     "tools": [
+      {
+       "name": "示例文本",
+       "description": "示例文本",
+       "parameters": {
+        "type": "object",
+        "properties": {
+         "questions": {
+          "type": "array",
+          "description": "示例文本",
+          "items": {
+           "type": "object",
+           "additionalProperties": true,
+           "properties": {
+            "id": {
+             "type": "string",
+             "description": "示例文本"
+            },
+            "question": {
+             "type": "string",
+             "description": "示例文本"
+            },
+            "header": {
+             "type": "string",
+             "description": "示例文本"
+            },
+            "options": {
+             "type": "array",
+             "description": "示例文本",
+             "items": {
+              "type": "object",
+              "additionalProperties": true,
+              "properties": {
+               "label": {
+                "type": "string",
+                "description": "示例文本"
+               },
+               "description": {
+                "type": "string",
+                "description": "示例文本"
+               }
+              },
+              "required": [
+               "label"
+              ]
+             }
+            },
+            "multi_select": {
+             "type": "boolean",
+             "description": "示例文本"
+            }
+           },
+           "required": [
+            "id",
+            "question"
+           ]
+          }
+         }
+        },
+        "required": [
+         "questions"
+        ]
+       }
+      },
+      {
+       "name": "示例文本",
+       "description": "示例文本",
+       "parameters": {
+        "type": "object",
+        "properties": {
+         "objective": {
+          "type": "string",
+          "description": "示例文本"
+         },
+         "max_goal_rounds": {
+          "type": "number",
+          "description": "示例文本"
+         }
+        },
+        "required": [
+         "objective"
+        ]
+       }
+      },
+      {
+       "name": "示例文本",
+       "description": "示例文本",
+       "parameters": {
+        "type": "object",
+        "properties": {
+         "file_path": {
+          "type": "string",
+          "description": "示例文本"
+         },
+         "old_string": {
+          "type": "string",
+          "description": "示例文本"
+         },
+         "new_string": {
+          "type": "string",
+          "description": "示例文本"
+         },
+         "replace_all": {
+          "type": "boolean",
+          "description": "示例文本"
+         },
+         "sandbox_permissions": {
+          "type": "string",
+          "description": "示例文本",
+          "enum": [
+           "workspace-write",
+           "danger-full-access"
+          ]
+         },
+         "justification": {
+          "type": "string",
+          "description": "示例文本"
+         }
+        },
+        "required": [
+         "file_path",
+         "old_string",
+         "new_string"
+        ]
+       }
+      },
+      {
+       "name": "示例文本",
+       "description": "示例文本",
+       "parameters": {
+        "type": "object",
+        "properties": {
+         "plan": {
+          "type": "string",
+          "description": "示例文本"
+         }
+        },
+        "required": [
+         "plan"
+        ]
+       }
+      },
+      {
+       "name": "示例文本",
+       "description": "示例文本",
+       "parameters": {
+        "type": "object",
+        "properties": {}
+       }
+      },
+      {
+       "name": "示例文本",
+       "description": "示例文本",
+       "parameters": {
+        "type": "object",
+        "properties": {
+         "pattern": {
+          "type": "string",
+          "description": "示例文本"
+         },
+         "path": {
+          "type": "string",
+          "description": "示例文本"
+         }
+        },
+        "required": [
+         "pattern"
+        ]
+       }
+      },
+      {
+       "name": "示例文本",
+       "description": "示例文本",
+       "parameters": {
+        "type": "object",
+        "properties": {
+         "pattern": {
+          "type": "string",
+          "description": "示例文本"
+         },
+         "path": {
+          "type": "string",
+          "description": "示例文本"
+         },
+         "include": {
+          "type": "string",
+          "description": "示例文本"
+         }
+        },
+        "required": [
+         "pattern"
+        ]
+       }
+      },
+      {
+       "name": "示例文本",
+       "description": "示例文本",
+       "parameters": {
+        "type": "object",
+        "properties": {
+         "target": {
+          "type": "string",
+          "description": "示例文本"
+         }
+        },
+        "required": [
+         "target"
+        ]
+       }
+      },
+      {
+       "name": "示例文本",
+       "description": "示例文本",
+       "parameters": {
+        "type": "object",
+        "properties": {
+         "job_id": {
+          "type": "string",
+          "description": "示例文本"
+         },
+         "reason": {
+          "type": "string",
+          "description": "示例文本"
+         }
+        },
+        "required": [
+         "job_id"
+        ]
+       }
+      },
+      {
+       "name": "示例文本",
+       "description": "示例文本",
+       "parameters": {
+        "type": "object",
+        "properties": {}
+       }
+      },
+      {
+       "name": "示例文本",
+       "description": "示例文本",
+       "parameters": {
+        "type": "object",
+        "properties": {
+         "job_id": {
+          "type": "string",
+          "description": "示例文本"
+         },
+         "wait": {
+          "type": "boolean",
+          "description": "示例文本"
+         },
+         "timeout_ms": {
+          "type": "number",
+          "description": "示例文本"
+         }
+        },
+        "required": [
+         "job_id"
+        ]
+       }
+      },
+      {
+       "name": "示例文本",
+       "description": "示例文本",
+       "parameters": {
+        "type": "object",
+        "properties": {}
+       }
+      },
+      {
+       "name": "示例文本",
+       "description": "示例文本",
+       "parameters": {
+        "type": "object",
+        "properties": {}
+       }
+      },
+      {
+       "name": "示例文本",
+       "description": "示例文本",
+       "parameters": {
+        "type": "object",
+        "properties": {
+         "files": {
+          "type": "array",
+          "description": "示例文本",
+          "items": {
+           "type": "object",
+           "additionalProperties": false,
+           "properties": {
+            "path": {
+             "type": "string",
+             "description": "示例文本"
+            },
+            "description": {
+             "type": "string",
+             "description": "示例文本"
+            }
+           },
+           "required": [
+            "path"
+           ]
+          }
+         }
+        },
+        "required": [
+         "files"
+        ]
+       }
+      },
+      {
+       "name": "示例文本",
+       "description": "C:\\\\workspace\\\\demo",
+       "parameters": {
+        "type": "object",
+        "properties": {
+         "description": {
+          "type": "string",
+          "description": "示例文本"
+         },
+         "command": {
+          "type": "string",
+          "description": "示例文本"
+         },
+         "timeoutMs": {
+          "type": "number",
+          "description": "示例文本"
+         },
+         "workdir": {
+          "type": "string",
+          "description": "示例文本"
+         },
+         "run_in_background": {
+          "type": "boolean",
+          "description": "示例文本"
+         },
+         "sandbox_permissions": {
+          "type": "string",
+          "description": "示例文本",
+          "enum": [
+           "workspace-write",
+           "danger-full-access"
+          ]
+         },
+         "justification": {
+          "type": "string",
+          "description": "示例文本"
+         }
+        },
+        "required": [
+         "description",
+         "command"
+        ]
+       }
+      },
+      {
+       "name": "示例文本",
+       "description": "示例文本",
+       "parameters": {
+        "type": "object",
+        "properties": {
+         "file_path": {
+          "type": "string",
+          "description": "示例文本"
+         },
+         "offset": {
+          "type": "number",
+          "description": "示例文本"
+         },
+         "limit": {
+          "type": "number",
+          "description": "示例文本"
+         }
+        },
+        "required": [
+         "file_path"
+        ]
+       }
+      },
+      {
+       "name": "示例文本",
+       "description": "示例文本",
+       "parameters": {
+        "type": "object",
+        "properties": {
+         "file_path": {
+          "type": "string",
+          "description": "示例文本"
+         }
+        },
+        "required": [
+         "file_path"
+        ]
+       }
+      },
+      {
+       "name": "示例文本",
+       "description": "示例文本",
+       "parameters": {
+        "type": "object",
+        "properties": {
+         "prompt": {
+          "type": "string",
+          "description": "示例文本"
+         },
+         "title": {
+          "type": "string",
+          "description": "示例文本"
+         },
+         "after_seconds": {
+          "type": "number",
+          "description": "示例文本"
+         },
+         "every_seconds": {
+          "type": "number",
+          "description": "示例文本"
+         },
+         "daily": {
+          "type": "object",
+          "description": "示例文本",
+          "additionalProperties": false,
+          "properties": {
+           "time": {
+            "type": "string",
+            "description": "示例文本"
+           },
+           "time_zone": {
+            "type": "string",
+            "description": "示例文本"
+           }
+          },
+          "required": [
+           "time",
+           "time_zone"
+          ]
+         },
+         "weekly": {
+          "type": "object",
+          "description": "示例文本",
+          "additionalProperties": false,
+          "properties": {
+           "time": {
+            "type": "string",
+            "description": "示例文本"
+           },
+           "time_zone": {
+            "type": "string",
+            "description": "示例文本"
+           },
+           "weekdays": {
+            "type": "array",
+            "description": "示例文本",
+            "items": {
+             "type": "integer"
+            }
+           }
+          },
+          "required": [
+           "time",
+           "time_zone",
+           "weekdays"
+          ]
+         },
+         "cron": {
+          "type": "object",
+          "description": "示例文本",
+          "additionalProperties": false,
+          "properties": {
+           "expression": {
+            "type": "string",
+            "description": "示例文本"
+           },
+           "time_zone": {
+            "type": "string",
+            "description": "示例文本"
+           }
+          },
+          "required": [
+           "expression",
+           "time_zone"
+          ]
+         },
+         "at": {
+          "oneOf": [
+           {
+            "type": "string"
+           },
+           {
+            "type": "object",
+            "additionalProperties": false,
+            "properties": {
+             "date": {
+              "type": "string"
+             },
+             "time": {
+              "type": "string"
+             },
+             "time_zone": {
+              "type": "string"
+             }
+            },
+            "required": [
+             "date",
+             "time",
+             "time_zone"
+            ]
+           }
+          ],
+          "description": "示例文本"
+         }
+        },
+        "required": [
+         "prompt",
+         "title"
+        ]
+       }
+      },
+      {
+       "name": "示例文本",
+       "description": "示例文本",
+       "parameters": {
+        "type": "object",
+        "properties": {
+         "id": {
+          "type": "string",
+          "description": "示例文本"
+         }
+        },
+        "required": [
+         "id"
+        ]
+       }
+      },
+      {
+       "name": "示例文本",
+       "description": "示例文本",
+       "parameters": {
+        "type": "object",
+        "properties": {}
+       }
+      },
+      {
+       "name": "示例文本",
+       "description": "示例文本",
+       "parameters": {
+        "type": "object",
+        "properties": {
+         "id": {
+          "type": "string",
+          "description": "示例文本"
+         },
+         "title": {
+          "type": "string",
+          "description": "示例文本"
+         },
+         "prompt": {
+          "type": "string",
+          "description": "示例文本"
+         },
+         "every_seconds": {
+          "type": "number",
+          "description": "示例文本"
+         },
+         "daily": {
+          "type": "object",
+          "description": "示例文本",
+          "additionalProperties": false,
+          "properties": {
+           "time": {
+            "type": "string",
+            "description": "示例文本"
+           },
+           "time_zone": {
+            "type": "string",
+            "description": "示例文本"
+           }
+          },
+          "required": [
+           "time",
+           "time_zone"
+          ]
+         },
+         "weekly": {
+          "type": "object",
+          "description": "示例文本",
+          "additionalProperties": false,
+          "properties": {
+           "time": {
+            "type": "string",
+            "description": "示例文本"
+           },
+           "time_zone": {
+            "type": "string",
+            "description": "示例文本"
+           },
+           "weekdays": {
+            "type": "array",
+            "description": "示例文本",
+            "items": {
+             "type": "integer"
+            }
+           }
+          },
+          "required": [
+           "time",
+           "time_zone",
+           "weekdays"
+          ]
+         },
+         "cron": {
+          "type": "object",
+          "description": "示例文本",
+          "additionalProperties": false,
+          "properties": {
+           "expression": {
+            "type": "string",
+            "description": "示例文本"
+           },
+           "time_zone": {
+            "type": "string",
+            "description": "示例文本"
+           }
+          },
+          "required": [
+           "expression",
+           "time_zone"
+          ]
+         },
+         "at": {
+          "oneOf": [
+           {
+            "type": "string"
+           },
+           {
+            "type": "object",
+            "additionalProperties": false,
+            "properties": {
+             "date": {
+              "type": "string"
+             },
+             "time": {
+              "type": "string"
+             },
+             "time_zone": {
+              "type": "string"
+             }
+            },
+            "required": [
+             "date",
+             "time",
+             "time_zone"
+            ]
+           }
+          ],
+          "description": "示例文本"
+         }
+        },
+        "required": [
+         "id"
+        ]
+       }
+      },
+      {
+       "name": "示例文本",
+       "description": "示例文本",
+       "parameters": {
+        "type": "object",
+        "properties": {
+         "target": {
+          "type": "string",
+          "description": "示例文本"
+         },
+         "message": {
+          "type": "string",
+          "description": "示例文本"
+         }
+        },
+        "required": [
+         "target",
+         "message"
+        ]
+       }
+      },
+      {
+       "name": "示例文本",
+       "description": "示例文本",
+       "parameters": {
+        "type": "object",
+        "properties": {
+         "name": {
+          "type": "string",
+          "description": "示例文本"
+         }
+        },
+        "required": [
+         "name"
+        ]
+       }
+      },
+      {
+       "name": "示例文本",
+       "description": "示例文本",
+       "parameters": {
+        "type": "object",
+        "properties": {
+         "name": {
+          "type": "string",
+          "description": "示例文本"
+         },
+         "description": {
+          "type": "string",
+          "description": "示例文本"
+         },
+         "prompt": {
+          "type": "string",
+          "description": "示例文本"
+         },
+         "context": {
+          "type": "string",
+          "description": "示例文本",
+          "enum": [
+           "fresh",
+           "fork"
+          ]
+         }
+        },
+        "required": [
+         "name",
+         "description",
+         "prompt"
+        ]
+       }
+      },
+      {
+       "name": "示例文本",
+       "description": "示例文本",
+       "parameters": {
+        "type": "object",
+        "properties": {
+         "cwd": {
+          "type": "string",
+          "description": "示例文本"
+         },
+         "description": {
+          "type": "string",
+          "description": "示例文本"
+         },
+         "prompt": {
+          "type": "string",
+          "description": "示例文本"
+         }
+        },
+        "required": [
+         "description",
+         "prompt"
+        ]
+       }
+      },
+      {
+       "name": "示例文本",
+       "description": "示例文本",
+       "parameters": {
+        "type": "object",
+        "properties": {
+         "cwd": {
+          "type": "string",
+          "description": "示例文本"
+         },
+         "description": {
+          "type": "string",
+          "description": "示例文本"
+         },
+         "prompt": {
+          "type": "string",
+          "description": "示例文本"
+         }
+        },
+        "required": [
+         "description",
+         "prompt"
+        ]
+       }
+      },
+      {
+       "name": "示例文本",
+       "description": "示例文本",
+       "parameters": {
+        "type": "object",
+        "properties": {
+         "subject": {
+          "type": "string",
+          "description": "示例文本"
+         },
+         "description": {
+          "type": "string",
+          "description": "示例文本"
+         },
+         "blocked_by": {
+          "type": "array",
+          "description": "示例文本",
+          "items": {
+           "type": "string"
+          }
+         },
+         "write_scopes": {
+          "type": "array",
+          "description": "示例文本",
+          "items": {
+           "type": "string"
+          }
+         }
+        },
+        "required": [
+         "subject",
+         "description"
+        ]
+       }
+      },
+      {
+       "name": "示例文本",
+       "description": "示例文本",
+       "parameters": {
+        "type": "object",
+        "properties": {
+         "task_id": {
+          "type": "string",
+          "description": "示例文本"
+         }
+        },
+        "required": [
+         "task_id"
+        ]
+       }
+      },
+      {
+       "name": "示例文本",
+       "description": "示例文本",
+       "parameters": {
+        "type": "object",
+        "properties": {
+         "status": {
+          "type": "string",
+          "description": "示例文本",
+          "enum": [
+           "pending",
+           "in_progress",
+           "completed"
+          ]
+         },
+         "owner": {
+          "type": "string",
+          "description": "示例文本"
+         },
+         "ready": {
+          "type": "boolean",
+          "description": "示例文本"
+         },
+         "cursor": {
+          "type": "integer",
+          "description": "示例文本"
+         },
+         "limit": {
+          "type": "integer",
+          "description": "示例文本"
+         }
+        }
+       }
+      },
+      {
+       "name": "示例文本",
+       "description": "示例文本",
+       "parameters": {
+        "type": "object",
+        "properties": {
+         "task_id": {
+          "type": "string",
+          "description": "示例文本"
+         },
+         "expected_revision": {
+          "type": "integer",
+          "description": "示例文本"
+         },
+         "action": {
+          "type": "string",
+          "description": "示例文本",
+          "enum": [
+           "claim",
+           "release",
+           "edit",
+           "set_dependencies",
+           "complete",
+           "reopen",
+           "reassign",
+           "delete"
+          ]
+         },
+         "subject": {
+          "type": "string",
+          "description": "示例文本"
+         },
+         "description": {
+          "type": "string",
+          "description": "示例文本"
+         },
+         "blocked_by": {
+          "type": "array",
+          "description": "示例文本",
+          "items": {
+           "type": "string"
+          }
+         },
+         "write_scopes": {
+          "type": "array",
+          "description": "示例文本",
+          "items": {
+           "type": "string"
+          }
+         },
+         "owner": {
+          "type": "string",
+          "description": "示例文本"
+         }
+        },
+        "required": [
+         "task_id",
+         "expected_revision",
+         "action"
+        ]
+       }
+      },
+      {
+       "name": "示例文本",
+       "description": "示例文本",
+       "parameters": {
+        "type": "object",
+        "properties": {
+         "todos": {
+          "type": "array",
+          "description": "示例文本",
+          "items": {
+           "type": "object",
+           "additionalProperties": false,
+           "properties": {
+            "content": {
+             "type": "string",
+             "description": "示例文本"
+            },
+            "status": {
+             "type": "string",
+             "description": "示例文本",
+             "enum": [
+              "pending",
+              "in_progress",
+              "completed"
+             ]
+            }
+           },
+           "required": [
+            "content",
+            "status"
+           ]
+          }
+         }
+        },
+        "required": [
+         "todos"
+        ]
+       }
+      },
+      {
+       "name": "示例文本",
+       "description": "示例文本",
+       "parameters": {
+        "type": "object",
+        "properties": {
+         "goal_id": {
+          "type": "string",
+          "description": "示例文本"
+         },
+         "revision": {
+          "type": "number",
+          "description": "示例文本"
+         },
+         "action": {
+          "type": "string",
+          "description": "示例文本",
+          "enum": [
+           "edit",
+           "pause",
+           "resume",
+           "complete",
+           "blocked"
+          ]
+         },
+         "objective": {
+          "type": "string",
+          "description": "示例文本"
+         },
+         "max_goal_rounds": {
+          "type": "number",
+          "description": "示例文本"
+         },
+         "blocked_reason": {
+          "type": "string",
+          "description": "示例文本"
+         }
+        },
+        "required": [
+         "goal_id",
+         "revision",
+         "action"
+        ]
+       }
+      },
+      {
+       "name": "示例文本",
+       "description": "示例文本",
+       "parameters": {
+        "type": "object",
+        "properties": {
+         "timeout_ms": {
+          "type": "integer",
+          "description": "示例文本"
+         }
+        }
+       }
+      },
+      {
+       "name": "示例文本",
+       "description": "示例文本",
+       "parameters": {
+        "type": "object",
+        "properties": {
+         "url": {
+          "type": "string",
+          "description": "示例文本"
+         }
+        },
+        "required": [
+         "url"
+        ]
+       }
+      },
+      {
+       "name": "示例文本",
+       "description": "示例文本",
+       "parameters": {
+        "type": "object",
+        "properties": {
+         "queries": {
+          "type": "array",
+          "description": "示例文本",
+          "items": {
+           "type": "string"
+          }
+         }
+        },
+        "required": [
+         "queries"
+        ]
+       }
+      },
+      {
+       "name": "示例文本",
+       "description": "示例文本",
+       "parameters": {
+        "type": "object",
+        "properties": {
+         "script": {
+          "type": "string",
+          "description": "示例文本"
+         },
+         "meta": {
+          "type": "object",
+          "description": "示例文本",
+          "additionalProperties": true,
+          "properties": {
+           "name": {
+            "type": "string",
+            "description": "示例文本"
+           },
+           "description": {
+            "type": "string",
+            "description": "示例文本"
+           },
+           "whenToUse": {
+            "type": "string",
+            "description": "示例文本"
+           },
+           "phases": {
+            "type": "array",
+            "description": "示例文本",
+            "items": {
+             "type": "object",
+             "additionalProperties": true,
+             "properties": {
+              "title": {
+               "type": "string",
+               "description": "示例文本"
+              },
+              "detail": {
+               "type": "string",
+               "description": "示例文本"
+              },
+              "provider": {
+               "type": "string",
+               "description": "示例文本"
+              },
+              "model": {
+               "type": "string",
+               "description": "示例文本"
+              }
+             },
+             "required": [
+              "title"
+             ]
+            }
+           }
+          },
+          "required": [
+           "name",
+           "description"
+          ]
+         },
+         "args": {
+          "type": "object",
+          "description": "示例文本",
+          "additionalProperties": true
+         },
+         "run_in_background": {
+          "type": "boolean",
+          "description": "示例文本"
+         }
+        },
+        "required": [
+         "script",
+         "meta"
+        ]
+       }
+      },
+      {
+       "name": "示例文本",
+       "description": "示例文本",
+       "parameters": {
+        "type": "object",
+        "properties": {
+         "cd": {
+          "type": "string",
+          "description": "示例文本"
+         }
+        }
+       }
+      },
+      {
+       "name": "示例文本",
+       "description": "示例文本",
+       "parameters": {
+        "type": "object",
+        "properties": {
+         "file_path": {
+          "type": "string",
+          "description": "示例文本"
+         },
+         "content": {
+          "type": "string",
+          "description": "示例文本"
+         },
+         "sandbox_permissions": {
+          "type": "string",
+          "description": "示例文本",
+          "enum": [
+           "workspace-write",
+           "danger-full-access"
+          ]
+         },
+         "justification": {
+          "type": "string",
+          "description": "示例文本"
+         }
+        },
+        "required": [
+         "file_path",
+         "content"
+        ]
+       }
+      }
+     ]
+    },
+    "reason": "示例文本"
+   }
+  }
+ ],
+ "request/context": [
+  {
+   "seq": 13,
+   "time": 1792252496584,
+   "data": {
+    "provider": "magpie",
+    "model": "group/auto-deepseek-v4-1-flash",
+    "contextWindow": 1000000
+   }
+  }
+ ],
+ "session/title": [
+  {
+   "seq": 14,
+   "time": 1792252496594,
+   "data": {
+    "title": "示例文本",
+    "messageSeqs": [
+     8
+    ],
+    "source": {
+     "kind": "fallback"
+    }
+   }
+  },
+  {
+   "seq": 16,
+   "time": 1792252502494,
+   "data": {
+    "title": "示例文本",
+    "messageSeqs": [
+     8
+    ],
+    "source": {
+     "kind": "provider",
+     "provider": "session-title-first-prompt-llm",
+     "model": {
+      "provider": "magpie",
+      "model": "group/auto-deepseek-v4-1-flash"
+     }
+    }
+   }
+  }
+ ],
+ "session/title-llm-request": [
+  {
+   "seq": 15,
+   "time": 1792252496602,
+   "data": {
+    "titleProvider": "session-title-first-prompt-llm",
+    "messageSeqs": [
+     8
+    ],
+    "route": {
+     "provider": "magpie",
+     "model": "group/auto-deepseek-v4-1-flash"
+    },
+    "system": "示例文本",
+    "messages": [
+     {
+      "content": [
+       "示例文本"
+      ],
+      "source": {
+       "kind": "dsh-session-title-llm"
+      },
+      "role": "user",
+      "id": "e16ab683-9b70-4cea-a001-1b1d8907cc01"
+     }
+    ],
+    "maxTokens": 4096,
+    "reasoningEffort": "low"
+   }
+  }
+ ],
+ "assistant/message": [
+  {
+   "seq": 17,
+   "time": 1792252503815,
+   "data": {
+    "turn": 1,
+    "step": 1,
+    "message": {
+     "role": "assistant",
+     "content": [
+      "示例文本",
+      "示例文本",
+      "示例文本"
+     ],
+     "source": {
+      "kind": "model",
+      "provider": "magpie",
+      "model": "group/auto-deepseek-v4-1-flash",
+      "replayState": {
+       "response": {
+        "kind": "pi-ai",
+        "version": 2,
+        "api": "openai-completions",
+        "provider": "magpie",
+        "model": "group/auto-deepseek-v4-1-flash",
+        "responseModel": "deepseek-v4.1-flash",
+        "responseId": "ff79205e8715b587088a0817922f87a0",
+        "stopReason": "toolUse"
+       },
+       "blocks": [
+        {
+         "type": "reasoning",
+         "thinkingSignature": "reasoning_content"
+        },
+        {
+         "type": "tool-call"
+        },
+        {
+         "type": "tool-call"
+        }
+       ]
+      }
+     },
+     "id": "3558b447-ff84-4b2a-bc9e-b428a934629e"
+    },
+    "usage": {
+     "inputTokens": 10764,
+     "outputTokens": 476,
+     "totalTokens": 11240
+    },
+    "stream": [
+     {
+      "type": "chunk",
+      "time": 1792252501700,
+      "chunk": {
+       "type": "block-start",
+       "index": 0,
+       "blockType": "reasoning"
+      }
+     },
+     {
+      "type": "reasoning-chunks",
+      "time0": 1792252501702,
+      "index": 0,
+      "dt": [
+       199,
+       2,
+       0,
+       1,
+       0,
+       0,
+       0,
+       0,
+       0,
+       0,
+       0,
+       0,
+       0,
+       1,
+       1,
+       0,
+       0,
+       0,
+       0,
+       0,
+       0,
+       0,
+       0,
+       0,
+       1,
+       0,
+       0,
+       0,
+       0,
+       0,
+       0,
+       0,
+       0,
+       0,
+       36,
+       2,
+       0,
+       0,
+       0,
+       0,
+       0,
+       0,
+       0,
+       1,
+       89,
+       1,
+       0,
+       0,
+       0,
+       1,
+       0,
+       0,
+       0,
+       0,
+       0,
+       0,
+       0,
+       2,
+       2,
+       0,
+       0,
+       0,
+       0,
+       0,
+       0,
+       0,
+       0,
+       61,
+       1,
+       0,
+       1,
+       0,
+       0,
+       2,
+       1,
+       1,
+       0,
+       0,
+       0,
+       0,
+       0,
+       0,
+       0,
+       0,
+       0,
+       0,
+       0,
+       1,
+       49,
+       1,
+       1,
+       0,
+       0,
+       0,
+       0,
+       55,
+       1,
+       1,
+       0,
+       0,
+       1,
+       1,
+       0,
+       0,
+       0,
+       0,
+       27,
+       2,
+       1,
+       0,
+       88,
+       1,
+       0,
+       0,
+       0,
+       0,
+       0,
+       0,
+       0,
+       0,
+       0,
+       0,
+       1,
+       1,
+       1,
+       1,
+       0,
+       0,
+       0,
+       0,
+       0,
+       0,
+       0,
+       0,
+       0,
+       0,
+       0,
+       0,
+       0,
+       0,
+       5,
+       2,
+       0,
+       0,
+       0,
+       0,
+       0,
+       0,
+       1,
+       125,
+       1,
+       0,
+       0,
+       0,
+       0,
+       0,
+       2,
+       0,
+       1,
+       0,
+       0,
+       0,
+       0,
+       0,
+       0,
+       1,
+       0,
+       27,
+       1,
+       1,
+       0,
+       0,
+       0,
+       0,
+       0,
+       0,
+       0,
+       0,
+       0,
+       2,
+       1,
+       1,
+       0,
+       0,
+       0,
+       0,
+       0,
+       40,
+       2,
+       0,
+       0,
+       0,
+       0,
+       1,
+       0,
+       0,
+       0,
+       57,
+       1,
+       0,
+       0,
+       0,
+       0,
+       0,
+       0,
+       0,
+       1,
+       0,
+       0,
+       0,
+       2,
+       1,
+       54,
+       1,
+       1,
+       0,
+       0,
+       0,
+       0,
+       0,
+       0,
+       0,
+       0,
+       0,
+       0,
+       1,
+       1,
+       63,
+       1,
+       1,
+       0,
+       0,
+       0,
+       0,
+       0,
+       0,
+       0,
+       2,
+       1,
+       0,
+       0,
+       107,
+       1,
+       12,
+       0,
+       1,
+       0,
+       0,
+       0,
+       0,
+       0,
+       0,
+       0,
+       0,
+       0,
+       0,
+       3,
+       0,
+       0,
+       0,
+       1,
+       87,
+       1,
+       0,
+       0,
+       0,
+       0,
+       1,
+       0,
+       0,
+       0,
+       0,
+       0,
+       0,
+       2,
+       1,
+       1,
+       0,
+       0,
+       0,
+       0,
+       0,
+       0,
+       0,
+       0,
+       0,
+       0,
+       0,
+       1,
+       0,
+       0,
+       0,
+       0,
+       0,
+       0,
+       0,
+       0,
+       1,
+       0,
+       0,
+       0,
+       0,
+       0,
+       0,
+       0,
+       234,
+       0,
+       1,
+       0,
+       0,
+       0,
+       0,
+       0,
+       0,
+       0,
+       0,
+       1,
+       0,
+       2,
+       1,
+       0,
+       0,
+       0,
+       0,
+       0,
+       0,
+       1,
+       0,
+       0,
+       0,
+       0,
+       0,
+       0,
+       0,
+       0,
+       0,
+       0,
+       0,
+       0,
+       0,
+       0,
+       0,
+       0,
+       0,
+       0,
+       0,
+       1,
+       0,
+       0,
+       0,
+       0,
+       0,
+       0,
+       0,
+       0,
+       0,
+       0,
+       0,
+       0,
+       0,
+       0,
+       74,
+       2,
+       2,
+       0,
+       0,
+       0,
+       0,
+       0,
+       0,
+       0,
+       0,
+       0,
+       0,
+       157,
+       1,
+       0,
+       1,
+       0,
+       0,
+       0,
+       0
+      ],
+      "texts": [
+       "示例文本",
+       "示例文本",
+       "示例文本",
+       "示例文本",
+       "示例文本",
+       "示例文本"
+      ]
+     },
+     {
+      "type": "chunk",
+      "time": 1792252503457,
+      "chunk": {
+       "type": "block-start",
+       "index": 1,
+       "blockType": "tool-call"
+      }
+     },
+     {
+      "type": "tool-call-chunks",
+      "time0": 1792252503458,
+      "index": 1,
+      "dt": [
+       1,
+       0,
+       0,
+       0,
+       0,
+       0,
+       0,
+       0,
+       1,
+       0,
+       2,
+       1,
+       0,
+       0,
+       0,
+       0,
+       2,
+       1,
+       0,
+       0,
+       1,
+       0,
+       0,
+       0,
+       0,
+       0,
+       0,
+       0,
+       0,
+       0,
+       0,
+       0,
+       0,
+       0,
+       0,
+       0,
+       99,
+       0,
+       1,
+       0,
+       1,
+       1,
+       0
+      ],
+      "id": "call_00_xP5Pk5dVTDzaxnyVbzKD6732",
+      "name": "示例文本",
+      "args": [
+       "示例文本",
+       "示例文本",
+       "示例文本",
+       "示例文本",
+       "示例文本",
+       "示例文本"
+      ]
+     },
+     {
+      "type": "chunk",
+      "time": 1792252503569,
+      "chunk": {
+       "type": "block-start",
+       "index": 2,
+       "blockType": "tool-call"
+      }
+     },
+     {
+      "type": "tool-call-chunks",
+      "time0": 1792252503569,
+      "index": 2,
+      "dt": [
+       0
+      ],
+      "id": "call_01_cBzrn0J7wNrbmnCCK6gP9662",
+      "name": "示例文本",
+      "args": [
+       "示例文本",
+       "示例文本"
+      ]
+     },
+     {
+      "type": "chunk",
+      "time": 1792252503812,
+      "chunk": {
+       "type": "block-end",
+       "index": 0,
+       "block": {
+        "type": "reasoning",
+        "text": "C:\\\\workspace\\\\demo"
+       }
+      }
+     },
+     {
+      "type": "chunk",
+      "time": 1792252503813,
+      "chunk": {
+       "type": "block-end",
+       "index": 1,
+       "block": {
+        "type": "tool-call",
+        "id": "call_00_xP5Pk5dVTDzaxnyVbzKD6732",
+        "name": "示例文本",
+        "arguments": "示例文本"
+       }
+      }
+     },
+     {
+      "type": "chunk",
+      "time": 1792252503813,
+      "chunk": {
+       "type": "block-end",
+       "index": 2,
+       "block": {
+        "type": "tool-call",
+        "id": "call_01_cBzrn0J7wNrbmnCCK6gP9662",
+        "name": "示例文本",
+        "arguments": "示例文本"
+       }
+      }
+     },
+     {
+      "type": "chunk",
+      "time": 1792252503813,
+      "chunk": {
+       "type": "usage",
+       "usage": {
+        "inputTokens": 10764,
+        "outputTokens": 476,
+        "totalTokens": 11240
+       }
+      }
+     },
+     {
+      "type": "chunk",
+      "time": 1792252503813,
+      "chunk": {
+       "type": "finish",
+       "reason": {
+        "kind": "tool-calls"
+       },
+       "replayState": {
+        "response": {
+         "kind": "pi-ai",
+         "version": 2,
+         "api": "openai-completions",
+         "provider": "magpie",
+         "model": "group/auto-deepseek-v4-1-flash",
+         "responseModel": "deepseek-v4.1-flash",
+         "responseId": "ff79205e8715b587088a0817922f87a0",
+         "stopReason": "toolUse"
+        },
+        "blocks": [
+         {
+          "type": "reasoning",
+          "thinkingSignature": "reasoning_content"
+         },
+         {
+          "type": "tool-call"
+         },
+         {
+          "type": "tool-call"
+         }
+        ]
+       }
+      }
+     }
+    ]
+   }
+  },
+  {
+   "seq": 26,
+   "time": 1792252507912,
+   "data": {
+    "turn": 1,
+    "step": 2,
+    "message": {
+     "role": "assistant",
+     "content": [
+      "示例文本",
+      "示例文本"
+     ],
+     "source": {
+      "kind": "model",
+      "provider": "magpie",
+      "model": "group/auto-deepseek-v4-1-flash",
+      "replayState": {
+       "response": {
+        "kind": "pi-ai",
+        "version": 2,
+        "api": "openai-completions",
+        "provider": "magpie",
+        "model": "group/auto-deepseek-v4-1-flash",
+        "responseModel": "deepseek-v4.1-flash",
+        "responseId": "82cf47eb6e8ce89bcef2d41f1624b39e",
+        "stopReason": "toolUse"
+       },
+       "blocks": [
+        {
+         "type": "reasoning",
+         "thinkingSignature": "reasoning_content"
+        },
+        {
+         "type": "tool-call"
+        }
+       ]
+      }
+     },
+     "id": "a541c106-e04a-49b2-8f25-7ac3aac807bd"
+    },
+    "usage": {
+     "inputTokens": 181,
+     "outputTokens": 98,
+     "totalTokens": 11031,
+     "cacheReadTokens": 10752
+    },
+    "stream": [
+     {
+      "type": "chunk",
+      "time": 1792252507199,
+      "chunk": {
+       "type": "block-start",
+       "index": 0,
+       "blockType": "reasoning"
+      }
+     },
+     {
+      "type": "reasoning-chunks",
+      "time0": 1792252507199,
+      "index": 0,
+      "dt": [
+       124,
+       1,
+       1,
+       2,
+       0,
+       0,
+       0,
+       0,
+       0,
+       0,
+       0,
+       99,
+       1,
+       0,
+       0,
+       0,
+       0,
+       0,
+       0,
+       0,
+       0,
+       0,
+       1,
+       0,
+       2,
+       2,
+       0,
+       0,
+       0,
+       0,
+       0,
+       0,
+       0,
+       0,
+       1,
+       0,
+       0,
+       0,
+       0,
+       0,
+       0,
+       14,
+       0,
+       1,
+       0,
+       0,
+       0,
+       0,
+       0,
+       0,
+       0,
+       0
+      ],
+      "texts": [
+       "示例文本",
+       "示例文本",
+       "示例文本",
+       "示例文本",
+       "示例文本",
+       "示例文本"
+      ]
+     },
+     {
+      "type": "chunk",
+      "time": 1792252507537,
+      "chunk": {
+       "type": "block-start",
+       "index": 1,
+       "blockType": "tool-call"
+      }
+     },
+     {
+      "type": "tool-call-chunks",
+      "time0": 1792252507538,
+      "index": 1,
+      "dt": [
+       0,
+       0,
+       0,
+       0,
+       132,
+       1,
+       0,
+       1,
+       0,
+       0,
+       0,
+       0,
+       0,
+       0,
+       0,
+       2,
+       1
+      ],
+      "id": "call_00_YO9v2hfSNLwCmGl5eEqQ9363",
+      "name": "示例文本",
+      "args": [
+       "示例文本",
+       "示例文本",
+       "示例文本",
+       "示例文本",
+       "示例文本",
+       "示例文本"
+      ]
+     },
+     {
+      "type": "chunk",
+      "time": 1792252507911,
+      "chunk": {
+       "type": "block-end",
+       "index": 0,
+       "block": {
+        "type": "reasoning",
+        "text": "C:\\\\workspace\\\\demo"
+       }
+      }
+     },
+     {
+      "type": "chunk",
+      "time": 1792252507911,
+      "chunk": {
+       "type": "block-end",
+       "index": 1,
+       "block": {
+        "type": "tool-call",
+        "id": "call_00_YO9v2hfSNLwCmGl5eEqQ9363",
+        "name": "示例文本",
+        "arguments": "示例文本"
+       }
+      }
+     },
+     {
+      "type": "chunk",
+      "time": 1792252507911,
+      "chunk": {
+       "type": "usage",
+       "usage": {
+        "inputTokens": 181,
+        "outputTokens": 98,
+        "totalTokens": 11031,
+        "cacheReadTokens": 10752
+       }
+      }
+     },
+     {
+      "type": "chunk",
+      "time": 1792252507911,
+      "chunk": {
+       "type": "finish",
+       "reason": {
+        "kind": "tool-calls"
+       },
+       "replayState": {
+        "response": {
+         "kind": "pi-ai",
+         "version": 2,
+         "api": "openai-completions",
+         "provider": "magpie",
+         "model": "group/auto-deepseek-v4-1-flash",
+         "responseModel": "deepseek-v4.1-flash",
+         "responseId": "82cf47eb6e8ce89bcef2d41f1624b39e",
+         "stopReason": "toolUse"
+        },
+        "blocks": [
+         {
+          "type": "reasoning",
+          "thinkingSignature": "reasoning_content"
+         },
+         {
+          "type": "tool-call"
+         }
+        ]
+       }
+      }
+     }
+    ]
+   }
+  }
+ ],
+ "tool/call": [
+  {
+   "seq": 18,
+   "time": 1792252503821,
+   "data": {
+    "turn": 1,
+    "step": 1,
+    "callId": "call_00_xP5Pk5dVTDzaxnyVbzKD6732",
+    "name": "示例文本",
+    "arguments": "示例文本"
+   }
+  },
+  {
+   "seq": 22,
+   "time": 1792252503898,
+   "data": {
+    "turn": 1,
+    "step": 1,
+    "callId": "call_01_cBzrn0J7wNrbmnCCK6gP9662",
+    "name": "示例文本",
+    "arguments": "示例文本"
+   }
+  }
+ ],
+ "job/registered": [
+  {
+   "seq": 19,
+   "time": 1792252503858,
+   "data": {
+    "jobId": "pwsh-b20f168717814fe4",
+    "owner": "session-fa17f417-8523-4ebe-ba1c-eaf56017468c",
+    "kind": "pwsh",
+    "label": "示例文本",
+    "startedAt": 1792252503858,
+    "toolCall": {
+     "callId": "call_00_xP5Pk5dVTDzaxnyVbzKD6732",
+     "rootCallId": "call_00_xP5Pk5dVTDzaxnyVbzKD6732"
+    }
+   }
+  },
+  {
+   "seq": 43,
+   "time": 1792252526097,
+   "data": {
+    "jobId": "pwsh-ee7ff55563414810",
+    "owner": "session-fa17f417-8523-4ebe-ba1c-eaf56017468c",
+    "kind": "pwsh",
+    "label": "示例文本",
+    "startedAt": 1792252526097,
+    "toolCall": {
+     "callId": "call_00_0IJPaklGIiFrpDsWTx7h8750",
+     "rootCallId": "call_00_0IJPaklGIiFrpDsWTx7h8750"
+    }
+   }
+  }
+ ],
+ "job/settled": [
+  {
+   "seq": 20,
+   "time": 1792252503890,
+   "data": {
+    "jobId": "pwsh-b20f168717814fe4",
+    "owner": "session-fa17f417-8523-4ebe-ba1c-eaf56017468c",
+    "kind": "pwsh",
+    "label": "示例文本",
+    "startedAt": 1792252503858,
+    "toolCall": {
+     "callId": "call_00_xP5Pk5dVTDzaxnyVbzKD6732",
+     "rootCallId": "call_00_xP5Pk5dVTDzaxnyVbzKD6732"
+    },
+    "finishedAt": 1792252503890,
+    "status": "failed",
+    "cause": "producer",
+    "producerReported": true,
+    "detail": "C:\\\\workspace\\\\demo"
+   }
+  },
+  {
+   "seq": 44,
+   "time": 1792252526107,
+   "data": {
+    "jobId": "pwsh-ee7ff55563414810",
+    "owner": "session-fa17f417-8523-4ebe-ba1c-eaf56017468c",
+    "kind": "pwsh",
+    "label": "示例文本",
+    "startedAt": 1792252526097,
+    "toolCall": {
+     "callId": "call_00_0IJPaklGIiFrpDsWTx7h8750",
+     "rootCallId": "call_00_0IJPaklGIiFrpDsWTx7h8750"
+    },
+    "finishedAt": 1792252526107,
+    "status": "failed",
+    "cause": "producer",
+    "producerReported": true,
+    "detail": "C:\\\\workspace\\\\demo"
+   }
+  }
+ ],
+ "tool/result": [
+  {
+   "seq": 21,
+   "time": 1792252503896,
+   "data": {
+    "turn": 1,
+    "step": 1,
+    "message": {
+     "role": "tool",
+     "source": {
+      "kind": "tool",
+      "callId": "call_00_xP5Pk5dVTDzaxnyVbzKD6732"
+     },
+     "toolCallId": "call_00_xP5Pk5dVTDzaxnyVbzKD6732",
+     "content": [
+      "示例文本"
+     ],
+     "isError": true,
+     "id": "3c9ea544-1776-4be1-8aca-612ddd9141a4"
+    }
+   }
+  },
+  {
+   "seq": 23,
+   "time": 1792252503917,
+   "data": {
+    "turn": 1,
+    "step": 1,
+    "message": {
+     "role": "tool",
+     "source": {
+      "kind": "tool",
+      "callId": "call_01_cBzrn0J7wNrbmnCCK6gP9662"
+     },
+     "toolCallId": "call_01_cBzrn0J7wNrbmnCCK6gP9662",
+     "content": [
+      "示例文本"
+     ],
+     "isError": false,
+     "id": "44a16bcf-f88e-4d54-9215-0034c6e57d35"
+    }
+   }
+  }
+ ],
+ "step/end": [
+  {
+   "seq": 24,
+   "time": 1792252503919,
+   "data": {
+    "turn": 1,
+    "step": 1
+   }
+  },
+  {
+   "seq": 29,
+   "time": 1792252507941,
+   "data": {
+    "turn": 1,
+    "step": 2
+   }
+  }
+ ],
+ "approval/asked": [
+  {
+   "seq": 52,
+   "time": 1792252537724,
+   "data": {
+    "id": "ca7f840e-25a4-4e73-bf7b-b78835392db1",
+    "toolName": "示例文本",
+    "callId": "call_00_L5bEL63q2avcZvH9N8Gg0690",
+    "reason": "C:\\\\workspace\\\\demo"
+   }
+  }
+ ],
+ "approval/decided": [
+  {
+   "seq": 53,
+   "time": 1792252539939,
+   "data": {
+    "id": "ca7f840e-25a4-4e73-bf7b-b78835392db1",
+    "outcome": "allowed-once"
+   }
+  }
+ ],
+ "command/run": [
+  {
+   "seq": 62,
+   "time": 1792252552076,
+   "data": {
+    "commandId": "cmd-f6ca8ada-1",
+    "name": "示例文本",
+    "args": "示例文本",
+    "source": {
+     "kind": "user"
+    }
+   }
+  }
+ ],
+ "command/done": [
+  {
+   "seq": 67,
+   "time": 1792252552084,
+   "data": {
+    "commandId": "cmd-f6ca8ada-1",
+    "kind": "success",
+    "text": "示例文本"
+   }
+  }
+ ],
+ "team/member": [
+  {
+   "seq": 404,
+   "time": 1792252922313,
+   "data": {
+    "version": 2,
+    "teamId": "session-fa17f417-8523-4ebe-ba1c-eaf56017468c",
+    "member": {
+     "id": "e0ff0060-8130-4d12-b415-90c82c81a37a",
+     "name": "示例文本",
+     "description": "示例文本",
+     "provider": "spawn",
+     "context": "fresh",
+     "phase": "provisioning"
+    }
+   }
+  },
+  {
+   "seq": 406,
+   "time": 1792252922603,
+   "data": {
+    "version": 2,
+    "teamId": "session-fa17f417-8523-4ebe-ba1c-eaf56017468c",
+    "member": {
+     "id": "e0ff0060-8130-4d12-b415-90c82c81a37a",
+     "name": "示例文本",
+     "description": "示例文本",
+     "provider": "spawn",
+     "context": "fresh",
+     "phase": "active"
+    }
+   }
+  }
+ ],
+ "subagent/catalog": [
+  {
+   "seq": 405,
+   "time": 1792252922502,
+   "data": {
+    "version": 0,
+    "childId": "e0ff0060-8130-4d12-b415-90c82c81a37a",
+    "childCreatedAt": 1792252922382,
+    "mode": "continuable",
+    "label": "示例文本"
+   }
+  },
+  {
+   "seq": 410,
+   "time": 1792252922724,
+   "data": {
+    "version": 0,
+    "childId": "a8174b6a-c78d-4b08-a097-f8250d87f291",
+    "childCreatedAt": 1792252922647,
+    "mode": "continuable",
+    "label": "示例文本"
+   }
+  }
+ ],
+ "todo/write": [
+  {
+   "seq": 424,
+   "time": 1792252939259,
+   "data": {
+    "todos": [
+     {
+      "content": "示例文本",
+      "status": "completed"
+     },
+     {
+      "content": "示例文本",
+      "status": "in_progress"
+     },
+     {
+      "content": "示例文本",
+      "status": "in_progress"
+     },
+     {
+      "content": "示例文本",
+      "status": "pending"
+     },
+     {
+      "content": "示例文本",
+      "status": "pending"
+     }
+    ]
+   }
+  },
+  {
+   "seq": 814,
+   "time": 1792254763503,
+   "data": {
+    "todos": [
+     {
+      "content": "示例文本",
+      "status": "completed"
+     },
+     {
+      "content": "示例文本",
+      "status": "completed"
+     },
+     {
+      "content": "示例文本",
+      "status": "completed"
+     },
+     {
+      "content": "示例文本",
+      "status": "completed"
+     },
+     {
+      "content": "示例文本",
+      "status": "completed"
+     },
+     {
+      "content": "示例文本",
+      "status": "completed"
+     }
+    ]
+   }
+  }
+ ],
+ "deliverables/presented": [
+  {
+   "seq": 820,
+   "time": 1792254768676,
+   "data": {
+    "turn": 1,
+    "callId": "call_00_ET_ddHNgZiWVjXSnydTHPIO0410",
+    "files": [
+     {
+      "path": "C:\\\\workspace\\\\demo",
+      "description": "示例文本"
+     },
+     {
+      "path": "C:\\\\workspace\\\\demo",
+      "description": "示例文本"
+     },
+     {
+      "path": "C:\\\\workspace\\\\demo",
+      "description": "示例文本"
+     },
+     {
+      "path": "C:\\\\workspace\\\\demo",
+      "description": "示例文本"
+     }
+    ]
+   }
+  },
+  {
+   "seq": 1404,
+   "time": 1792256945686,
+   "data": {
+    "turn": 5,
+    "callId": "call_00_ET_Ny2mZsWtZnbRYT6SSDDO9985",
+    "files": [
+     {
+      "description": "示例文本",
+      "path": "C:\\\\workspace\\\\demo"
+     },
+     {
+      "description": "示例文本",
+      "path": "C:\\\\workspace\\\\demo"
+     }
+    ]
+   }
+  }
+ ],
+ "workspace/changes": [
+  {
+   "seq": 826,
+   "time": 1792254776629,
+   "data": {
+    "turn": 1
+   }
+  },
+  {
+   "seq": 1223,
+   "time": 1792256550969,
+   "data": {
+    "turn": 4
+   }
+  }
+ ],
+ "turn/end": [
+  {
+   "seq": 827,
+   "time": 1792254776630,
+   "data": {
+    "turn": 1,
+    "reason": {
+     "kind": "completed"
+    }
+   }
+  },
+  {
+   "seq": 836,
+   "time": 1792255117113,
+   "data": {
+    "turn": 2,
+    "reason": {
+     "kind": "completed"
+    }
+   }
+  }
+ ]
+}

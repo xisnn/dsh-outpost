@@ -1,0 +1,10 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+  Android 12+ 系统闪屏用的「空图标」。
+  系统闪屏一定会出现，但图标可以换掉——这里用一个 1dp 的全透明方块，
+  于是系统闪屏就是纯色一帧，紧接着进 SplashActivity 的鲸尾图。
+-->
+<shape xmlns:android="http://schemas.android.com/apk/res/android" android:shape="rectangle">
+    <size android:width="1dp" android:height="1dp" />
+    <solid android:color="@android:color/transparent" />
+</shape>
