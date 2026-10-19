@@ -68,13 +68,20 @@ export async function checkForUpdate(currentVersion: string): Promise<ReleaseInf
   }
 }
 
+/** 下载进度：比例 + 已下载/总字节（总大小可能拿不到，那就是 0） */
+export interface DownloadProgress {
+  ratio: number;
+  received: number;
+  total: number;
+}
+
 /**
  * 下载 APK 并唤起系统安装器。
- * onProgress 会收到 0-1 的进度。
+ * onProgress 会持续收到进度，用于显示「已下载 45.2 MB / 70.1 MB」。
  */
 export async function downloadAndInstall(
   release: ReleaseInfo,
-  onProgress?: (ratio: number) => void,
+  onProgress?: (p: DownloadProgress) => void,
 ): Promise<void> {
   const dir = ReactNativeBlobUtil.fs.dirs.CacheDir;
   const path = `${dir}/dsh-pocket-${release.version}.apk`;
@@ -88,9 +95,15 @@ export async function downloadAndInstall(
       // GitHub 的下载链接会 302 到 CDN，blob-util 默认跟随
     }).fetch('GET', release.apkUrl, { Accept: 'application/octet-stream' });
 
-    task.progress({ interval: 250 }, (received, total) => {
-      const t = Number(total);
-      if (t > 0) onProgress?.(Math.min(1, Number(received) / t));
+    task.progress({ interval: 200 }, (received, total) => {
+      const rx = Number(received);
+      // total 有时是 -1（服务器没给 Content-Length），这时用 release.apkSize 兜底
+      const tt = Number(total) > 0 ? Number(total) : (release.apkSize ?? 0);
+      onProgress?.({
+        ratio: tt > 0 ? Math.min(1, rx / tt) : 0,
+        received: rx,
+        total: tt,
+      });
     });
 
     await task;

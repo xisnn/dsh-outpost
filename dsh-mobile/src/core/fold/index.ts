@@ -88,6 +88,10 @@ export interface Turn {
     parts: AttachRef[];
   };
   steps: Step[];
+  /** 队员汇报 / subagent 通知。DSH 把它们记成 user/message，实际不是用户说的 */
+  teammates?: Array<{ id: string; from: string; text: string; notice: boolean; time: number }>;
+  /** 这一轮是否派过活（调用过 spawn_teammate / team_task_create） */
+  delegated?: boolean;
   startedAt?: number;
   endedAt?: number;
   /** completed / aborted / error / 未结束 */
@@ -106,6 +110,36 @@ export const MODE_TAG_RE = /\s*〔模式:(闲聊|计划)〕\s*$/;
 
 export function stripModeTag(text: string): string {
   return text.replace(MODE_TAG_RE, '').trimEnd();
+}
+
+/**
+ * 识别「队员汇报」和「subagent 完成通知」。
+ *
+ * DSH 把这两类消息记成 user/message，导致 App 把它们显示成用户发言。
+ * 实际上它们是 teammate 发来的，应该单独渲染（折叠卡片）。
+ *
+ * 两种形态（实测）：
+ *   "Team message from weather-scout: 大连天气..."
+ *   "Background subagent 87e6f420-... finished ... Its closing message: ..."
+ */
+export function parseTeammateMessage(
+  text: string,
+): { from: string; text: string; notice: boolean } | null {
+  const t = text.trimStart();
+
+  // 1. 队员主动发的汇报
+  const m = /^Team message from\s+([^:\n]+):\s*([\s\S]+)$/.exec(t);
+  if (m) {
+    return { from: m[1].trim(), text: m[2].trim(), notice: false };
+  }
+
+  // 2. subagent 完成通知
+  const n = /^Background subagent\s+([0-9a-f-]{8,})[\s\S]*?closing message:\s*([\s\S]+)$/i.exec(t);
+  if (n) {
+    return { from: n[1].slice(0, 8), text: n[2].trim(), notice: true };
+  }
+
+  return null;
 }
 
 function textOf(blocks: unknown): string {
@@ -261,11 +295,27 @@ export function foldEvents(records: EventRecord[]): Turn[] {
         // 管家初始化提示 / 系统通知都是「假的用户消息」，界面上不显示
         if (isInjectedMessage(textOf(d.content))) break;
         // 剥掉尾部的模式标记（〔模式:计划〕），用户不该看到它
-        const body = stripModeTag(textOf(d.content));
+        const raw = textOf(d.content);
+        const body = stripModeTag(raw);
         if (!body) break;
         // turn 号有时缺失，挂到当前 turn；否则按 seq 造一个
         const turnNo = num(d.turn) ?? current?.turn.turn ?? ev.seq;
         const b = ensureTurn(turnNo);
+
+        // 队员汇报 / subagent 完成通知：DSH 把它们记成 user/message，
+        // 但它们不是用户说的，单独记成 teammate，UI 上折叠成一行。
+        const tm = parseTeammateMessage(body);
+        if (tm) {
+          b.turn.teammates = [
+            ...(b.turn.teammates ?? []),
+            { id: `tm-${ev.seq}`, from: tm.from, text: tm.text, notice: tm.notice, time: ev.time },
+          ];
+          // 不设置 turn.user，避免被当成用户发言
+          if (b.turn.startedAt === undefined) b.turn.startedAt = ev.time;
+          current = b;
+          break;
+        }
+
         if (!b.turn.user) {
           b.turn.user = {
             id: typeof d.id === 'string' ? d.id : undefined,
@@ -338,14 +388,17 @@ export function foldEvents(records: EventRecord[]): Turn[] {
           existing.pending = true;
         } else {
           const { input, raw } = parseArguments(d.arguments);
+          const toolName = typeof d.name === 'string' ? d.name : 'tool';
           step.blocks.push({
             kind: 'tool',
             callId,
-            name: typeof d.name === 'string' ? d.name : 'tool',
+            name: toolName,
             input,
             rawArguments: raw,
             pending: true,
           });
+          // 记下「这一轮派过活」，UI 用来决定是否把管家回复折叠成「已完成」卡片
+          if (DELEGATING_TOOLS.has(toolName)) b.turn.delegated = true;
         }
         current = b;
         currentStepNo = stepNo;
@@ -418,10 +471,23 @@ export function foldEvents(records: EventRecord[]): Turn[] {
   return out;
 }
 
+/** 会派活的工具名：调用过就说明这一轮是「计划模式」在执行 */
+const DELEGATING_TOOLS = new Set(['spawn_teammate', 'team_task_create']);
+
 /** 把一批 turn 拍平成可渲染的聊天气泡列表（用于 FlatList） */
 export type ChatItem =
   | { kind: 'user'; key: string; turn: number; text: string; time: number; parts: AttachRef[] }
-  | { kind: 'assistant'; key: string; turn: number; step: number; blocks: Block[] }
+  // 队员汇报 / 系统通知：不是用户说的话，单独一种类型，UI 上折叠成一行
+  | { kind: 'teammate'; key: string; turn: number; from: string; text: string; notice: boolean }
+  | {
+      kind: 'assistant';
+      key: string;
+      turn: number;
+      step: number;
+      blocks: Block[];
+      /** 这一轮派过活，UI 可以折叠成「已完成」卡片 */
+      delegated?: boolean;
+    }
   | { kind: 'divider'; key: string; turn: number; reason?: string };
 
 export function toChatItems(turns: Turn[]): ChatItem[] {
@@ -437,6 +503,17 @@ export function toChatItems(turns: Turn[]): ChatItem[] {
         parts: t.user.parts,
       });
     }
+    // 队员汇报插在 assistant 之前（它们是对这一轮的输入）
+    for (const tm of t.teammates ?? []) {
+      items.push({
+        kind: 'teammate',
+        key: tm.id,
+        turn: t.turn,
+        from: tm.from,
+        text: tm.text,
+        notice: tm.notice,
+      });
+    }
     for (const s of t.steps) {
       if (s.blocks.length === 0) continue;
       items.push({
@@ -445,6 +522,7 @@ export function toChatItems(turns: Turn[]): ChatItem[] {
         turn: t.turn,
         step: s.step,
         blocks: s.blocks,
+        delegated: t.delegated,
       });
     }
     if (!t.running && t.reason && t.reason !== 'completed') {

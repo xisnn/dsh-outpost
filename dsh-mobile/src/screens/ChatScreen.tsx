@@ -34,6 +34,8 @@ import { TeamBar } from '../components/TeamBar';
 import { TeamStrip } from '../components/TeamStrip';
 import { TeamSheet } from '../components/TeamSheet';
 import { SlideSegmented } from '../components/SlideSegmented';
+import { TeammateNote } from '../components/TeammateNote';
+import { CompletionNotice } from '../components/CompletionNotice';
 import type { ButlerMode } from '../core/butler';
 import { ThinkingAccordion, ThinkingDots } from '../components/Thinking';
 import { ToolCard } from '../components/ToolCard';
@@ -451,6 +453,28 @@ export function ChatScreen({
                     </Text>
                     <View style={styles.dividerLine} />
                   </View>
+                );
+              }
+              if (item.kind === 'teammate') {
+                return (
+                  <TeammateNote
+                    key={item.key}
+                    from={item.from}
+                    text={item.text}
+                    notice={item.notice}
+                  />
+                );
+              }
+              // 派过活的那一轮：管家的汇总默认折叠，点开才看
+              // （闲聊回复 delegated 为 false，直接显示，不打扰用户）
+              if (item.delegated) {
+                const doneCount = (chat.agentTeam?.tasks ?? []).filter(
+                  (t) => t.status === 'completed',
+                ).length;
+                return (
+                  <CompletionNotice key={item.key} taskCount={doneCount}>
+                    {renderBlocks(item.blocks, item.key)}
+                  </CompletionNotice>
                 );
               }
               return <View key={item.key}>{renderBlocks(item.blocks, item.key)}</View>;
