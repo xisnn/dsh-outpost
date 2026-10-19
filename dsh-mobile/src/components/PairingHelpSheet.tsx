@@ -173,10 +173,13 @@ function makeStyles(tv: ReturnType<typeof useTheme>) {
     card: {
       width: '100%',
       maxWidth: 360,
-      maxHeight: '80%',
+      maxHeight: '82%',
       borderRadius: 18,
       backgroundColor: C.bgRaised,
       overflow: 'hidden',
+      // 让卡片内部按「标题 + 滚动区 + 底栏」三段布局，
+      // 滚动区才能拿到剩余高度（否则内容多时会被截断且滚不到底）
+      flexDirection: 'column',
     },
     title: {
       color: C.text,
@@ -186,7 +189,7 @@ function makeStyles(tv: ReturnType<typeof useTheme>) {
       paddingTop: tv.space.lg,
       paddingBottom: tv.space.md,
     },
-    body: { flexGrow: 0, flexShrink: 1 },
+    body: { flexGrow: 1, flexShrink: 1 },
     bodyContent: { paddingHorizontal: tv.space.lg, paddingBottom: tv.space.md },
 
     step: { flexDirection: 'row', marginBottom: tv.space.md },
@@ -246,6 +249,9 @@ function makeStyles(tv: ReturnType<typeof useTheme>) {
       borderTopColor: C.border,
       backgroundColor: C.bgRaised,
       paddingTop: tv.space.md,
+      // 底栏固定高度，不参与弹性压缩
+      flexGrow: 0,
+      flexShrink: 0,
     },
     confirmBtn: {
       marginHorizontal: tv.space.lg,

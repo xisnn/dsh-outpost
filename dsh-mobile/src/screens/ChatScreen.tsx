@@ -10,6 +10,7 @@ import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import {
   ActivityIndicator,
   Image,
+  Keyboard,
   KeyboardAvoidingView,
   Modal,
   Platform,
@@ -127,6 +128,26 @@ export function ChatScreen({
       return () => clearTimeout(timer);
     }
   }, [chat.items.length, nearBottom]);
+
+  /**
+   * 键盘弹出后把列表滚到底。
+   *
+   * Android 在 edge-to-edge（API 35+ 强制）下 adjustResize 不再缩小窗口，
+   * 所以键盘会直接盖住输入框。这里记录键盘高度，给内容区补同等高度的
+   * 底部内边距，让输入框始终浮在键盘上方。
+   */
+  const [kbHeight, setKbHeight] = useState(0);
+  useEffect(() => {
+    const showSub = Keyboard.addListener('keyboardDidShow', (e) => {
+      setKbHeight(e.endCoordinates?.height ?? 0);
+      setTimeout(() => scrollRef.current?.scrollToEnd({ animated: true }), 120);
+    });
+    const hideSub = Keyboard.addListener('keyboardDidHide', () => setKbHeight(0));
+    return () => {
+      showSub.remove();
+      hideSub.remove();
+    };
+  }, []);
 
   const addPicked = useCallback(async (mode: PickMode) => {
     setPickerOpen(false);
@@ -302,7 +323,7 @@ export function ChatScreen({
       ) : null}
 
       <KeyboardAvoidingView
-        style={styles.flex}
+        style={[styles.flex, kbHeight > 0 ? { marginBottom: kbHeight } : null]}
         behavior={Platform.OS === 'ios' ? 'padding' : undefined}
         keyboardVerticalOffset={0}
       >
@@ -403,7 +424,13 @@ export function ChatScreen({
         <View
           style={[
             styles.composerWrap,
-            { paddingBottom: embedded ? space.sm : Math.max(insets.bottom, space.sm) },
+            {
+              paddingBottom: kbHeight > 0
+                ? space.sm
+                : embedded
+                  ? space.sm
+                  : Math.max(insets.bottom, space.sm),
+            },
           ]}
         >
           {/* 普通聊天用底部团队条；管家模式用顶部头像条，别重复 */}

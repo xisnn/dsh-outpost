@@ -276,12 +276,28 @@ export class Store {
 
       // 任务完成检测：投影刷新时对比前后状态（team/* 事件不在会话日志里，只能靠投影）
       const prevStatus = new Map((cur.agentTeam?.tasks ?? []).map((t) => [t.id, t.status]));
+      const justCompleted: string[] = [];
       if (status.agentTeam) {
         for (const t of status.agentTeam.tasks) {
           const before = prevStatus.get(t.id);
           if (t.status === 'completed' && before !== undefined && before !== 'completed') {
+            justCompleted.push(`${t.ownerName ?? '队员'} 完成了「${t.subject}」`);
             this.pushNotice(`${t.ownerName ?? '队员'} 完成了：${t.subject}`);
           }
+        }
+      }
+
+      // 队员全部干完时，主动唤醒管家做汇总。
+      // 原因：DSH 的 Agent Teams 在队友完成后只更新任务投影，
+      // 不会自动给 lead 发消息 —— 管家虽然说了「结果回来我汇总」，
+      // 但那一轮 turn 已经结束，没人叫它，它就永远不说话了。
+      if (justCompleted.length > 0) {
+        const stillRunning = (status.agentTeam?.tasks ?? []).some(
+          (t) => t.status === 'in_progress' || t.status === 'pending',
+        );
+        const running = row?.running ?? false;
+        if (!stillRunning && !running) {
+          void this.wakeButler(sessionId, justCompleted);
         }
       }
 
@@ -306,6 +322,32 @@ export class Store {
   // ── 一次性提示（任务完成等） ─────────────────────────────────────
   /** UI 弹一条就算消费掉，最多留 3 条 */
   teamNotices: TeamNotice[] = [];
+
+  /** 已经唤醒过的会话，避免同一批任务反复触发 */
+  private waking = new Set<string>();
+
+  /**
+   * 队员全部完成后，主动给管家发一条消息让它汇总。
+   *
+   * DSH 的 Agent Teams 不会在队友完成时自动唤醒 lead，
+   * 所以这一步必须由客户端补上，否则管家承诺的「结果回来我汇总」永远等不到。
+   */
+  private async wakeButler(sessionId: string, done: string[]): Promise<void> {
+    if (this.waking.has(sessionId)) return;
+    this.waking.add(sessionId);
+    try {
+      const text =
+        `〔系统通知〕队员已经做完，请向用户汇总结果：\n` +
+        done.map((d) => `- ${d}`).join('\n') +
+        `\n\n请用 2-3 句简短说明结论，不要重复派活。`;
+      await this.send(sessionId, text, []);
+    } catch {
+      // 发送失败就静默放弃，不打扰用户（下次任务完成还能再触发）
+    } finally {
+      // 留一段时间窗口，避免同一批任务在多次轮询里重复唤醒
+      setTimeout(() => this.waking.delete(sessionId), 30_000);
+    }
+  }
 
   private pushNotice(text: string): void {
     if (this.teamNotices.some((n) => n.text === text)) return;
