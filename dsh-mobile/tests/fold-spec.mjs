@@ -119,6 +119,15 @@ const step1 = t1.steps[0];
 check('step 1 有 reasoning 块', step1.blocks.some(b => b.kind === 'reasoning'));
 check('step 1 有 tool 块', step1.blocks.some(b => b.kind === 'tool'));
 
+// 思考必须排在正文前面（界面上是「先想再说」）
+const ri = step1.blocks.findIndex(b => b.kind === 'reasoning');
+const ti = step1.blocks.findIndex(b => b.kind === 'text');
+check(
+  'reasoning 排在 text 之前',
+  ri >= 0 && (ti < 0 || ri < ti),
+  `reasoning@${ri} text@${ti}`,
+);
+
 const toolBlk = step1.blocks.find(b => b.kind === 'tool');
 check('tool 块有 name', toolBlk?.name === 'pwsh', toolBlk?.name);
 check('tool 块 callId 正确', toolBlk?.callId === 'call-1', toolBlk?.callId);

@@ -348,11 +348,13 @@ export function foldEvents(records: EventRecord[]): Turn[] {
         const message = (d.message ?? {}) as Record<string, unknown>;
         const content = message.content;
 
-        const t = textOf(content);
-        if (t) step.blocks.push({ kind: 'text', text: t });
-
+        // 顺序很重要：思考发生在正文之前，所以先 push reasoning 再 push text。
+        // 反过来的话，界面上会出现「回复在前、思考在后」的怪顺序。
         const r = reasoningOf(content);
         if (r) step.blocks.push({ kind: 'reasoning', text: r });
+
+        const t = textOf(content);
+        if (t) step.blocks.push({ kind: 'text', text: t });
 
         if (Array.isArray(content)) {
           for (const blk of content as ContentBlock[]) {
