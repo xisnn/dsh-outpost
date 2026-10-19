@@ -29,7 +29,12 @@ import { SectionLabel } from '../components/ui';
 import { ConfirmSheet } from '../components/ConfirmSheet';
 import { SlideSegmented } from '../components/SlideSegmented';
 import { APP_VERSION, APP_VERSION_LABEL } from '../core/version';
-import { checkForUpdate, downloadAndInstall, type ReleaseInfo } from '../core/updater';
+import {
+  checkForUpdate,
+  downloadAndInstall,
+  type DownloadProgress,
+  type ReleaseInfo,
+} from '../core/updater';
 
 /** 一个币种的余额构成 */
 interface MoneyLine {
@@ -62,6 +67,7 @@ export function ProfileScreen({ active = true }: { active?: boolean }) {
 
   // ── 应用内更新 ──────────────────────────────────────────────
   const [updating, setUpdating] = useState(false);
+  const [updateProgress, setUpdateProgress] = useState<DownloadProgress | null>(null);
   const [updateHint, setUpdateHint] = useState<string | null>(null);
   const [pendingRelease, setPendingRelease] = useState<ReleaseInfo | null>(null);
   const [confirmUpdate, setConfirmUpdate] = useState(false);
@@ -90,14 +96,24 @@ export function ProfileScreen({ active = true }: { active?: boolean }) {
     if (!pendingRelease) return;
     setConfirmUpdate(false);
     setUpdating(true);
-    setUpdateHint('下载中 0%');
+    setUpdateProgress(null);
+    setUpdateHint('准备下载…');
     try {
-      await downloadAndInstall(pendingRelease, (r) => {
-        setUpdateHint(`下载中 ${Math.round(r * 100)}%`);
+      await downloadAndInstall(pendingRelease, (p) => {
+        setUpdateProgress(p);
+        const pct = Math.round(p.ratio * 100);
+        // 显示「45% · 31.5/70.1 MB」，总大小拿不到时只显示百分比
+        const sizeText =
+          p.total > 0
+            ? `${(p.received / 1024 / 1024).toFixed(1)}/${(p.total / 1024 / 1024).toFixed(1)} MB`
+            : '';
+        setUpdateHint(sizeText ? `${pct}% · ${sizeText}` : `${pct}%`);
       });
       setUpdateHint('正在打开安装器…');
+      setUpdateProgress(null);
     } catch (e) {
       setUpdateHint(e instanceof Error ? e.message : '下载失败');
+      setUpdateProgress(null);
     } finally {
       setUpdating(false);
       setPendingRelease(null);
@@ -385,7 +401,7 @@ export function ProfileScreen({ active = true }: { active?: boolean }) {
             ]}
           >
             <Text style={styles.infoKey}>检查更新</Text>
-            {updating ? (
+            {updating && !updateProgress ? (
               <ActivityIndicator size="small" color={tv.colors.accent} />
             ) : (
               <Text style={[styles.infoVal, { color: tv.colors.accentBright }]}>
@@ -393,6 +409,20 @@ export function ProfileScreen({ active = true }: { active?: boolean }) {
               </Text>
             )}
           </Pressable>
+
+          {/* 下载中：进度条 + 「45% · 31.5/70.1 MB」 */}
+          {updateProgress ? (
+            <View style={styles.updateProgressWrap}>
+              <View style={styles.updateTrack}>
+                <View
+                  style={[
+                    styles.updateFill,
+                    { width: `${Math.round(updateProgress.ratio * 100)}%` },
+                  ]}
+                />
+              </View>
+            </View>
+          ) : null}
         </View>
 
         <Pressable
@@ -637,6 +667,23 @@ function makeStyles(tv: ReturnType<typeof useTheme>) {
       textAlign: 'right',
     },
     infoSep: { height: StyleSheet.hairlineWidth, backgroundColor: C.border },
+
+    // 更新下载进度条
+    updateProgressWrap: {
+      paddingHorizontal: tv.space.md,
+      paddingBottom: tv.space.md,
+    },
+    updateTrack: {
+      height: 4,
+      borderRadius: 2,
+      backgroundColor: C.bgOverlay,
+      overflow: 'hidden',
+    },
+    updateFill: {
+      height: 4,
+      borderRadius: 2,
+      backgroundColor: C.accent,
+    },
 
     signOutBtn: {
       marginHorizontal: tv.layout.screenPadding,
