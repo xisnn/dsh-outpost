@@ -164,9 +164,12 @@ export function ChatScreen({
   /**
    * 键盘弹出后把列表滚到底。
    *
-   * Android 在 edge-to-edge（API 35+ 强制）下 adjustResize 不再缩小窗口，
-   * 所以键盘会直接盖住输入框。这里记录键盘高度，给内容区补同等高度的
-   * 底部内边距，让输入框始终浮在键盘上方。
+   * 布局交给系统：manifest 里是 adjustResize，键盘弹出时窗口会自己缩小，
+   * 输入框天然浮在键盘上方。**不要**再给容器加 marginBottom —— 那会和
+   * adjustResize 叠加，把输入框顶到页面顶部去（真机上实测过）。
+   * 这里只做两件小事：
+   *   1. 键盘高度归零时把 paddingBottom 还原成安全区高度
+   *   2. 键盘弹出后把消息列表滚到底，让用户看到最新内容
    */
   const [kbHeight, setKbHeight] = useState(0);
   useEffect(() => {
@@ -360,7 +363,7 @@ export function ChatScreen({
       ) : null}
 
       <KeyboardAvoidingView
-        style={[styles.flex, kbHeight > 0 ? { marginBottom: kbHeight } : null]}
+        style={styles.flex}
         behavior={Platform.OS === 'ios' ? 'padding' : undefined}
         keyboardVerticalOffset={0}
       >
@@ -462,11 +465,8 @@ export function ChatScreen({
           style={[
             styles.composerWrap,
             {
-              paddingBottom: kbHeight > 0
-                ? space.sm
-                : embedded
-                  ? space.sm
-                  : Math.max(insets.bottom, space.sm),
+              paddingBottom:
+                kbHeight > 0 ? space.sm : embedded ? space.sm : Math.max(insets.bottom, space.sm),
             },
           ]}
         >
