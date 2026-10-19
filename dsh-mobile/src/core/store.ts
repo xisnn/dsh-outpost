@@ -418,6 +418,49 @@ export class Store {
     }
   }
 
+  // ── 工作区 ────────────────────────────────────────────────────────
+  /**
+   * 新建工作区。
+   *
+   * DSH 的 `workspace/create` 是**幂等**的：路径已登记过就返回已有的
+   * workspaceId，不报错。所以「新建」在已存在时等价于「打开」。
+   *
+   * 但目录必须**已经存在于电脑上**，否则服务端报 `workspace/invalid-path`
+   * （ENOENT: realpath）。这里把它翻译成人话，方便 UI 直接展示。
+   */
+  async createWorkspace(rawPath: string): Promise<
+    { ok: true; workspaceId: string; path: string } | { ok: false; error: string }
+  > {
+    const path = rawPath.trim().replace(/[\\/]+$/, '');
+    if (!path) return { ok: false, error: '请填写目录路径' };
+    // Windows 绝对路径校验，避免填相对路径后在服务端报奇怪的错
+    if (!/^[A-Za-z]:\\/.test(path) && !/^\\\\/.test(path)) {
+      return { ok: false, error: '请填写完整路径，例如 E:\\work\\my-project' };
+    }
+
+    try {
+      const ws = await this.workspace.ensureForPath(path);
+      if (!ws?.workspaceId) {
+        return { ok: false, error: '创建失败：服务端没返回工作区信息' };
+      }
+      this.workspaceIdByPath.set(path, ws.workspaceId);
+      await this.loadSessions();
+      return { ok: true, workspaceId: ws.workspaceId, path };
+    } catch (e) {
+      const msg = e instanceof Error ? e.message : String(e);
+      if (/ENOENT|invalid-path|no such file/i.test(msg)) {
+        return {
+          ok: false,
+          error: `电脑上找不到这个目录：${path}\n请先在电脑上创建好文件夹，再回来添加。`,
+        };
+      }
+      if (/EACCES|permission/i.test(msg)) {
+        return { ok: false, error: `没有访问权限：${path}` };
+      }
+      return { ok: false, error: msg };
+    }
+  }
+
   // ── 列表 ──────────────────────────────────────────────────────────
   async loadSessions(): Promise<void> {
     if (this.sessionsLoading) return;
