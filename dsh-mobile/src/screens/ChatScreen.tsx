@@ -37,6 +37,7 @@ import { TeamSheet } from '../components/TeamSheet';
 import { SlideSegmented } from '../components/SlideSegmented';
 import { TeammateNote } from '../components/TeammateNote';
 import { CompletionNotice } from '../components/CompletionNotice';
+import { ButlerThinking } from '../components/ButlerThinking';
 import type { ButlerMode } from '../core/butler';
 import { ThinkingAccordion, ThinkingDots } from '../components/Thinking';
 import { ToolCard } from '../components/ToolCard';
@@ -279,11 +280,20 @@ export function ChatScreen({
 
   const renderBlocks = (blocks: Block[], keyPrefix: string) =>
     blocks.map((b, i) => {
-      // 管家页只显示「人话」：工具调用/思考过程留给队员事件流
+      // 管家页只显示「人话」：工具调用留给队员事件流。
+      // 但思考过程要留 —— 它在生成时可见，能明显减轻「干等着」的焦虑；
+      // 跑完就自动收起成一行，不占地方。
       if (butler) {
-        return b.kind === 'text' ? (
-          <AssistantText key={`${keyPrefix}-t${i}`} text={b.text} />
-        ) : null;
+        if (b.kind === 'text') {
+          return <AssistantText key={`${keyPrefix}-t${i}`} text={b.text} />;
+        }
+        if (b.kind === 'reasoning') {
+          const isLive = i === blocks.length - 1 && chat.running;
+          return (
+            <ButlerThinking key={`${keyPrefix}-r${i}`} text={b.text} live={isLive} />
+          );
+        }
+        return null;
       }
       if (b.kind === 'text') return <AssistantText key={`${keyPrefix}-t${i}`} text={b.text} />;
       if (b.kind === 'reasoning') {
