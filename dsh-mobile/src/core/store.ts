@@ -14,7 +14,7 @@ import { AccountApi, type BalanceResult } from '../core/rpc/account';
 import { UploadApi } from '../core/rpc/upload';
 import { WorkspaceApi } from '../core/rpc/workspace';
 import type { WorkspaceCustom } from '../core/workspace-custom';
-import { foldEvents, toChatItems, type ChatItem, type Turn } from '../core/fold';
+import { foldEvents, toChatItems, isInjectedMessage, type ChatItem, type Turn } from '../core/fold';
 import type { AttachRef, AgentTeam, EventRecord, PromptPart, SessionAddress, SessionSummary } from '../core/types';
 
 /** 待发送附件：本地显示用 ref + 真正发出去的 part */
@@ -614,22 +614,28 @@ export class Store {
     ];
     if (content.length === 0) return;
 
-    // 乐观插入：本地先显示，等真实事件回来再被 fold 覆盖
-    this.chats.set(sessionId, {
-      ...cur,
-      items: [
-        ...cur.items,
-        {
-          kind: 'user',
-          key: `local-${Date.now()}`,
-          turn: (cur.turns.at(-1)?.turn ?? 0) + 1,
-          text: text.trim(),
-          time: Date.now(),
-          parts: attachments.map((a) => a.ref),
-        },
-      ],
-    });
-    this.emit();
+    // 注入消息（管家初始化 / 系统通知 / 模式切换）只在网络侧发送，
+    // 不做乐观插入，否则会在聊天里闪一条「用户消息」。
+    const injected = text.trim() ? isInjectedMessage(text) : false;
+
+    if (!injected) {
+      // 乐观插入：本地先显示，等真实事件回来再被 fold 覆盖
+      this.chats.set(sessionId, {
+        ...cur,
+        items: [
+          ...cur.items,
+          {
+            kind: 'user',
+            key: `local-${Date.now()}`,
+            turn: (cur.turns.at(-1)?.turn ?? 0) + 1,
+            text: text.trim(),
+            time: Date.now(),
+            parts: attachments.map((a) => a.ref),
+          },
+        ],
+      });
+      this.emit();
+    }
 
     try {
       await this.api.prompt({ sessionId, text, parts: content, mode });
