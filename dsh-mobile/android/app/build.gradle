@@ -82,8 +82,9 @@ android {
         applicationId "com.dshpocket"
         minSdkVersion rootProject.ext.minSdkVersion
         targetSdkVersion rootProject.ext.targetSdkVersion
-        versionCode 1
-        // CI 里可以用 -PDSH_VERSION_NAME=1.2.0 覆盖
+        // versionCode 必须单调递增，否则 Android 拒绝覆盖安装（应用内更新靠它判断）。
+        // CI 里由 tag 推导：v0.2.0 -> versionCode 200、versionName 0.2.0。
+        versionCode (project.findProperty('DSH_VERSION_CODE') ?: 1) as Integer
         versionName project.findProperty('DSH_VERSION_NAME') ?: "1.0"
 
         // 明文 HTTP 由 AndroidManifest 里的 networkSecurityConfig 显式允许。

@@ -80,6 +80,35 @@ jobs:
         working-directory: dsh-mobile
         run: npm test
 
+      # 用 tag 推导版本号，写进 package.json 和 Gradle，
+      # 保证「安装包里的版本」和「应用内更新检查的基准」是同一个值。
+      - name: Derive version from tag
+        id: ver
+        run: |
+          TAG="${GITHUB_REF_NAME}"
+          if [[ ! "$TAG" =~ ^v[0-9] ]]; then
+            TAG="v0.0.${GITHUB_RUN_NUMBER}"
+            echo "非 tag 触发，使用合成版本 $TAG"
+          fi
+          VER="${TAG#v}"
+          # 位加权：major*1000000 + minor*1000 + patch，避免 minor 跨十位时和 major 冲突
+          # v0.2.0 -> 2000，v0.10.2 -> 10002，v1.0.0 -> 1000000
+          IFS='.' read -r MAJ MIN PAT <<< "$VER"
+          CODE=$(( MAJ * 1000000 + MIN * 1000 + ${PAT:-0} ))
+          echo "version=$VER" >> "$GITHUB_OUTPUT"
+          echo "code=$CODE" >> "$GITHUB_OUTPUT"
+          echo "tag=$TAG" >> "$GITHUB_OUTPUT"
+          echo "版本: $TAG (versionCode=$CODE)"
+
+          # package.json 是 JS 侧读取版本号的唯一来源
+          node -e "
+            const fs=require('fs');
+            const p=JSON.parse(fs.readFileSync('dsh-mobile/package.json','utf8'));
+            p.version='$VER';
+            fs.writeFileSync('dsh-mobile/package.json', JSON.stringify(p,null,2)+'\n');
+          "
+          node -e "console.log('package.json version =', require('./dsh-mobile/package.json').version)"
+
       - name: Build release APK
         working-directory: dsh-mobile/android
         env:
@@ -90,26 +119,26 @@ jobs:
           DSH_KEY_PASSWORD: ${{ secrets.KEY_PASSWORD }}
         run: |
           chmod +x gradlew
+          VERSION_ARGS="-PDSH_VERSION_NAME=${{ steps.ver.outputs.version }} -PDSH_VERSION_CODE=${{ steps.ver.outputs.code }}"
+          echo "Gradle 版本参数: $VERSION_ARGS"
+
           if [ -n "$DSH_KEYSTORE_BASE64" ]; then
             echo "使用仓库配置的签名密钥"
             echo "$DSH_KEYSTORE_BASE64" | base64 -d > app/release.keystore
-            ./gradlew assembleRelease --no-daemon \
+            ./gradlew assembleRelease --no-daemon $VERSION_ARGS \
               -PDSH_STORE_FILE=app/release.keystore \
               -PDSH_STORE_PASSWORD="$DSH_KEYSTORE_PASSWORD" \
               -PDSH_KEY_ALIAS="$DSH_KEY_ALIAS" \
               -PDSH_KEY_PASSWORD="$DSH_KEY_PASSWORD"
           else
             echo "未配置签名密钥，使用 debug 签名构建（可侧载，不可上架）"
-            ./gradlew assembleRelease --no-daemon
+            ./gradlew assembleRelease --no-daemon $VERSION_ARGS
           fi
 
       - name: Prepare artifact
         id: artifact
         run: |
-          VERSION="${GITHUB_REF_NAME}"
-          if [ -z "$VERSION" ] || [ "$VERSION" = "main" ]; then
-            VERSION="build-${GITHUB_RUN_NUMBER}"
-          fi
+          VERSION="${{ steps.ver.outputs.tag }}"
           mkdir -p out
           cp dsh-mobile/android/app/build/outputs/apk/release/app-release.apk "out/dsh-pocket-${VERSION}.apk"
           ls -lh out/
