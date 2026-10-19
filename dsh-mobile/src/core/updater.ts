@@ -9,7 +9,7 @@
  * 前提：更新包的签名必须和已安装的一致，否则 Android 会拒绝覆盖。
  * 目前 CI 统一用仓库里的 debug.keystore 签名，所以能直接覆盖安装。
  */
-import { Platform } from 'react-native';
+import { Linking, Platform } from 'react-native';
 import ReactNativeBlobUtil from 'react-native-blob-util';
 import { isNewer } from './semver';
 
@@ -109,17 +109,69 @@ export async function downloadAndInstall(
     await task;
   }
 
-  // 唤起系统安装界面。Android 8+ 需要「安装未知应用」权限，
-  // 没有权限时系统会自己弹授权页。
+  // 唤起系统安装界面。
   //
-  // 注意：这里必须传**文件系统路径**，不能带 file:// 前缀。
-  // actionViewIntent 内部会走 FileProvider.getUriForFile(path)，
-  // 带 scheme 的话会被拼成 "/file:/data/..."，直接报
+  // 注意：必须传**文件系统路径**，不能带 file:// 前缀。
+  // actionViewIntent 内部走 FileProvider.getUriForFile(path)，
+  // 带 scheme 会拼成 "/file:/data/..."，报
   // "Failed to find configured root that contains /file:/data/..."。
-  await ReactNativeBlobUtil.android.actionViewIntent(
-    path,
-    'application/vnd.android.package-archive',
-  );
+  //
+  // 没授权「安装未知应用」时，系统可能直接抛异常而不是弹授权页，
+  // 这里转成带标记的错误，UI 好据此引导用户去设置。
+  try {
+    await ReactNativeBlobUtil.android.actionViewIntent(
+      path,
+      'application/vnd.android.package-archive',
+    );
+  } catch (e) {
+    const msg = e instanceof Error ? e.message : String(e);
+    if (/permission|denied|install|unknown|not allowed/i.test(msg)) {
+      throw new InstallPermissionError(msg);
+    }
+    throw e;
+  }
+}
+
+/** 缺少「安装未知应用」权限。UI 捕获后引导用户去设置页开启 */
+export class InstallPermissionError extends Error {
+  constructor(detail: string) {
+    super(`需要授权「安装未知应用」才能完成更新（${detail}）`);
+    this.name = 'InstallPermissionError';
+  }
+}
+
+/**
+ * 打开「安装未知应用」权限设置页。
+ *
+ * 为什么需要这个：Android 8+ 装 APK 必须用户手动授权，
+ * 而各家 ROM 把这个开关藏在不同位置（小米尤其深）。
+ * manifest 里声明了 REQUEST_INSTALL_PACKAGES 之后，系统才会把本 App
+ * 列进这个名单；否则用户根本找不到。
+ *
+ * 依次尝试：
+ *   1. 直接跳本 App 的安装权限页（最理想，用户一进来就是自己）
+ *   2. 普通设置页
+ *   3. 应用详情页（兜底，用户自己找「安装未知应用」）
+ */
+export async function openInstallPermissionSettings(packageName: string): Promise<boolean> {
+  const candidates = [
+    // 精确跳转到本 App 的「安装未知应用」页
+    `package:${packageName}`,
+    // 全部应用的安装权限列表
+    'package:',
+    // 兜底：应用详情页
+    `package:${packageName}`,
+  ];
+
+  for (const url of candidates) {
+    try {
+      await Linking.openURL(url);
+      return true;
+    } catch {
+      // 这个 URL 不被支持，试下一个
+    }
+  }
+  return false;
 }
 
 /** 清掉下载过的旧 APK（装完或用户取消后调用） */

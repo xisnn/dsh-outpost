@@ -33,6 +33,8 @@ import {
   checkForUpdate,
   downloadAndInstall,
   type DownloadProgress,
+  openInstallPermissionSettings,
+  InstallPermissionError,
   type ReleaseInfo,
 } from '../core/updater';
 
@@ -68,6 +70,7 @@ export function ProfileScreen({ active = true }: { active?: boolean }) {
   // ── 应用内更新 ──────────────────────────────────────────────
   const [updating, setUpdating] = useState(false);
   const [updateProgress, setUpdateProgress] = useState<DownloadProgress | null>(null);
+  const [showInstallPermGuide, setShowInstallPermGuide] = useState(false);
   const [updateHint, setUpdateHint] = useState<string | null>(null);
   const [pendingRelease, setPendingRelease] = useState<ReleaseInfo | null>(null);
   const [confirmUpdate, setConfirmUpdate] = useState(false);
@@ -112,8 +115,14 @@ export function ProfileScreen({ active = true }: { active?: boolean }) {
       setUpdateHint('正在打开安装器…');
       setUpdateProgress(null);
     } catch (e) {
-      setUpdateHint(e instanceof Error ? e.message : '下载失败');
       setUpdateProgress(null);
+      // 缺「安装未知应用」权限：别只报错，直接弹引导
+      if (e instanceof InstallPermissionError) {
+        setUpdateHint('需要授权安装权限');
+        setShowInstallPermGuide(true);
+      } else {
+        setUpdateHint(e instanceof Error ? e.message : '下载失败');
+      }
     } finally {
       setUpdating(false);
       setPendingRelease(null);
@@ -448,6 +457,24 @@ export function ProfileScreen({ active = true }: { active?: boolean }) {
         onConfirm={() => {
           setConfirmSignOut(false);
           void signOut();
+        }}
+      />
+
+      {/* 缺「安装未知应用」权限：直接引导到设置页 */}
+      <ConfirmSheet
+        visible={showInstallPermGuide}
+        title="需要开启安装权限"
+        message={
+          '系统要求手动允许「安装未知应用」才能完成更新。\n\n' +
+          '点下面的按钮会打开设置页，找到「DSH Pocket」并打开开关，' +
+          '然后回到 App 重新点「检查更新」。'
+        }
+        confirmText="去设置"
+        cancelText="稍后"
+        onCancel={() => setShowInstallPermGuide(false)}
+        onConfirm={() => {
+          setShowInstallPermGuide(false);
+          void openInstallPermissionSettings('com.dshpocket');
         }}
       />
 
