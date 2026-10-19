@@ -7,6 +7,7 @@
  * - 网络/流断开时保留已有数据，标记状态，不丢内容
  */
 
+import AsyncStorage from '@react-native-async-storage/async-storage';
 import type { DshConnection, StreamHandle } from '../core/transport';
 import { SessionApi, groupByWorkspace, readStatus } from '../core/rpc/session';
 import { ModelApi } from '../core/rpc/model';
@@ -15,6 +16,9 @@ import { UploadApi } from '../core/rpc/upload';
 import { WorkspaceApi } from '../core/rpc/workspace';
 import type { WorkspaceCustom } from '../core/workspace-custom';
 import { foldEvents, toChatItems, isInjectedMessage, stripModeTag, type ChatItem, type Turn } from '../core/fold';
+
+/** 已归档会话 id 的存储 key（DSH 不返回归档状态，只能客户端自己记） */
+const ARCHIVED_KEY = '@dsh/archivedSessions';
 import type { AttachRef, AgentTeam, EventRecord, PromptPart, SessionAddress, SessionSummary } from '../core/types';
 
 /** 待发送附件：本地显示用 ref + 真正发出去的 part */
@@ -108,6 +112,9 @@ export class Store {
 
   sessions: SessionSummary[] = [];
   workspaces: ReturnType<typeof groupByWorkspace> = [];
+  /** 已归档（用户视角的「已删除」）的会话 id。DSH 不返回，客户端自己存 */
+  private archived = new Set<string>();
+  private archivedLoaded = false;
   sessionsLoading = false;
   sessionsError?: string;
 
@@ -410,15 +417,78 @@ export class Store {
     this.sessionsError = undefined;
     this.emit();
     try {
+      // 归档列表由客户端自己维护（DSH 不返回这个信息），
+      // 加载前先同步一次，避免新设备/清缓存后状态错乱
+      await this.ensureArchivedLoaded();
       const items = await this.api.list();
       this.sessions = items;
-      this.workspaces = groupByWorkspace(items);
+      this.workspaces = groupByWorkspace(this.visibleSessions(items));
     } catch (e) {
       this.sessionsError = e instanceof Error ? e.message : String(e);
     } finally {
       this.sessionsLoading = false;
       this.emit();
     }
+  }
+
+  /** 过滤掉已归档的会话（用户视角的「已删除」） */
+  private visibleSessions(items: SessionSummary[]): SessionSummary[] {
+    if (this.archived.size === 0) return items;
+    return items.filter((s) => !this.archived.has(s.sessionId));
+  }
+
+  /** 归档列表存在 AsyncStorage，只在首次用到时读一次 */
+  private async ensureArchivedLoaded(): Promise<void> {
+    if (this.archivedLoaded) return;
+    this.archivedLoaded = true;
+    try {
+      const raw = await AsyncStorage.getItem(ARCHIVED_KEY);
+      if (raw) {
+        const ids = JSON.parse(raw) as string[];
+        if (Array.isArray(ids)) this.archived = new Set(ids);
+      }
+    } catch {
+      // 读失败就当没有归档
+    }
+  }
+
+  private async persistArchived(): Promise<void> {
+    try {
+      await AsyncStorage.setItem(ARCHIVED_KEY, JSON.stringify([...this.archived]));
+    } catch {
+      // 存不下也不影响当前会话
+    }
+  }
+
+  /** 用户视角的「删除对话」= 归档。会立刻从列表里移除 */
+  async archiveSession(sessionId: string): Promise<void> {
+    await this.ensureArchivedLoaded();
+    const ids = await this.workspace.archiveSession(sessionId);
+    // 优先用服务端返回的完整列表，保证多设备一致
+    if (ids.length > 0) this.archived = new Set(ids);
+    else this.archived.add(sessionId);
+    await this.persistArchived();
+    // 立即从前端列表里剔除，不等下次 loadSessions
+    this.sessions = this.sessions.filter((s) => s.sessionId !== sessionId);
+    this.workspaces = groupByWorkspace(this.visibleSessions(this.sessions));
+    // 顺带把聊天缓存清掉，避免删完还能点进去
+    this.chats.delete(sessionId);
+    this.emit();
+  }
+
+  /** 从「已删除」里恢复（取消归档） */
+  async unarchiveSession(sessionId: string): Promise<void> {
+    await this.ensureArchivedLoaded();
+    const ids = await this.workspace.unarchiveSession(sessionId);
+    if (ids.length > 0) this.archived = new Set(ids);
+    else this.archived.delete(sessionId);
+    await this.persistArchived();
+    await this.loadSessions();
+  }
+
+  /** 已归档的会话（给「最近删除」页面用） */
+  getArchivedIds(): string[] {
+    return [...this.archived];
   }
 
   // ── 对话 ──────────────────────────────────────────────────────────

@@ -21,6 +21,7 @@ import { useNav } from '../nav/NavHost';
 import { useTheme } from '../design/theme';
 import { radius, space, type, weight } from '../design/tokens';
 import { Dot, Pill } from '../components/ui';
+import { ConfirmSheet } from '../components/ConfirmSheet';
 
 function formatAgo(ts: number): string {
   if (!ts) return '';
@@ -50,6 +51,9 @@ export function SessionsScreen({
   const [refreshing, setRefreshing] = useState(false);
   const [creating, setCreating] = useState(false);
   const [createError, setCreateError] = useState<string | null>(null);
+  // 长按删除：待确认的会话
+  const [pendingDelete, setPendingDelete] = useState<{ id: string; title: string } | null>(null);
+  const [deleting, setDeleting] = useState(false);
 
   useEffect(() => {
     const unsub = store.subscribe(() => force((n) => n + 1));
@@ -60,6 +64,24 @@ export function SessionsScreen({
     setRefreshing(true);
     await store.loadSessions();
     setRefreshing(false);
+  };
+
+  /** 长按会话：弹确认框（删除 = 归档，可恢复） */
+  const askDelete = (id: string, title: string) => {
+    setPendingDelete({ id, title });
+  };
+
+  const confirmDelete = async () => {
+    if (!pendingDelete) return;
+    setDeleting(true);
+    try {
+      await store.archiveSession(pendingDelete.id);
+    } catch {
+      // 失败就不删，列表保持原样
+    } finally {
+      setDeleting(false);
+      setPendingDelete(null);
+    }
   };
 
   const createNew = async () => {
@@ -156,6 +178,8 @@ export function SessionsScreen({
                 pressed && styles.cardPressed,
               ]}
               onPress={() => nav.push('Chat', { sessionId: item.sessionId, title })}
+              onLongPress={() => askDelete(item.sessionId, title)}
+              delayLongPress={450}
             >
               <View style={styles.cardTop}>
                 <Text style={styles.title} numberOfLines={2}>
@@ -207,6 +231,17 @@ export function SessionsScreen({
             </Pressable>
           );
         }}
+      />
+
+      {/* 长按删除确认。删除 = 归档，能在「最近删除」里恢复 */}
+      <ConfirmSheet
+        visible={!!pendingDelete}
+        title="删除这个对话？"
+        message={`「${pendingDelete?.title ?? ''}」会从列表里移除。\n对话内容还在电脑上，可以恢复。`}
+        confirmText={deleting ? '删除中…' : '删除'}
+        destructive
+        onCancel={() => setPendingDelete(null)}
+        onConfirm={() => void confirmDelete()}
       />
     </View>
   );
