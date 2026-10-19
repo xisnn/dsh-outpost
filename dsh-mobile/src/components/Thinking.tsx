@@ -20,7 +20,7 @@ import { Collapse } from './ui';
 
 type Styles = ReturnType<typeof makeStyles>;
 
-function Dot({ delay, color, styles }: { delay: number; color: string; styles: Styles }) {
+function Dot({ delay, color, styles, big }: { delay: number; color: string; styles: Styles; big?: boolean }) {
   const v = useRef(new Animated.Value(0)).current;
 
   useEffect(() => {
@@ -51,11 +51,17 @@ function Dot({ delay, color, styles }: { delay: number; color: string; styles: S
     <Animated.View
       style={[
         styles.dot,
+        big ? styles.dotLarge : null,
         {
           backgroundColor: color,
           opacity: v.interpolate({ inputRange: [0, 1], outputRange: [0.2, 0.95] }),
           transform: [
-            { translateY: v.interpolate({ inputRange: [0, 1], outputRange: [0, -2.5] }) },
+            {
+              translateY: v.interpolate({
+                inputRange: [0, 1],
+                outputRange: [0, big ? -4 : -2.5],
+              }),
+            },
           ],
         },
       ]}
@@ -63,15 +69,23 @@ function Dot({ delay, color, styles }: { delay: number; color: string; styles: S
   );
 }
 
-export function ThinkingDots({ color }: { color?: string }) {
+export function ThinkingDots({
+  color,
+  size = 'small',
+}: {
+  color?: string;
+  /** large 用于消息区末尾的「思考中」提示，small 用于状态行 */
+  size?: 'small' | 'large';
+}) {
   const tv = useTheme();
   const styles = useMemo(() => makeStyles(tv), [tv]);
   const dotColor = color ?? tv.colors.textSecondary;
+  const big = size === 'large';
   return (
-    <View style={styles.dotsRow}>
-      <Dot delay={0} color={dotColor} styles={styles} />
-      <Dot delay={motion.thinkingDotStaggerMs} color={dotColor} styles={styles} />
-      <Dot delay={motion.thinkingDotStaggerMs * 2} color={dotColor} styles={styles} />
+    <View style={[styles.dotsRow, big ? styles.dotsRowLarge : null]}>
+      <Dot delay={0} color={dotColor} styles={styles} big={big} />
+      <Dot delay={motion.thinkingDotStaggerMs} color={dotColor} styles={styles} big={big} />
+      <Dot delay={motion.thinkingDotStaggerMs * 2} color={dotColor} styles={styles} big={big} />
     </View>
   );
 }
@@ -137,7 +151,9 @@ function makeStyles(tv: ReturnType<typeof useTheme>) {
   const C = tv.colors;
   return StyleSheet.create({
     dotsRow: { flexDirection: 'row', alignItems: 'center' },
+    dotsRowLarge: { alignItems: 'center' },
     dot: { width: 4.5, height: 4.5, borderRadius: 2.25, marginRight: 3 },
+    dotLarge: { width: 7, height: 7, borderRadius: 3.5, marginRight: 5 },
 
     wrap: {
       marginHorizontal: space.lg + 2,

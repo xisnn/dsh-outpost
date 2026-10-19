@@ -24,15 +24,26 @@ import type { AttachRef, ContentBlock, EventRecord } from '../types';
 export const BUTLER_PRIME_MARK = '〔管家初始化〕';
 /** 客户端替管家补发的「队员完成」通知，同样不该显示成用户消息 */
 export const SYSTEM_NUDGE_MARK = '〔系统通知〕';
+/** 切换闲聊/计划模式时补发的短指令 */
+export const BUTLER_MODE_MARK = '〔模式切换〕';
 
 export function isButlerPrime(text: string): boolean {
   return text.trimStart().startsWith(BUTLER_PRIME_MARK);
 }
 
-/** 界面上不该出现的「注入消息」：管家初始化 + 系统通知 */
+/** 界面上不该出现的「注入消息」：管家初始化 + 系统通知 + 模式切换 + DSH 运行时上下文 */
 export function isInjectedMessage(text: string): boolean {
   const t = text.trimStart();
-  return t.startsWith(BUTLER_PRIME_MARK) || t.startsWith(SYSTEM_NUDGE_MARK);
+  return (
+    t.startsWith(BUTLER_PRIME_MARK) ||
+    t.startsWith(SYSTEM_NUDGE_MARK) ||
+    t.startsWith(BUTLER_MODE_MARK) ||
+    // DSH 每轮注入的运行时上下文，纯噪音，不该显示成用户发言
+    t.startsWith('Current runtime context.') ||
+    t.startsWith('Time sampled while preparing turn') ||
+    t.startsWith('<system-reminder>') ||
+    t.startsWith('[model changed:')
+  );
 }
 
 export interface TextBlock {

@@ -22,6 +22,7 @@ import {
   View,
 } from 'react-native';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
+import AsyncStorage from '@react-native-async-storage/async-storage';
 
 import { useApp } from '../App';
 import { useNav } from '../nav/NavHost';
@@ -32,14 +33,19 @@ import { AssistantText, UserBubble } from '../components/Message';
 import { TeamBar } from '../components/TeamBar';
 import { TeamStrip } from '../components/TeamStrip';
 import { TeamSheet } from '../components/TeamSheet';
+import { ButlerModeSwitch, type ButlerMode } from '../components/ButlerModeSwitch';
 import { ThinkingAccordion, ThinkingDots } from '../components/Thinking';
 import { ToolCard } from '../components/ToolCard';
 import { ModelSwitcher } from '../components/ModelSwitcher';
 import { pickAttachments, formatBytes, type PickMode } from '../core/picker';
 import { guessImageMime, readFileBase64 } from '../core/rpc/upload';
 import type { OutgoingAttachment } from '../core/store';
+import { buildModeSwitch } from '../core/butler';
 import type { Block } from '../core/fold';
 import type { SessionAddress } from '../core/types';
+
+/** 管家模式（闲聊/计划）的持久化 key */
+const BUTLER_PLAN_KEY = '@dsh/butlerPlan';
 
 /** 待发送的本地附件 */
 interface Draft {
@@ -83,6 +89,8 @@ export function ChatScreen({
   const [sending, setSending] = useState(false);
   const [attaching, setAttaching] = useState(false);
   const [sendError, setSendError] = useState<string | undefined>(undefined);
+  // 管家模式：chat=闲聊（默认，直接回答）/ plan=计划（先对齐需求再派活）
+  const [butlerMode, setButlerMode] = useState<ButlerMode>('chat');
   const scrollRef = useRef<ScrollView>(null);
   const [nearBottom, setNearBottom] = useState(true);
 
@@ -104,6 +112,32 @@ export function ChatScreen({
 
   const chat = store.getChat(sessionId);
   const hasTeam = !!chat.agentTeam;
+
+  // 恢复上次选的管家模式（全局一个，不按会话记）
+  useEffect(() => {
+    if (!butler) return;
+    void (async () => {
+      try {
+        const saved = await AsyncStorage.getItem(BUTLER_PLAN_KEY);
+        if (saved === 'plan') setButlerMode('plan');
+      } catch {
+        // 读不到就用默认（闲聊）
+      }
+    })();
+  }, [butler]);
+
+  /** 切换闲聊/计划：持久化 + 告诉管家换档（指令消息在 fold 层被过滤） */
+  const switchButlerMode = useCallback(
+    (mode: ButlerMode) => {
+      setButlerMode(mode);
+      void AsyncStorage.setItem(BUTLER_PLAN_KEY, mode);
+      // 只在已经有对话时补发，空会话靠 prime 里的规则就够了
+      if (chat.items.length > 0) {
+        void store.send(sessionId, buildModeSwitch(mode), []);
+      }
+    },
+    [chat.items.length, sessionId, store],
+  );
 
   // 团队状态靠投影轮询刷新：team/* 事件不在会话日志里，拿不到增量
   useEffect(() => {
@@ -313,6 +347,9 @@ export function ChatScreen({
         />
       </View>
 
+      {/* 管家模式：闲聊 / 计划（居中，仅管家页出现） */}
+      {butler ? <ButlerModeSwitch mode={butlerMode} onChange={switchButlerMode} /> : null}
+
       {/* 空会话还没内容时，连不上不该糊一条红条在脸上 —— 静默重试即可 */}
       {chat.error && (chat.items.length > 0 || !isBlankChat) ? (
         <View style={styles.errorBar}>
@@ -410,8 +447,8 @@ export function ChatScreen({
 
           {chat.running && chat.items.length > 0 ? (
             <View style={styles.liveRow}>
-              <ThinkingDots color={tv.colors.accent} />
-              <Text style={styles.liveText}>继续中…</Text>
+              <ThinkingDots color={tv.colors.accent} size="large" />
+              <Text style={styles.liveText}>{butler ? '管家在思考…' : '继续中…'}</Text>
             </View>
           ) : null}
 
