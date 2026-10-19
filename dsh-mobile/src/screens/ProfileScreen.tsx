@@ -27,6 +27,8 @@ import { themeLabels, type ThemeMode } from '../design/tokens';
 import { formatCount, formatMoney, sumWallets } from '../core/rpc/account';
 import { SectionLabel } from '../components/ui';
 import { ConfirmSheet } from '../components/ConfirmSheet';
+import { APP_VERSION, APP_VERSION_LABEL } from '../core/version';
+import { checkForUpdate, downloadAndInstall, type ReleaseInfo } from '../core/updater';
 
 /** 一个币种的余额构成 */
 interface MoneyLine {
@@ -56,6 +58,50 @@ export function ProfileScreen({ active = true }: { active?: boolean }) {
   // 所以这里单独 ping 一次，给用户一个真实的连通性结论。
   const [net, setNet] = useState<NetState>('checking');
   const [confirmSignOut, setConfirmSignOut] = useState(false);
+
+  // ── 应用内更新 ──────────────────────────────────────────────
+  const [updating, setUpdating] = useState(false);
+  const [updateHint, setUpdateHint] = useState<string | null>(null);
+  const [pendingRelease, setPendingRelease] = useState<ReleaseInfo | null>(null);
+  const [confirmUpdate, setConfirmUpdate] = useState(false);
+
+  /** 点「检查更新」：查 GitHub Releases，有新版本就弹确认 */
+  const onCheckUpdate = useCallback(async () => {
+    setUpdating(true);
+    setUpdateHint(null);
+    try {
+      const rel = await checkForUpdate(APP_VERSION);
+      if (!rel) {
+        setUpdateHint('已是最新');
+        return;
+      }
+      setPendingRelease(rel);
+      setConfirmUpdate(true);
+    } catch {
+      setUpdateHint('检查失败，稍后再试');
+    } finally {
+      setUpdating(false);
+    }
+  }, []);
+
+  /** 确认更新：下载 APK 并唤起系统安装器 */
+  const doUpdate = useCallback(async () => {
+    if (!pendingRelease) return;
+    setConfirmUpdate(false);
+    setUpdating(true);
+    setUpdateHint('下载中 0%');
+    try {
+      await downloadAndInstall(pendingRelease, (r) => {
+        setUpdateHint(`下载中 ${Math.round(r * 100)}%`);
+      });
+      setUpdateHint('正在打开安装器…');
+    } catch (e) {
+      setUpdateHint(e instanceof Error ? e.message : '下载失败');
+    } finally {
+      setUpdating(false);
+      setPendingRelease(null);
+    }
+  }, [pendingRelease]);
 
   const checkNet = useCallback(async () => {
     setNet('checking');
@@ -338,6 +384,33 @@ export function ProfileScreen({ active = true }: { active?: boolean }) {
           </View>
         </View>
 
+        {/* ── 关于 ─────────────────────────────────────── */}
+        <SectionLabel text="关于" />
+        <View style={styles.infoCard}>
+          <View style={styles.infoRow}>
+            <Text style={styles.infoKey}>版本</Text>
+            <Text style={styles.infoVal}>{APP_VERSION_LABEL}</Text>
+          </View>
+          <View style={styles.infoSep} />
+          <Pressable
+            onPress={() => void onCheckUpdate()}
+            disabled={updating}
+            style={({ pressed }: { pressed: boolean }) => [
+              styles.infoRow,
+              pressed ? { opacity: 0.6 } : null,
+            ]}
+          >
+            <Text style={styles.infoKey}>检查更新</Text>
+            {updating ? (
+              <ActivityIndicator size="small" color={tv.colors.accent} />
+            ) : (
+              <Text style={[styles.infoVal, { color: tv.colors.accentBright }]}>
+                {updateHint ?? '点击检查'}
+              </Text>
+            )}
+          </Pressable>
+        </View>
+
         <Pressable
           onPress={() => setConfirmSignOut(true)}
           style={({ pressed }: { pressed: boolean }) => [
@@ -362,6 +435,25 @@ export function ProfileScreen({ active = true }: { active?: boolean }) {
           setConfirmSignOut(false);
           void signOut();
         }}
+      />
+
+      {/* 发现新版本：确认后下载安装 */}
+      <ConfirmSheet
+        visible={confirmUpdate}
+        title={`发现新版本 ${pendingRelease?.tag ?? ''}`}
+        message={
+          (pendingRelease?.apkSize
+            ? `安装包 ${(pendingRelease.apkSize / 1024 / 1024).toFixed(1)} MB。\n`
+            : '') + '下载完成后会自动打开系统安装界面。'
+        }
+        confirmText="更新"
+        cancelText="以后再说"
+        onCancel={() => {
+          setConfirmUpdate(false);
+          setPendingRelease(null);
+          setUpdateHint(null);
+        }}
+        onConfirm={() => void doUpdate()}
       />
     </View>
   );

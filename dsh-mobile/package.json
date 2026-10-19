@@ -1,6 +1,6 @@
 {
   "name": "dsh-pocket",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "private": true,
   "description": "DSH 原生移动客户端：工作区 / 会话 / 聊天",
   "scripts": {
@@ -12,7 +12,8 @@
     "test:cwd": "node tests/cwd-spec.mjs",
     "test:pairing": "tsx tests/pairing-spec.mjs",
     "test:e2e": "tsx tests/e2e.mjs",
-    "test": "npm run test:fold && npm run test:cwd && npm run test:pairing && npm run typecheck"
+    "test": "npm run test:fold && npm run test:cwd && npm run test:pairing && npm run test:semver && npm run typecheck",
+    "test:semver": "tsx tests/updater-spec.mjs"
   },
   "dependencies": {
     "@react-native-async-storage/async-storage": "^2.1.0",
