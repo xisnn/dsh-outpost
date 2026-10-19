@@ -83,9 +83,11 @@ android {
         minSdkVersion rootProject.ext.minSdkVersion
         targetSdkVersion rootProject.ext.targetSdkVersion
         // versionCode 必须单调递增，否则 Android 拒绝覆盖安装（应用内更新靠它判断）。
-        // CI 里由 tag 推导：v0.2.0 -> versionCode 200、versionName 0.2.0。
-        versionCode (project.findProperty('DSH_VERSION_CODE') ?: 1) as Integer
-        versionName project.findProperty('DSH_VERSION_NAME') ?: "1.0"
+        // CI 里由 tag 推导：v0.2.0 -> versionCode 2000、versionName 0.2.0。
+        // 注意：findProperty 返回 String，必须显式 toInteger()，
+        // 直接 `as Integer` 在 DSL 里会让整段表达式求值成 null。
+        versionCode((project.findProperty('DSH_VERSION_CODE') ?: '1').toString().toInteger())
+        versionName((project.findProperty('DSH_VERSION_NAME') ?: '1.0').toString())
 
         // 明文 HTTP 由 AndroidManifest 里的 networkSecurityConfig 显式允许。
         // 之前用 manifestPlaceholders 控制，release 构建会被覆盖成 false，

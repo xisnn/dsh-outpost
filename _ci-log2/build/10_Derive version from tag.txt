@@ -1,0 +1,32 @@
+﻿2026-10-19T13:00:58.1284621Z ##[group]Run TAG="${GITHUB_REF_NAME}"
+2026-10-19T13:00:58.1284922Z [36;1mTAG="${GITHUB_REF_NAME}"[0m
+2026-10-19T13:00:58.1285144Z [36;1mif [[ ! "$TAG" =~ ^v[0-9] ]]; then[0m
+2026-10-19T13:00:58.1285383Z [36;1m  TAG="v0.0.${GITHUB_RUN_NUMBER}"[0m
+2026-10-19T13:00:58.1285612Z [36;1m  echo "非 tag 触发，使用合成版本 $TAG"[0m
+2026-10-19T13:00:58.1285830Z [36;1mfi[0m
+2026-10-19T13:00:58.1285991Z [36;1mVER="${TAG#v}"[0m
+2026-10-19T13:00:58.1286324Z [36;1m# 位加权：major*1000000 + minor*1000 + patch，避免 minor 跨十位时和 major 冲突[0m
+2026-10-19T13:00:58.1286691Z [36;1m# v0.2.0 -> 2000，v0.10.2 -> 10002，v1.0.0 -> 1000000[0m
+2026-10-19T13:00:58.1286967Z [36;1mIFS='.' read -r MAJ MIN PAT <<< "$VER"[0m
+2026-10-19T13:00:58.1287241Z [36;1mCODE=$(( MAJ * 1000000 + MIN * 1000 + ${PAT:-0} ))[0m
+2026-10-19T13:00:58.1287506Z [36;1mecho "version=$VER" >> "$GITHUB_OUTPUT"[0m
+2026-10-19T13:00:58.1287909Z [36;1mecho "code=$CODE" >> "$GITHUB_OUTPUT"[0m
+2026-10-19T13:00:58.1288150Z [36;1mecho "tag=$TAG" >> "$GITHUB_OUTPUT"[0m
+2026-10-19T13:00:58.1288430Z [36;1mecho "版本: $TAG (versionCode=$CODE)"[0m
+2026-10-19T13:00:58.1288639Z [36;1m[0m
+2026-10-19T13:00:58.1288807Z [36;1m# package.json 是 JS 侧读取版本号的唯一来源[0m
+2026-10-19T13:00:58.1289018Z [36;1mnode -e "[0m
+2026-10-19T13:00:58.1289201Z [36;1m  const fs=require('fs');[0m
+2026-10-19T13:00:58.1289786Z [36;1m  const p=JSON.parse(fs.readFileSync('dsh-mobile/package.json','utf8'));[0m
+2026-10-19T13:00:58.1290107Z [36;1m  p.version='$VER';[0m
+2026-10-19T13:00:58.1290417Z [36;1m  fs.writeFileSync('dsh-mobile/package.json', JSON.stringify(p,null,2)+'\n');[0m
+2026-10-19T13:00:58.1290746Z [36;1m"[0m
+2026-10-19T13:00:58.1291058Z [36;1mnode -e "console.log('package.json version =', require('./dsh-mobile/package.json').version)"[0m
+2026-10-19T13:00:58.1348153Z shell: /usr/bin/bash -e {0}
+2026-10-19T13:00:58.1348382Z env:
+2026-10-19T13:00:58.1348656Z   JAVA_HOME: /opt/hostedtoolcache/Java_Temurin-Hotspot_jdk/21.0.12-1/x64
+2026-10-19T13:00:58.1349039Z   JAVA_HOME_21_X64: /opt/hostedtoolcache/Java_Temurin-Hotspot_jdk/21.0.12-1/x64
+2026-10-19T13:00:58.1349592Z   ANDROID_NDK_HOME: /usr/local/lib/android/sdk/ndk/27.1.12297006
+2026-10-19T13:00:58.1349926Z ##[endgroup]
+2026-10-19T13:00:58.1425493Z 版本: v0.2.1 (versionCode=2001)
+2026-10-19T13:00:58.1842918Z package.json version = 0.2.1

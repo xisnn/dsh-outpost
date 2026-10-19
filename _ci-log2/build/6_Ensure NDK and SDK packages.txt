@@ -1,0 +1,121 @@
+﻿2026-10-19T12:59:36.5161409Z ##[group]Run SDK="${ANDROID_SDK_ROOT:-$ANDROID_HOME}"
+2026-10-19T12:59:36.5161787Z [36;1mSDK="${ANDROID_SDK_ROOT:-$ANDROID_HOME}"[0m
+2026-10-19T12:59:36.5162090Z [36;1mSDKMANAGER="$SDK/cmdline-tools/latest/bin/sdkmanager"[0m
+2026-10-19T12:59:36.5162378Z [36;1mif [ ! -x "$SDKMANAGER" ]; then[0m
+2026-10-19T12:59:36.5162700Z [36;1m  SDKMANAGER=$(find "$SDK/cmdline-tools" -name sdkmanager -type f | head -1)[0m
+2026-10-19T12:59:36.5163038Z [36;1mfi[0m
+2026-10-19T12:59:36.5163220Z [36;1mecho "sdkmanager: $SDKMANAGER"[0m
+2026-10-19T12:59:36.5163451Z [36;1m[0m
+2026-10-19T12:59:36.5163606Z [36;1mneed=""[0m
+2026-10-19T12:59:36.5163846Z [36;1m[ -d "$SDK/ndk/27.1.12297006" ] || need="$need ndk;27.1.12297006"[0m
+2026-10-19T12:59:36.5164209Z [36;1m[ -d "$SDK/platforms/android-36" ] || need="$need platforms;android-36"[0m
+2026-10-19T12:59:36.5164576Z [36;1m[ -d "$SDK/build-tools/36.0.0" ] || need="$need build-tools;36.0.0"[0m
+2026-10-19T12:59:36.5164927Z [36;1m[0m
+2026-10-19T12:59:36.5165124Z [36;1mif [ -n "$need" ]; then[0m
+2026-10-19T12:59:36.5165371Z [36;1m  echo "安装缺少的包:$need"[0m
+2026-10-19T12:59:36.5165601Z [36;1m  yes | "$SDKMANAGER" --install $need[0m
+2026-10-19T12:59:36.5165828Z [36;1melse[0m
+2026-10-19T12:59:36.5166034Z [36;1m  echo "NDK / platform / build-tools 都已存在，跳过下载"[0m
+2026-10-19T12:59:36.5166274Z [36;1mfi[0m
+2026-10-19T12:59:36.5166429Z [36;1m[0m
+2026-10-19T12:59:36.5166650Z [36;1mecho "ANDROID_NDK_HOME=$SDK/ndk/27.1.12297006" >> "$GITHUB_ENV"[0m
+2026-10-19T12:59:36.5228035Z shell: /usr/bin/bash -e {0}
+2026-10-19T12:59:36.5228602Z env:
+2026-10-19T12:59:36.5228988Z   JAVA_HOME: /opt/hostedtoolcache/Java_Temurin-Hotspot_jdk/21.0.12-1/x64
+2026-10-19T12:59:36.5229906Z   JAVA_HOME_21_X64: /opt/hostedtoolcache/Java_Temurin-Hotspot_jdk/21.0.12-1/x64
+2026-10-19T12:59:36.5230309Z ##[endgroup]
+2026-10-19T12:59:36.5311527Z sdkmanager: /usr/local/lib/android/sdk/cmdline-tools/latest/bin/sdkmanager
+2026-10-19T12:59:36.5315192Z 安装缺少的包: ndk;27.1.12297006
+2026-10-19T12:59:40.6019684Z Loading package information...                                                  
+2026-10-19T12:59:40.6970269Z Loading local repository...                                                     
+2026-10-19T12:59:40.6984326Z [                                       ] 3% Loading local repository...        
+2026-10-19T12:59:42.1504309Z [                                       ] 3% Fetch remote repository...         
+2026-10-19T12:59:42.7840016Z [=                                      ] 3% Fetch remote repository...         
+2026-10-19T12:59:42.8226593Z [=                                      ] 4% Fetch remote repository...         
+2026-10-19T12:59:42.8408757Z [=                                      ] 5% Fetch remote repository...         
+2026-10-19T12:59:42.8647354Z [==                                     ] 5% Fetch remote repository...         
+2026-10-19T12:59:42.9059809Z [==                                     ] 6% Fetch remote repository...         
+2026-10-19T12:59:42.9795357Z [==                                     ] 7% Fetch remote repository...         
+2026-10-19T12:59:42.9821110Z [==                                     ] 7% Computing updates...               
+2026-10-19T12:59:42.9898420Z [===                                    ] 8% Computing updates...               
+2026-10-19T12:59:42.9987291Z [===                                    ] 10% Computing updates...              
+2026-10-19T12:59:43.2171091Z [===                                    ] 10% Installing NDK (Side by side) 27.1
+2026-10-19T12:59:43.6334533Z [===                                    ] 10% Downloading android-ndk-r27b-linux
+2026-10-19T12:59:43.7968851Z [====                                   ] 10% Downloading android-ndk-r27b-linux
+2026-10-19T12:59:43.9398600Z [====                                   ] 11% Downloading android-ndk-r27b-linux
+2026-10-19T12:59:44.0545103Z [====                                   ] 12% Downloading android-ndk-r27b-linux
+2026-10-19T12:59:44.1465525Z [=====                                  ] 13% Downloading android-ndk-r27b-linux
+2026-10-19T12:59:44.2439398Z [=====                                  ] 14% Downloading android-ndk-r27b-linux
+2026-10-19T12:59:44.3146572Z [=====                                  ] 15% Downloading android-ndk-r27b-linux
+2026-10-19T12:59:44.3563886Z [======                                 ] 15% Downloading android-ndk-r27b-linux
+2026-10-19T12:59:44.4606774Z [======                                 ] 16% Downloading android-ndk-r27b-linux
+2026-10-19T12:59:44.5768186Z [======                                 ] 17% Downloading android-ndk-r27b-linux
+2026-10-19T12:59:44.6657407Z [=======                                ] 18% Downloading android-ndk-r27b-linux
+2026-10-19T12:59:44.7817547Z [=======                                ] 19% Downloading android-ndk-r27b-linux
+2026-10-19T12:59:44.8342510Z [=======                                ] 20% Downloading android-ndk-r27b-linux
+2026-10-19T12:59:44.8860979Z [========                               ] 20% Downloading android-ndk-r27b-linux
+2026-10-19T12:59:45.0032964Z [========                               ] 21% Downloading android-ndk-r27b-linux
+2026-10-19T12:59:45.1006983Z [========                               ] 22% Downloading android-ndk-r27b-linux
+2026-10-19T12:59:45.2000930Z [=========                              ] 23% Downloading android-ndk-r27b-linux
+2026-10-19T12:59:45.3095866Z [=========                              ] 24% Downloading android-ndk-r27b-linux
+2026-10-19T12:59:45.3539674Z [=========                              ] 25% Downloading android-ndk-r27b-linux
+2026-10-19T12:59:45.4003801Z [==========                             ] 25% Downloading android-ndk-r27b-linux
+2026-10-19T12:59:45.5123590Z [==========                             ] 26% Downloading android-ndk-r27b-linux
+2026-10-19T12:59:45.6079170Z [==========                             ] 27% Downloading android-ndk-r27b-linux
+2026-10-19T12:59:45.7274538Z [===========                            ] 28% Downloading android-ndk-r27b-linux
+2026-10-19T12:59:45.8159131Z [===========                            ] 29% Downloading android-ndk-r27b-linux
+2026-10-19T12:59:45.8606872Z [===========                            ] 30% Downloading android-ndk-r27b-linux
+2026-10-19T12:59:45.9263347Z [============                           ] 30% Downloading android-ndk-r27b-linux
+2026-10-19T12:59:46.0247013Z [============                           ] 31% Downloading android-ndk-r27b-linux
+2026-10-19T12:59:46.1154404Z [============                           ] 32% Downloading android-ndk-r27b-linux
+2026-10-19T12:59:46.1158788Z [============                           ] 33% Downloading android-ndk-r27b-linux
+2026-10-19T12:59:46.4513459Z [============                           ] 33% Unzipping...                      
+2026-10-19T12:59:46.4514544Z [============                           ] 33% Unzipping... android-ndk-r27b/    
+2026-10-19T12:59:46.4530736Z [============                           ] 33% Unzipping... android-ndk-r27b/READ
+2026-10-19T12:59:46.5568301Z [=============                          ] 33% Unzipping... android-ndk-r27b/READ
+2026-10-19T12:59:46.6741907Z [=============                          ] 33% Unzipping... android-ndk-r27b/meta
+2026-10-19T12:59:47.3686144Z [=============                          ] 33% Unzipping... android-ndk-r27b/shad
+2026-10-19T12:59:47.3705084Z [=============                          ] 33% Unzipping... android-ndk-r27b/ndk-
+2026-10-19T12:59:47.3710988Z [=============                          ] 33% Unzipping... android-ndk-r27b/wrap
+2026-10-19T12:59:47.3711963Z [=============                          ] 33% Unzipping... android-ndk-r27b/ndk-
+2026-10-19T12:59:47.6661674Z [=============                          ] 33% Unzipping... android-ndk-r27b/tool
+2026-10-19T12:59:48.4713546Z [=============                          ] 34% Unzipping... android-ndk-r27b/tool
+2026-10-19T12:59:48.6718391Z [=============                          ] 35% Unzipping... android-ndk-r27b/tool
+2026-10-19T12:59:48.7893395Z [==============                         ] 35% Unzipping... android-ndk-r27b/tool
+2026-10-19T12:59:50.1639120Z [==============                         ] 36% Unzipping... android-ndk-r27b/tool
+2026-10-19T12:59:50.8452523Z [==============                         ] 37% Unzipping... android-ndk-r27b/tool
+2026-10-19T12:59:51.4543947Z [===============                        ] 38% Unzipping... android-ndk-r27b/tool
+2026-10-19T12:59:52.0742423Z [===============                        ] 39% Unzipping... android-ndk-r27b/tool
+2026-10-19T12:59:52.3569404Z [===============                        ] 40% Unzipping... android-ndk-r27b/tool
+2026-10-19T12:59:53.0390006Z [================                       ] 40% Unzipping... android-ndk-r27b/tool
+2026-10-19T12:59:53.7521086Z [================                       ] 41% Unzipping... android-ndk-r27b/tool
+2026-10-19T12:59:54.5256303Z [================                       ] 42% Unzipping... android-ndk-r27b/tool
+2026-10-19T12:59:55.9634706Z [=================                      ] 43% Unzipping... android-ndk-r27b/tool
+2026-10-19T12:59:57.0784691Z [=================                      ] 44% Unzipping... android-ndk-r27b/tool
+2026-10-19T12:59:57.5701436Z [=================                      ] 45% Unzipping... android-ndk-r27b/tool
+2026-10-19T12:59:57.7310874Z [==================                     ] 45% Unzipping... android-ndk-r27b/tool
+2026-10-19T12:59:58.2758793Z [==================                     ] 46% Unzipping... android-ndk-r27b/tool
+2026-10-19T12:59:59.0426425Z [==================                     ] 47% Unzipping... android-ndk-r27b/tool
+2026-10-19T12:59:59.7436976Z [===================                    ] 48% Unzipping... android-ndk-r27b/tool
+2026-10-19T13:00:00.2733519Z [===================                    ] 49% Unzipping... android-ndk-r27b/tool
+2026-10-19T13:00:00.4361864Z [===================                    ] 50% Unzipping... android-ndk-r27b/tool
+2026-10-19T13:00:00.6088335Z [====================                   ] 50% Unzipping... android-ndk-r27b/tool
+2026-10-19T13:00:01.7293400Z [====================                   ] 51% Unzipping... android-ndk-r27b/tool
+2026-10-19T13:00:02.1694171Z [====================                   ] 52% Unzipping... android-ndk-r27b/tool
+2026-10-19T13:00:02.9984229Z [=====================                  ] 53% Unzipping... android-ndk-r27b/tool
+2026-10-19T13:00:03.3182045Z [=====================                  ] 54% Unzipping... android-ndk-r27b/tool
+2026-10-19T13:00:03.4149175Z [=====================                  ] 54% Unzipping... android-ndk-r27b/buil
+2026-10-19T13:00:03.6565628Z [=====================                  ] 54% Unzipping... android-ndk-r27b/sour
+2026-10-19T13:00:03.6583224Z [=====================                  ] 54% Unzipping... android-ndk-r27b/NOTI
+2026-10-19T13:00:03.6584051Z [=====================                  ] 54% Unzipping... android-ndk-r27b/ndk-
+2026-10-19T13:00:03.6595669Z [=====================                  ] 54% Unzipping... android-ndk-r27b/NOTI
+2026-10-19T13:00:03.6622402Z [=====================                  ] 54% Unzipping... android-ndk-r27b/pyth
+2026-10-19T13:00:03.6961267Z [=====================                  ] 54% Unzipping... android-ndk-r27b/preb
+2026-10-19T13:00:03.6962763Z [=====================                  ] 54% Unzipping... android-ndk-r27b/ndk-
+2026-10-19T13:00:03.6963675Z [=====================                  ] 54% Unzipping... android-ndk-r27b/sour
+2026-10-19T13:00:03.7744902Z [=====================                  ] 54% Unzipping... android-ndk-r27b/simp
+2026-10-19T13:00:03.8943365Z [=====================                  ] 55% Unzipping... android-ndk-r27b/simp
+2026-10-19T13:00:03.9938244Z [=====================                  ] 55% Unzipping... android-ndk-r27b/CHAN
+2026-10-19T13:00:03.9938941Z [=======================================] 100% Unzipping... android-ndk-r27b/CHA
+2026-10-19T13:00:04.3498200Z 
+2026-10-19T13:00:04.3705985Z yes: standard output: Broken pipe

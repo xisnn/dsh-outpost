@@ -1,0 +1,91 @@
+﻿2026-10-19T13:00:58.1915238Z ##[group]Run chmod +x gradlew
+2026-10-19T13:00:58.1915477Z [36;1mchmod +x gradlew[0m
+2026-10-19T13:00:58.1915752Z [36;1mVERSION_ARGS="-PDSH_VERSION_NAME=0.2.1 -PDSH_VERSION_CODE=2001"[0m
+2026-10-19T13:00:58.1916076Z [36;1mecho "Gradle 版本参数: $VERSION_ARGS"[0m
+2026-10-19T13:00:58.1916295Z [36;1m[0m
+2026-10-19T13:00:58.1916479Z [36;1mif [ -n "$DSH_KEYSTORE_BASE64" ]; then[0m
+2026-10-19T13:00:58.1916710Z [36;1m  echo "使用仓库配置的签名密钥"[0m
+2026-10-19T13:00:58.1916982Z [36;1m  echo "$DSH_KEYSTORE_BASE64" | base64 -d > app/release.keystore[0m
+2026-10-19T13:00:58.1917343Z [36;1m  ./gradlew assembleRelease --no-daemon $VERSION_ARGS \[0m
+2026-10-19T13:00:58.1917657Z [36;1m    -PDSH_STORE_FILE=app/release.keystore \[0m
+2026-10-19T13:00:58.1917945Z [36;1m    -PDSH_STORE_PASSWORD="$DSH_KEYSTORE_PASSWORD" \[0m
+2026-10-19T13:00:58.1918217Z [36;1m    -PDSH_KEY_ALIAS="$DSH_KEY_ALIAS" \[0m
+2026-10-19T13:00:58.1918459Z [36;1m    -PDSH_KEY_PASSWORD="$DSH_KEY_PASSWORD"[0m
+2026-10-19T13:00:58.1918690Z [36;1melse[0m
+2026-10-19T13:00:58.1918916Z [36;1m  echo "未配置签名密钥，使用 debug 签名构建（可侧载，不可上架）"[0m
+2026-10-19T13:00:58.1919193Z [36;1m  ./gradlew assembleRelease --no-daemon $VERSION_ARGS[0m
+2026-10-19T13:00:58.1919647Z [36;1mfi[0m
+2026-10-19T13:00:58.1974597Z shell: /usr/bin/bash -e {0}
+2026-10-19T13:00:58.1974807Z env:
+2026-10-19T13:00:58.1975053Z   JAVA_HOME: /opt/hostedtoolcache/Java_Temurin-Hotspot_jdk/21.0.12-1/x64
+2026-10-19T13:00:58.1975443Z   JAVA_HOME_21_X64: /opt/hostedtoolcache/Java_Temurin-Hotspot_jdk/21.0.12-1/x64
+2026-10-19T13:00:58.1975802Z   ANDROID_NDK_HOME: /usr/local/lib/android/sdk/ndk/27.1.12297006
+2026-10-19T13:00:58.1976086Z   DSH_KEYSTORE_BASE64: 
+2026-10-19T13:00:58.1976275Z   DSH_KEYSTORE_PASSWORD: 
+2026-10-19T13:00:58.1976458Z   DSH_KEY_ALIAS: 
+2026-10-19T13:00:58.1976620Z   DSH_KEY_PASSWORD: 
+2026-10-19T13:00:58.1976790Z ##[endgroup]
+2026-10-19T13:00:58.2055508Z Gradle 版本参数: -PDSH_VERSION_NAME=0.2.1 -PDSH_VERSION_CODE=2001
+2026-10-19T13:00:58.2056149Z 未配置签名密钥，使用 debug 签名构建（可侧载，不可上架）
+2026-10-19T13:00:58.2843413Z Downloading https://services.gradle.org/distributions/gradle-8.14.3-bin.zip
+2026-10-19T13:01:00.0192623Z .............10%.............20%.............30%.............40%.............50%.............60%.............70%.............80%.............90%..............100%
+2026-10-19T13:01:01.3274431Z 
+2026-10-19T13:01:01.3280521Z Welcome to Gradle 8.14.3!
+2026-10-19T13:01:01.3280999Z 
+2026-10-19T13:01:01.3281248Z Here are the highlights of this release:
+2026-10-19T13:01:01.3281703Z  - Java 24 support
+2026-10-19T13:01:01.3282072Z  - GraalVM Native Image toolchain selection
+2026-10-19T13:01:01.3282862Z  - Enhancements to test reporting
+2026-10-19T13:01:01.3283240Z  - Build Authoring improvements
+2026-10-19T13:01:01.3283448Z 
+2026-10-19T13:01:01.3283820Z For more details see https://docs.gradle.org/8.14.3/release-notes.html
+2026-10-19T13:01:01.3284202Z 
+2026-10-19T13:01:01.4273577Z To honour the JVM settings for this build a single-use Daemon process will be forked. For more on this, please refer to https://docs.gradle.org/8.14.3/userguide/gradle_daemon.html#sec:disabling_the_daemon in the Gradle documentation.
+2026-10-19T13:01:02.6288130Z Daemon will be stopped at the end of the build 
+2026-10-19T13:01:38.6290691Z > Task :gradle-plugin:settings-plugin:checkKotlinGradlePluginConfigurationErrors SKIPPED
+2026-10-19T13:01:38.6291606Z > Task :gradle-plugin:shared:checkKotlinGradlePluginConfigurationErrors SKIPPED
+2026-10-19T13:01:43.5285743Z > Task :gradle-plugin:shared:processResources NO-SOURCE
+2026-10-19T13:01:43.5307984Z > Task :gradle-plugin:settings-plugin:pluginDescriptors
+2026-10-19T13:01:43.6268616Z > Task :gradle-plugin:settings-plugin:processResources
+2026-10-19T13:01:48.0268273Z > Task :gradle-plugin:shared:compileKotlin
+2026-10-19T13:01:48.0268870Z > Task :gradle-plugin:shared:compileJava NO-SOURCE
+2026-10-19T13:01:48.0274804Z > Task :gradle-plugin:shared:classes UP-TO-DATE
+2026-10-19T13:01:48.0275239Z > Task :gradle-plugin:shared:jar
+2026-10-19T13:01:53.9270485Z > Task :gradle-plugin:settings-plugin:compileKotlin
+2026-10-19T13:01:53.9274289Z > Task :gradle-plugin:settings-plugin:compileJava NO-SOURCE
+2026-10-19T13:01:53.9275270Z > Task :gradle-plugin:settings-plugin:classes
+2026-10-19T13:01:54.0268238Z > Task :gradle-plugin:settings-plugin:jar
+2026-10-19T13:02:09.2269044Z > Task :gradle-plugin:react-native-gradle-plugin:checkKotlinGradlePluginConfigurationErrors SKIPPED
+2026-10-19T13:02:11.7285413Z > Task :gradle-plugin:react-native-gradle-plugin:pluginDescriptors
+2026-10-19T13:02:11.7300519Z > Task :gradle-plugin:react-native-gradle-plugin:processResources
+2026-10-19T13:02:16.2268567Z > Task :gradle-plugin:react-native-gradle-plugin:compileKotlin
+2026-10-19T13:02:16.2269110Z > Task :gradle-plugin:react-native-gradle-plugin:compileJava NO-SOURCE
+2026-10-19T13:02:16.2269877Z > Task :gradle-plugin:react-native-gradle-plugin:classes
+2026-10-19T13:02:16.2270282Z > Task :gradle-plugin:react-native-gradle-plugin:jar
+2026-10-19T13:02:25.5317228Z 
+2026-10-19T13:02:25.5317335Z 
+2026-10-19T13:02:25.5340595Z FAILURE: Build failed with an exception.
+2026-10-19T13:02:25.5341722Z [Incubating] Problems report is available at: file:///home/runner/work/dsh-pocket/dsh-pocket/dsh-mobile/android/build/reports/problems/problems-report.html
+2026-10-19T13:02:25.5370008Z 
+2026-10-19T13:02:25.5370066Z 
+2026-10-19T13:02:25.5370684Z * Where:
+2026-10-19T13:02:25.5371309Z Deprecated Gradle features were used in this build, making it incompatible with Gradle 9.0.
+2026-10-19T13:02:25.5400709Z Build file '/home/runner/work/dsh-pocket/dsh-pocket/dsh-mobile/android/app/build.gradle' line: 87
+2026-10-19T13:02:25.5401233Z 
+2026-10-19T13:02:25.5429854Z 
+2026-10-19T13:02:25.5430800Z You can use '--warning-mode all' to show the individual deprecation warnings and determine if they come from your own scripts or plugins.
+2026-10-19T13:02:25.5460113Z * What went wrong:
+2026-10-19T13:02:25.5460331Z 
+2026-10-19T13:02:25.5460777Z A problem occurred evaluating project ':app'.
+2026-10-19T13:02:25.5461844Z For more on this, please refer to https://docs.gradle.org/8.14.3/userguide/command_line_interface.html#sec:command_line_warnings in the Gradle documentation.
+2026-10-19T13:02:25.5490396Z > Value is null
+2026-10-19T13:02:25.5490788Z 10 actionable tasks: 10 executed
+2026-10-19T13:02:25.5519694Z 
+2026-10-19T13:02:25.5550110Z * Try:
+2026-10-19T13:02:25.5550814Z > Run with --stacktrace option to get the stack trace.
+2026-10-19T13:02:25.5591324Z > Run with --info or --debug option to get more log output.
+2026-10-19T13:02:25.5650506Z > Run with --scan to get full insights.
+2026-10-19T13:02:25.5710263Z > Get more help at https://help.gradle.org.
+2026-10-19T13:02:25.5741005Z 
+2026-10-19T13:02:25.5754004Z BUILD FAILED in 1m 27s
+2026-10-19T13:02:26.0403515Z ##[error]Process completed with exit code 1.
