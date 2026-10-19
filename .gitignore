@@ -55,3 +55,7 @@ docs/pairing-qr.png
 
 # 临时探针
 probes-*.mjs
+
+# 临时验证截图
+_*.png
+_*.xml

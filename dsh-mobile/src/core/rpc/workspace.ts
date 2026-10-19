@@ -40,4 +40,29 @@ export class WorkspaceApi {
     });
     return res?.workspace ?? null;
   }
+
+  /**
+   * 归档会话（用户视角的「删除」）。
+   *
+   * 注意：DSH 没有真正的会话删除接口，只有归档。
+   * 归档后 `session/list` **仍然返回**这个会话 —— DSH 不会告诉我们哪些被归档了，
+   * 所以调用方必须自己把 id 存起来并在渲染时过滤。
+   * 返回归档后的完整 id 列表，便于调用方同步本地状态。
+   */
+  async archiveSession(sessionId: string): Promise<string[]> {
+    const res = await this.conn.call<{ archivedSessionIds?: string[] }>(
+      'workspace/archiveSession',
+      { request: { sessionId } },
+    );
+    return res?.archivedSessionIds ?? [];
+  }
+
+  /** 取消归档（从「已删除」里恢复） */
+  async unarchiveSession(sessionId: string): Promise<string[]> {
+    const res = await this.conn.call<{ archivedSessionIds?: string[] }>(
+      'workspace/unarchiveSession',
+      { request: { sessionId } },
+    );
+    return res?.archivedSessionIds ?? [];
+  }
 }
