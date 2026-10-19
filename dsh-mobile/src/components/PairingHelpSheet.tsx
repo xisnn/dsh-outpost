@@ -40,7 +40,10 @@ export function PairingHelpSheet({
           <ScrollView
             style={styles.body}
             contentContainerStyle={styles.bodyContent}
-            showsVerticalScrollIndicator={false}
+            // 显式显示滚动条：内容超出时用户能一眼看出「下面还有」
+            showsVerticalScrollIndicator
+            persistentScrollbar
+            indicatorStyle="black"
           >
             <Step
               styles={styles}
@@ -173,7 +176,7 @@ function makeStyles(tv: ReturnType<typeof useTheme>) {
     card: {
       width: '100%',
       maxWidth: 360,
-      maxHeight: '82%',
+      maxHeight: '88%',
       borderRadius: 18,
       backgroundColor: C.bgRaised,
       overflow: 'hidden',
@@ -190,7 +193,7 @@ function makeStyles(tv: ReturnType<typeof useTheme>) {
       paddingBottom: tv.space.md,
     },
     body: { flexGrow: 1, flexShrink: 1 },
-    bodyContent: { paddingHorizontal: tv.space.lg, paddingBottom: tv.space.md },
+    bodyContent: { paddingHorizontal: tv.space.lg, paddingBottom: tv.space.xl },
 
     step: { flexDirection: 'row', marginBottom: tv.space.md },
     stepBadge: {

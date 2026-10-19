@@ -98,8 +98,13 @@ export async function downloadAndInstall(
 
   // 唤起系统安装界面。Android 8+ 需要「安装未知应用」权限，
   // 没有权限时系统会自己弹授权页。
+  //
+  // 注意：这里必须传**文件系统路径**，不能带 file:// 前缀。
+  // actionViewIntent 内部会走 FileProvider.getUriForFile(path)，
+  // 带 scheme 的话会被拼成 "/file:/data/..."，直接报
+  // "Failed to find configured root that contains /file:/data/..."。
   await ReactNativeBlobUtil.android.actionViewIntent(
-    `file://${path}`,
+    path,
     'application/vnd.android.package-archive',
   );
 }

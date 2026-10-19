@@ -27,6 +27,7 @@ import { themeLabels, type ThemeMode } from '../design/tokens';
 import { formatCount, formatMoney, sumWallets } from '../core/rpc/account';
 import { SectionLabel } from '../components/ui';
 import { ConfirmSheet } from '../components/ConfirmSheet';
+import { SlideSegmented } from '../components/SlideSegmented';
 import { APP_VERSION, APP_VERSION_LABEL } from '../core/version';
 import { checkForUpdate, downloadAndInstall, type ReleaseInfo } from '../core/updater';
 
@@ -300,28 +301,11 @@ export function ProfileScreen({ active = true }: { active?: boolean }) {
         {/* ── 外观 ─────────────────────────────────────── */}
         <SectionLabel text="外观" />
         <View style={styles.themeCard}>
-          <View style={styles.segment}>
-            {tv.modes.map((m: ThemeMode) => {
-              const active = m === tv.mode;
-              return (
-                <Pressable
-                  key={m}
-                  onPress={() => tv.setMode(m)}
-                  style={({ pressed }: { pressed: boolean }) => [
-                    styles.segItem,
-                    active ? styles.segItemActive : null,
-                    pressed && !active ? { opacity: tv.motion.pressOpacity } : null,
-                  ]}
-                  accessibilityRole="button"
-                  accessibilityState={{ selected: active }}
-                >
-                  <Text style={[styles.segText, active ? styles.segTextActive : null]}>
-                    {themeLabels[m]}
-                  </Text>
-                </Pressable>
-              );
-            })}
-          </View>
+          <SlideSegmented
+            options={tv.modes.map((m: ThemeMode) => ({ value: m, label: themeLabels[m] }))}
+            value={tv.mode}
+            onChange={(m) => tv.setMode(m)}
+          />
           <Text style={styles.hint}>纯白 / 暖白随时切换，深色适合夜里看</Text>
         </View>
 

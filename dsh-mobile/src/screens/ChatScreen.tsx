@@ -33,7 +33,8 @@ import { AssistantText, UserBubble } from '../components/Message';
 import { TeamBar } from '../components/TeamBar';
 import { TeamStrip } from '../components/TeamStrip';
 import { TeamSheet } from '../components/TeamSheet';
-import { ButlerModeSwitch, type ButlerMode } from '../components/ButlerModeSwitch';
+import { SlideSegmented } from '../components/SlideSegmented';
+import type { ButlerMode } from '../core/butler';
 import { ThinkingAccordion, ThinkingDots } from '../components/Thinking';
 import { ToolCard } from '../components/ToolCard';
 import { ModelSwitcher } from '../components/ModelSwitcher';
@@ -351,7 +352,15 @@ export function ChatScreen({
       </View>
 
       {/* 管家模式：闲聊 / 计划（居中，仅管家页出现） */}
-      {butler ? <ButlerModeSwitch mode={butlerMode} onChange={switchButlerMode} /> : null}
+      {butler ? <SlideSegmented
+          compact
+          options={[
+            { value: 'chat' as const, label: '闲聊' },
+            { value: 'plan' as const, label: '计划' },
+          ]}
+          value={butlerMode}
+          onChange={switchButlerMode}
+        /> : null}
 
       {/* 空会话还没内容时，连不上不该糊一条红条在脸上 —— 静默重试即可 */}
       {chat.error && (chat.items.length > 0 || !isBlankChat) ? (
