@@ -18,6 +18,7 @@ import {
 } from 'react-native';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 
+import AsyncStorage from '@react-native-async-storage/async-storage';
 import { useApp } from '../App';
 import { useNav } from '../nav/NavHost';
 import { useTheme } from '../design/theme';
@@ -25,6 +26,7 @@ import { layout, space, type, weight } from '../design/tokens';
 import type { Workspace } from '../core/types';
 import { Avatar, Dot, Tile } from '../components/ui';
 import { WorkspaceSheet } from '../components/WorkspaceSheet';
+import { NewWorkspaceSheet } from '../components/NewWorkspaceSheet';
 
 function formatAgo(ts: number): string {
   if (!ts) return '';
@@ -40,6 +42,9 @@ function formatAgo(ts: number): string {
   return new Date(ts).toLocaleDateString('zh-CN', { month: 'numeric', day: 'numeric' });
 }
 
+/** 最近用过的工作区路径（本地存，只用于输入提示） */
+const RECENT_WS_KEY = '@dsh/recentWorkspaces';
+
 export function WorkspacesScreen() {
   const { store } = useApp();
   const nav = useNav();
@@ -49,6 +54,42 @@ export function WorkspacesScreen() {
   const [, force] = useState(0);
   const [refreshing, setRefreshing] = useState(false);
   const [editing, setEditing] = useState<string | null>(null);
+  // 新建工作区
+  const [createOpen, setCreateOpen] = useState(false);
+  const [creating, setCreating] = useState(false);
+  const [createError, setCreateError] = useState<string | undefined>(undefined);
+  const [recentPaths, setRecentPaths] = useState<string[]>([]);
+
+  // 最近成功用过的工作区路径（只存本地，不是服务端数据）
+  useEffect(() => {
+    void (async () => {
+      try {
+        const raw = await AsyncStorage.getItem(RECENT_WS_KEY);
+        if (raw) setRecentPaths(JSON.parse(raw) as string[]);
+      } catch {
+        // 读不到就当没有
+      }
+    })();
+  }, []);
+
+  const submitWorkspace = useCallback(
+    async (input: string) => {
+      setCreating(true);
+      setCreateError(undefined);
+      const res = await store.createWorkspace(input);
+      setCreating(false);
+      if (!res.ok) {
+        setCreateError(res.error);
+        return;
+      }
+      // 成功后记进「最近用过」并关闭
+      const next = [res.path, ...recentPaths.filter((p) => p !== res.path)].slice(0, 6);
+      setRecentPaths(next);
+      void AsyncStorage.setItem(RECENT_WS_KEY, JSON.stringify(next));
+      setCreateOpen(false);
+    },
+    [recentPaths, store],
+  );
 
   useEffect(() => {
     const unsub = store.subscribe(() => force((n) => n + 1));
@@ -88,6 +129,22 @@ export function WorkspacesScreen() {
             {store.workspaces.length} 个目录 · {total} 个会话
           </Text>
         </View>
+        {/* 新建工作区 */}
+        <Pressable
+          onPress={() => {
+            setCreateError(undefined);
+            setCreateOpen(true);
+          }}
+          hitSlop={10}
+          style={({ pressed }: { pressed: boolean }) => [
+            styles.newBtn,
+            pressed ? { opacity: 0.6 } : null,
+          ]}
+          accessibilityRole="button"
+          accessibilityLabel="新建工作区"
+        >
+          <Text style={styles.newBtnText}>+</Text>
+        </Pressable>
       </View>
     </View>
   );
@@ -216,6 +273,16 @@ export function WorkspacesScreen() {
           if (editing) store.setWorkspaceCustom(editing, patch);
         }}
       />
+
+      <NewWorkspaceSheet
+        visible={createOpen}
+        existingPaths={store.workspaces.map((w) => w.path)}
+        recentPaths={recentPaths}
+        busy={creating}
+        error={createError}
+        onSubmit={(p) => void submitWorkspace(p)}
+        onClose={() => setCreateOpen(false)}
+      />
     </View>
   );
 }
@@ -287,6 +354,16 @@ function makeStyles(tv: ReturnType<typeof useTheme>) {
     },
     rowPressed: { backgroundColor: C.bgRaised },
     rowBody: { flex: 1, marginLeft: space.md, minWidth: 0 },
+    newBtn: {
+      width: 34,
+      height: 34,
+      borderRadius: 17,
+      alignItems: 'center',
+      justifyContent: 'center',
+      backgroundColor: C.bgCard,
+    },
+    newBtnText: { color: C.accentBright, fontSize: 22, lineHeight: 26 },
+
     rowTop: { flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between' },
     name: {
       color: C.text,
