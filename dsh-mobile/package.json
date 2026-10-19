@@ -12,10 +12,11 @@
     "test:cwd": "node tests/cwd-spec.mjs",
     "test:pairing": "tsx tests/pairing-spec.mjs",
     "test:e2e": "tsx tests/e2e.mjs",
-    "test": "npm run test:fold && npm run test:cwd && npm run test:pairing && npm run test:semver && npm run test:teammate && npm run test:fileref && npm run typecheck",
+    "test": "npm run test:fold && npm run test:cwd && npm run test:pairing && npm run test:semver && npm run test:teammate && npm run test:fileref && npm run test:archive && npm run typecheck",
     "test:semver": "tsx tests/updater-spec.mjs",
     "test:teammate": "tsx tests/teammate-spec.mjs",
-    "test:fileref": "tsx tests/fileref-spec.mjs"
+    "test:fileref": "tsx tests/fileref-spec.mjs",
+    "test:archive": "node tests/archive-filter-spec.mjs"
   },
   "dependencies": {
     "@react-native-async-storage/async-storage": "^2.1.0",
