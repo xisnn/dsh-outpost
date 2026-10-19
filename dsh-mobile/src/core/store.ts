@@ -283,8 +283,12 @@ export class Store {
   async refreshChatMeta(sessionId: string): Promise<void> {
     try {
       const items = await this.api.list();
+      // 注意：这里必须过滤归档会话！
+      // 曾经直接赋 items，导致「从工作区返回后已删除的会话又冒出来」——
+      // 因为 refreshChatMeta 在返回、轮询、切模型时都会跑，把列表重刷成未过滤的。
+      await this.ensureArchivedLoaded();
       this.sessions = items;
-      this.workspaces = groupByWorkspace(items);
+      this.workspaces = groupByWorkspace(this.visibleSessions(items));
       const row = items.find((s) => s.sessionId === sessionId);
       const status = readStatus(row?.projections);
       const cur = this.getChat(sessionId);
