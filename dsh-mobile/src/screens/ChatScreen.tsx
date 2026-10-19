@@ -30,6 +30,7 @@ import { Header } from '../components/Header';
 import { useTheme } from '../design/theme';
 import { layout, radius, space, type, weight } from '../design/tokens';
 import { AssistantText, UserBubble } from '../components/Message';
+import { AssistantRichText } from '../components/AssistantRichText';
 import { TeamBar } from '../components/TeamBar';
 import { TeamStrip } from '../components/TeamStrip';
 import { TeamSheet } from '../components/TeamSheet';

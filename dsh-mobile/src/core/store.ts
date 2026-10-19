@@ -133,6 +133,14 @@ export class Store {
   /** cwd → workspaceId 缓存（建会话时用，避免每次都打 workspace/create） */
   private workspaceIdByPath = new Map<string, string>();
 
+  /** 供 UI 层读取文件用（/api/file 需要 baseUrl + cookie） */
+  get fileBaseUrl(): string {
+    return this.conn.baseUrl;
+  }
+  get fileCookie(): string | undefined {
+    return this.conn.currentCookie;
+  }
+
   constructor(conn: DshConnection) {
     this.conn = conn;
     this.api = new SessionApi(conn);
