@@ -22,9 +22,17 @@ import type { AttachRef, ContentBlock, EventRecord } from '../types';
  * fold 见到这个前缀就当它不存在 —— 所以常量放这里，由 butler.ts 引用。
  */
 export const BUTLER_PRIME_MARK = '〔管家初始化〕';
+/** 客户端替管家补发的「队员完成」通知，同样不该显示成用户消息 */
+export const SYSTEM_NUDGE_MARK = '〔系统通知〕';
 
 export function isButlerPrime(text: string): boolean {
   return text.trimStart().startsWith(BUTLER_PRIME_MARK);
+}
+
+/** 界面上不该出现的「注入消息」：管家初始化 + 系统通知 */
+export function isInjectedMessage(text: string): boolean {
+  const t = text.trimStart();
+  return t.startsWith(BUTLER_PRIME_MARK) || t.startsWith(SYSTEM_NUDGE_MARK);
 }
 
 export interface TextBlock {
@@ -228,8 +236,8 @@ export function foldEvents(records: EventRecord[]): Turn[] {
       }
 
       case 'user/message': {
-        // 管家初始化提示是「假的用户消息」，界面上不显示
-        if (isButlerPrime(textOf(d.content))) break;
+        // 管家初始化提示 / 系统通知都是「假的用户消息」，界面上不显示
+        if (isInjectedMessage(textOf(d.content))) break;
         // turn 号有时缺失，挂到当前 turn；否则按 seq 造一个
         const turnNo = num(d.turn) ?? current?.turn.turn ?? ev.seq;
         const b = ensureTurn(turnNo);

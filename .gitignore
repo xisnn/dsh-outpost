@@ -49,3 +49,6 @@ probes/
 
 # CI 日志解压产物
 _ci-log/
+
+# 含 token 的配对二维码，绝不提交
+docs/pairing-qr.png
