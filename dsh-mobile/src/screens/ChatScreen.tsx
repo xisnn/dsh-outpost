@@ -40,7 +40,7 @@ import { ModelSwitcher } from '../components/ModelSwitcher';
 import { pickAttachments, formatBytes, type PickMode } from '../core/picker';
 import { guessImageMime, readFileBase64 } from '../core/rpc/upload';
 import type { OutgoingAttachment } from '../core/store';
-import { buildModeSwitch } from '../core/butler';
+import { withModeTag } from '../core/butler';
 import type { Block } from '../core/fold';
 import type { SessionAddress } from '../core/types';
 
@@ -126,18 +126,16 @@ export function ChatScreen({
     })();
   }, [butler]);
 
-  /** 切换闲聊/计划：持久化 + 告诉管家换档（指令消息在 fold 层被过滤） */
-  const switchButlerMode = useCallback(
-    (mode: ButlerMode) => {
-      setButlerMode(mode);
-      void AsyncStorage.setItem(BUTLER_PLAN_KEY, mode);
-      // 只在已经有对话时补发，空会话靠 prime 里的规则就够了
-      if (chat.items.length > 0) {
-        void store.send(sessionId, buildModeSwitch(mode), []);
-      }
-    },
-    [chat.items.length, sessionId, store],
-  );
+  /**
+   * 切换闲聊/计划：**只改本地状态**，不发任何消息。
+   *
+   * 模式通过每条用户消息尾部的 〔模式:x〕 标记带给管家（fold 显示时会剥掉），
+   * 所以切换模式不会产生额外对话轮次，聊天记录保持干净。
+   */
+  const switchButlerMode = useCallback((mode: ButlerMode) => {
+    setButlerMode(mode);
+    void AsyncStorage.setItem(BUTLER_PLAN_KEY, mode);
+  }, []);
 
   // 团队状态靠投影轮询刷新：team/* 事件不在会话日志里，拿不到增量
   useEffect(() => {
@@ -257,7 +255,9 @@ export function ChatScreen({
     setDrafts([]);
     try {
       const attachments = await resolveDrafts(pending);
-      await store.send(sessionId, text, attachments, 'queue');
+      // 管家页把当前模式随消息带过去（fold 显示时会剥掉标记）
+      const payload = butler ? withModeTag(text, butlerMode) : text;
+      await store.send(sessionId, payload, attachments, 'queue');
       setNearBottom(true);
     } catch (e) {
       // 失败把草稿放回去，别让用户白选一遍

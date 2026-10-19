@@ -47,14 +47,18 @@ export function buildButlerPrime(): string {
   ].join('\n');
 }
 
-/** 切换模式时发给管家的短指令（fold 会过滤掉，用户看不到） */
-export function buildModeSwitch(mode: ButlerMode): string {
-  return mode === 'chat'
-    ? `${BUTLER_MODE_MARK} 现在切到【闲聊模式】：直接回答，不派活、不建任务。`
-    : `${BUTLER_MODE_MARK} 现在切到【计划模式】：先给方案并等用户确认，确认后才派队员执行。`;
+/**
+ * 给用户消息尾部加上模式标记。
+ *
+ * 为什么不用「单独发一条切换指令」：那样会多一轮对话、多一条消息，
+ * 用户看到的聊天记录就不干净了。这里改成把模式随每条消息带过去，
+ * fold 渲染时会剥掉标记，界面和普通聊天完全一样。
+ */
+export function withModeTag(text: string, mode: ButlerMode): string {
+  return `${text}〔模式:${mode === 'plan' ? '计划' : '闲聊'}〕`;
 }
 
-/** 这条消息是不是「模式切换指令」 */
+/** 这条消息是不是「模式切换指令」（旧版本兼容用） */
 export function isModeSwitch(text: string): boolean {
   return text.trimStart().startsWith(BUTLER_MODE_MARK);
 }

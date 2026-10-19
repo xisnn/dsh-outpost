@@ -14,7 +14,7 @@ import { AccountApi, type BalanceResult } from '../core/rpc/account';
 import { UploadApi } from '../core/rpc/upload';
 import { WorkspaceApi } from '../core/rpc/workspace';
 import type { WorkspaceCustom } from '../core/workspace-custom';
-import { foldEvents, toChatItems, isInjectedMessage, type ChatItem, type Turn } from '../core/fold';
+import { foldEvents, toChatItems, isInjectedMessage, stripModeTag, type ChatItem, type Turn } from '../core/fold';
 import type { AttachRef, AgentTeam, EventRecord, PromptPart, SessionAddress, SessionSummary } from '../core/types';
 
 /** 待发送附件：本地显示用 ref + 真正发出去的 part */
@@ -619,7 +619,8 @@ export class Store {
     const injected = text.trim() ? isInjectedMessage(text) : false;
 
     if (!injected) {
-      // 乐观插入：本地先显示，等真实事件回来再被 fold 覆盖
+      // 乐观插入：本地先显示，等真实事件回来再被 fold 覆盖。
+      // 注意剥掉尾部的模式标记，否则会闪一下 〔模式:计划〕。
       this.chats.set(sessionId, {
         ...cur,
         items: [
@@ -628,7 +629,7 @@ export class Store {
             kind: 'user',
             key: `local-${Date.now()}`,
             turn: (cur.turns.at(-1)?.turn ?? 0) + 1,
-            text: text.trim(),
+            text: stripModeTag(text).trim(),
             time: Date.now(),
             parts: attachments.map((a) => a.ref),
           },
