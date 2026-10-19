@@ -2,6 +2,12 @@
 
     <uses-permission android:name="android.permission.INTERNET" />
     <uses-permission android:name="android.permission.CAMERA" />
+    <!--
+      应用内更新要唤起系统安装器，必须声明这个权限。
+      没有它的话，系统根本不会把本 App 列进「安装未知应用」名单，
+      用户翻遍设置也找不到开关（小米上实测）。
+    -->
+    <uses-permission android:name="android.permission.REQUEST_INSTALL_PACKAGES" />
 
     <uses-feature android:name="android.hardware.camera" android:required="false" />
 
