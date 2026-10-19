@@ -163,5 +163,18 @@ const shuffledTurns = foldEvents(shuffled);
 check('乱序输入仍得到 2 个 turn', shuffledTurns.length === 2, `${shuffledTurns.length}`);
 check('乱序输入 turn 有序', shuffledTurns[0].turn < shuffledTurns[1].turn);
 
+// ── 模式标记剥离 ──────────────────────────────────────────────────
+console.log('\n=== 模式标记\n');
+const { stripModeTag } = await import('../src/core/fold/index.ts');
+check('剥掉计划标记', stripModeTag('帮我查天气〔模式:计划〕') === '帮我查天气');
+check('剥掉闲聊标记', stripModeTag('你好〔模式:闲聊〕') === '你好');
+check('无标记原样返回', stripModeTag('普通消息') === '普通消息');
+check('用户正文里的〔模式〕不受影响',
+  stripModeTag('什么是〔模式:计划〕这个标记') === '什么是〔模式:计划〕这个标记',
+  stripModeTag('什么是〔模式:计划〕这个标记'));
+check('标记后带空格也能剥',
+  stripModeTag('查一下 〔模式:计划〕  ') === '查一下',
+  JSON.stringify(stripModeTag('查一下 〔模式:计划〕  ')));
+
 console.log(`\n结果：${pass} 通过，${fail} 失败`);
 process.exit(fail === 0 ? 0 : 1);

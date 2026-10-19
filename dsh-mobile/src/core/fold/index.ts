@@ -97,6 +97,17 @@ export interface Turn {
 
 const EMPTY = '';
 
+/**
+ * 模式标记：附在用户消息末尾告诉管家当前处于哪个模式，
+ * 显示前会被 stripModeTag 剥掉，用户看不到。
+ * 用行内标记而不是单独发一条消息，这样切换模式不会产生额外对话。
+ */
+export const MODE_TAG_RE = /\s*〔模式:(闲聊|计划)〕\s*$/;
+
+export function stripModeTag(text: string): string {
+  return text.replace(MODE_TAG_RE, '').trimEnd();
+}
+
 function textOf(blocks: unknown): string {
   if (!Array.isArray(blocks)) return EMPTY;
   return blocks
@@ -249,13 +260,16 @@ export function foldEvents(records: EventRecord[]): Turn[] {
       case 'user/message': {
         // 管家初始化提示 / 系统通知都是「假的用户消息」，界面上不显示
         if (isInjectedMessage(textOf(d.content))) break;
+        // 剥掉尾部的模式标记（〔模式:计划〕），用户不该看到它
+        const body = stripModeTag(textOf(d.content));
+        if (!body) break;
         // turn 号有时缺失，挂到当前 turn；否则按 seq 造一个
         const turnNo = num(d.turn) ?? current?.turn.turn ?? ev.seq;
         const b = ensureTurn(turnNo);
         if (!b.turn.user) {
           b.turn.user = {
             id: typeof d.id === 'string' ? d.id : undefined,
-            text: textOf(d.content),
+            text: body,
             time: ev.time,
             parts: attachPartsOf(d.content),
           };
