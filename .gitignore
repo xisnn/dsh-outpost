@@ -52,3 +52,6 @@ _ci-log/
 
 # 含 token 的配对二维码，绝不提交
 docs/pairing-qr.png
+
+# 临时探针
+probes-*.mjs

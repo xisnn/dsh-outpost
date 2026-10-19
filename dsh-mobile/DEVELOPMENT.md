@@ -1027,3 +1027,56 @@ android:networkSecurityConfig="@xml/network_security_config"
 
 脱敏时踩了个坑：`data.texts` 是**分词数组**（`["The"," pw","sh", ...]`），
 逐个元素看都无害，拼起来却是完整对话。按 key 识别整体替换才行。
+## 第十轮：应用内更新 + 交互打磨
+
+### 更新时报 "Failed to find configured root"
+
+真机点「检查更新」→ 下载完成后弹这个错，路径长这样：
+
+```
+Failed to find configured root that contains
+/file:/data/user/0/com.dshpocket/cache/dsh-pocket-0.2.2.apk
+```
+
+注意路径里的 `/file:/data/...` —— `file:` 被当成了路径的一部分。
+
+原因：`ReactNativeBlobUtil.android.actionViewIntent(path, mime)` 内部会调
+`FileProvider.getUriForFile(ctx, "<pkg>.provider", new File(path))`，
+它要的是**文件系统路径**。我传了 `file://${path}`，于是拼出来一个不存在的路径，
+FileProvider 在所有 `<paths>` 配置里都找不到匹配的 root。
+
+修法：**去掉 file:// 前缀**，直接传 `/data/.../xxx.apk`。
+
+blob-util 自带 FileProvider 声明（authority 是 `${applicationId}.provider`），
+`provider_paths.xml` 里已经有 `<cache-path path="." />`，所以只要传对路径就能用。
+
+### 三个切换器统一成可滑动组件
+
+外观、管家模式（闲聊/计划）原来都是「点一下换一项」，没有跟手感。
+抽了 `components/SlideSegmented.tsx`：
+
+- 点击 → 指示块 Animated.spring 滑过去
+- **按住横向拖动** → 指示块跟手，松手吸附到最近一项
+- 用 PanResponder，`Math.abs(dx) > 6 && dx > dy` 才接管，避免和纵向滚动抢手势
+
+Tab 宽度支持均分（外观三项）和固定宽度（闲聊/计划两项）。
+
+### 帮助卡片显示不全
+
+两个原因叠加：
+1. `showsVerticalScrollIndicator={false}` —— 用户看不出能滚，以为是内容被截断
+2. 卡片 `maxHeight: 82%` 偏紧，可视区太小
+
+改成显示滚动条 + `persistentScrollbar`，`maxHeight` 提到 88%，底部留白也加大。
+
+### 键盘挡住输入框
+
+真机反馈「打开键盘后输入框跑到页面顶部」。
+根因是我为了防遮挡给 `KeyboardAvoidingView` 加了 `marginBottom: kbHeight`，
+但这个容器包着「消息列表 + 输入框」，加 margin 等于把整块压缩。
+
+而 manifest 里本来就有 `adjustResize`，系统会自己缩小窗口，属于双重补偿。
+
+修法：去掉手动 margin，完全交给系统；`kbHeight` 只用于调整 `paddingBottom` 和触发滚动到底。
+
+**教训**：键盘行为必须在真机验证，模拟器的软键盘不弹，测不出来。
