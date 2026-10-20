@@ -11,6 +11,7 @@ import React, { useMemo, useState } from 'react';
 import { Pressable, StyleSheet, Text, View } from 'react-native';
 
 import { useTheme } from '../design/theme';
+import { AssistantRichText } from './AssistantRichText';
 
 export function TeammateNote({
   from,
@@ -58,7 +59,12 @@ export function TeammateNote({
         <Text style={styles.chevron}>{open ? '▾' : '▸'}</Text>
       </Pressable>
 
-      {open ? <Text style={styles.body}>{text}</Text> : null}
+      {open ? (
+        <View style={styles.bodyWrap}>
+          {/* 队员的汇报里常有文件路径，展开时也渲染成可点开的卡片 */}
+          <AssistantRichText text={text} inset={false} />
+        </View>
+      ) : null}
     </View>
   );
 }
@@ -90,6 +96,7 @@ function makeStyles(tv: ReturnType<typeof useTheme>) {
       marginLeft: tv.space.sm,
     },
     chevron: { color: C.textFaint, fontSize: tv.type.micro, marginLeft: tv.space.sm },
+    bodyWrap: { paddingBottom: tv.space.sm },
     body: {
       color: C.textSecondary,
       fontSize: tv.type.sm,
