@@ -59,3 +59,9 @@ probes-*.mjs
 # 临时验证截图
 _*.png
 _*.xml
+
+# DSH 启动日志
+_dsh-start.log
+_dsh-start.err
+_p*.mjs
+_probe*.mjs
