@@ -14,6 +14,7 @@ import { ActivityIndicator, StyleSheet, Text, View } from 'react-native';
 
 import { TabBar, type HomeTab } from '../components/TabBar';
 import { useTheme } from '../design/theme';
+import { ButlerWorkspacePicker } from '../components/ButlerWorkspacePicker';
 import { useApp } from '../App';
 import { ChatScreen } from './ChatScreen';
 import { ProfileScreen } from './ProfileScreen';
@@ -34,7 +35,14 @@ function ButlerBoot({ busy }: { busy: boolean }) {
 
 export function HomeScreen() {
   const tv = useTheme();
-  const { butlerMode, butlerSessionId, butlerBusy } = useApp();
+  const {
+    butlerMode,
+    butlerSessionId,
+    butlerBusy,
+    butlerNeedWorkspace,
+    pickButlerWorkspace,
+    store,
+  } = useApp();
   const [tab, setTab] = useState<HomeTab>(butlerMode ? 'butler' : 'workspaces');
 
   // 模式切换时校正当前 tab（「我的」保留，其余落到该模式的首个 tab）
@@ -49,6 +57,13 @@ export function HomeScreen() {
 
   return (
     <View style={[styles.root, { backgroundColor: tv.colors.bg }]}>
+      {/* 首次开启管家模式：先选一个项目，队员就归属这里 */}
+      <ButlerWorkspacePicker
+        visible={butlerNeedWorkspace}
+        workspaces={store.workspaces}
+        onPick={pickButlerWorkspace}
+        onCancel={() => {}}
+      />
       <View style={styles.body}>
         {butlerMode ? (
           <View style={[styles.pane, tab === 'butler' ? null : styles.hidden]}>
