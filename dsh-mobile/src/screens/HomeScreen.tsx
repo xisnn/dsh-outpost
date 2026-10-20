@@ -74,6 +74,10 @@ export function HomeScreen() {
           <View style={[styles.pane, tab === 'butler' ? null : styles.hidden]}>
             {butlerSessionId ? (
               <ChatScreen
+                // key 必须跟着 sessionId 变：切项目时会换成另一个会话，
+                // 不加 key 的话 React 复用同一个实例，内部 state（滚动位置、
+                // 草稿、展开状态）会串到新会话上。
+                key={String(butlerSessionId)}
                 sessionId={String(butlerSessionId)}
                 title="DSH"
                 butler
