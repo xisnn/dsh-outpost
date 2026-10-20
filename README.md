@@ -133,6 +133,29 @@ https://xxx.trycloudflare ─┘
 
 用启动文件夹实现，不需要管理员权限，登录即启动。
 
+### 手机端审批（可选但强烈建议）
+
+默认情况下手机只能**看到**审批，不能回答。要能在手机上点「允许」/「拒绝」，
+需要装移动网关插件：
+
+```powershell
+.\setup-gateway.ps1
+```
+
+它做三件事：装 `dsh-plugin-mobile-gateway`、写配置、重启 DSH。
+
+装好之后：
+
+- 手机 App 进聊天页自动配对
+- 审批卡片上直接出现「允许一次 / 拒绝」按钮
+- 审批到达时手机会震一下
+
+> 为什么必须要插件：DSH 的审批是 Host 侧 waterfall，结果靠 Remote Event
+> 监听器的**返回值**回传，没有 HTTP RPC 可调（12 个候选端点名全部 not found）。
+> 这个插件在 Host 内部接入 waterfall，再用独立 WebSocket 投影给手机。
+>
+> 详细协议和配置见 [docs/mobile-gateway.md](docs/mobile-gateway.md)。
+
 ---
 
 ## 安全提醒
@@ -156,6 +179,7 @@ https://xxx.trycloudflare ─┘
 | **管家模式依赖 Agent Teams** | 需要 DSH 装了 agent-team 相关 profile |
 | **提醒是本地震动，不是远程推送** | 任务干完时手机震两下。App 被系统杀掉后收不到——真正的远程推送要接 FCM（国内收不到）或厂商推送通道（小米/华为/OPPO 各一套 SDK），工作量远超本项目 |
 | **Cloudflare 隧道域名会变** | 快速隧道每次重启换域名，手机要重新配对。固定域名需要自己的域名 + 命名隧道 |
+| **审批不支持「始终允许」** | 协议只有一次性决定（`allowed-once` / `rejected`）。要长期放行请调权限模式 |
 
 ---
 

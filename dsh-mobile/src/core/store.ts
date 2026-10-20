@@ -18,6 +18,11 @@ import { DirectoryPickerApi } from '../core/rpc/directory';
 import type { WorkspaceCustom } from '../core/workspace-custom';
 import { foldEvents, toChatItems, isInjectedMessage, stripModeTag, type ChatItem, type Turn } from '../core/fold';
 import { notifyDone } from '../core/notify';
+import {
+  ApprovalGateway,
+  type ApprovalOutcome,
+  type PendingApproval,
+} from '../core/approvalGateway';
 
 /** 已归档会话 id 的存储 key（DSH 不返回归档状态，只能客户端自己记） */
 const ARCHIVED_KEY = '@dsh/archivedSessions';
@@ -346,6 +351,109 @@ export class Store {
   // ── 一次性提示（任务完成等） ─────────────────────────────────────
   /** UI 弹一条就算消费掉，最多留 3 条 */
   teamNotices: TeamNotice[] = [];
+
+  // ── 审批网关 ─────────────────────────────────────────────────────
+  //
+  // 为什么单独开一条连接：DSH 的审批是 Host 侧 waterfall，结果靠 Remote Event
+  // 监听器的返回值回传，没有 HTTP RPC 可调。所以借 `dsh-plugin-mobile-gateway`
+  // 的独立 WebSocket 来收发审批，**不动现有 RPC 传输层** —— 网关挂了不影响聊天。
+  private gateway?: ApprovalGateway;
+  /** 待审批列表，key 是 rpcId */
+  pendingApprovals: PendingApproval[] = [];
+  /** 网关连接状态 */
+  gatewayStatus: 'idle' | 'connecting' | 'online' | 'offline' = 'idle';
+  /** 网关不可用时的原因（用于 UI 提示） */
+  gatewayHint = '';
+
+  /** 连上审批网关。进聊天页时调用；已经有连接就复用。 */
+  connectApprovals(baseUrl: string, pairingCode?: string): void {
+    if (this.gateway && this.gatewayStatus !== 'offline') return;
+    if (!this.gateway) {
+      this.gateway = new ApprovalGateway(baseUrl, {
+        onStatus: (s, detail) => {
+          this.gatewayStatus = s;
+          this.gatewayHint = detail ?? '';
+          this.emit();
+        },
+        onApproval: (a) => {
+          // 按 rpcId 去重：重连时服务端会重放未决审批
+          if (!this.pendingApprovals.some((p) => p.rpcId === a.rpcId)) {
+            this.pendingApprovals = [...this.pendingApprovals, a];
+          }
+          this.emit();
+          // 需要用户决策，震一下提醒
+          notifyDone(`需要审批：${a.toolName}`);
+        },
+        onResolved: (rpcId, outcome) => {
+          this.pendingApprovals = this.pendingApprovals.filter((p) => p.rpcId !== rpcId);
+          this.emit();
+          // 让聊天记录里那张卡片也进入已决状态
+          if (outcome === 'allowed-once' || outcome === 'rejected') {
+            this.markApprovalDecided(rpcId, outcome);
+          }
+        },
+      });
+    }
+    void this.gateway.connect(pairingCode);
+  }
+
+  /** 回答一个审批 */
+  answerApproval(a: PendingApproval, outcome: ApprovalOutcome): boolean {
+    if (!this.gateway) return false;
+    const ok = this.gateway.respond(a, outcome);
+    if (ok) {
+      // 乐观移除，等服务端 approval-resolved 再确认
+      this.markApprovalDecided(a.rpcId, outcome);
+      this.emit();
+    }
+    return ok;
+  }
+
+  /**
+   * 把聊天记录里对应的审批卡片标成已决。
+   *
+   * fold 出来的 approvals 是只读派生数据，这里只能按 id 找回去改 decided。
+   * 找不到就跳过（可能卡片还没 fold 出来）。
+   */
+  private markApprovalDecided(rpcId: string, outcome: string): void {
+    for (const [, chat] of this.chats) {
+      for (const item of chat.items) {
+        if (item.kind !== 'assistant') continue;
+        // ChatItem 的 assistant 分支把 approvals 直接挂在条目上（不在 turn 里）
+        const list = (item as { approvals?: Array<{ id: string; decided?: string }> })
+          .approvals;
+        if (!list) continue;
+        const hit = list.find((a) => a.id === rpcId);
+        if (hit) hit.decided = outcome;
+      }
+    }
+  }
+
+  /** 断开网关（离开聊天页时调用） */
+  disconnectApprovals(): void {
+    this.gateway?.disconnect();
+    this.gateway = undefined;
+    this.pendingApprovals = [];
+    this.gatewayStatus = 'idle';
+    this.emit();
+  }
+
+  /**
+   * 网关帧通道，给文件下载用。
+   *
+   * 返回 null 表示网关没连上 —— 调用方应回退到 /api/file。
+   */
+  get gatewayChannel(): {
+    send(obj: Record<string, unknown>): void;
+    waitFor(
+      kind: string,
+      match: (f: Record<string, unknown>) => boolean,
+      timeoutMs?: number,
+    ): Promise<Record<string, unknown>>;
+  } | null {
+    if (!this.gateway || this.gatewayStatus !== 'online') return null;
+    return this.gateway;
+  }
 
   /** 已经唤醒过的会话，避免同一批任务反复触发 */
   private waking = new Set<string>();

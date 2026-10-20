@@ -15,10 +15,13 @@ export { splitFileRefs, isImagePath } from '../core/filerefs';
 export function AssistantRichText({
   text,
   inset = true,
+  sessionId,
 }: {
   text: string;
   /** 是否自带左右内边距。嵌在卡片里时应传 false，避免双重缩进 */
   inset?: boolean;
+  /** 会话 id：透给 FileCard 走网关下载（相对路径/中文名更可靠） */
+  sessionId?: string;
 }) {
   const tv = useTheme();
   const styles = useMemo(() => makeStyles(tv), [tv]);
@@ -39,7 +42,13 @@ export function AssistantRichText({
     <View style={[styles.row, inset ? null : styles.rowFlat]}>
       {segs.map((s, i) =>
         s.kind === 'file' ? (
-          <FileCard key={`f${i}`} path={s.path} alt={s.alt} image={s.image} />
+          <FileCard
+            key={`f${i}`}
+            path={s.path}
+            alt={s.alt}
+            image={s.image}
+            sessionId={sessionId}
+          />
         ) : (
           <Text key={`t${i}`} style={styles.body} selectable>
             {s.text.trim()}
