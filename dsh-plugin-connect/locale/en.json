@@ -1,0 +1,6 @@
+{
+  "meta": {
+    "title": "Connect Phone",
+    "description": "Shows the phone pairing URL and QR code for LAN, Tailscale, and Cloudflare Tunnel."
+  }
+}

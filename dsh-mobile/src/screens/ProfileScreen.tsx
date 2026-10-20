@@ -29,6 +29,7 @@ import { SectionLabel } from '../components/ui';
 import { ConfirmSheet } from '../components/ConfirmSheet';
 import { SlideSegmented } from '../components/SlideSegmented';
 import { APP_VERSION, APP_VERSION_LABEL } from '../core/version';
+import { isNotifyEnabled, setNotifyEnabled, vibrateShort } from '../core/notify';
 import {
   checkForUpdate,
   downloadAndInstall,
@@ -66,6 +67,9 @@ export function ProfileScreen({ active = true }: { active?: boolean }) {
   // 所以这里单独 ping 一次，给用户一个真实的连通性结论。
   const [net, setNet] = useState<NetState>('checking');
   const [confirmSignOut, setConfirmSignOut] = useState(false);
+  // 任务完成提醒开关（震动）。存内存即可 —— 重启后默认开启，
+  // 用户不常改，没必要为它多做一个存储键。
+  const [notifyOn, setNotifyOn] = useState(isNotifyEnabled());
 
   // ── 应用内更新 ──────────────────────────────────────────────
   const [updating, setUpdating] = useState(false);
@@ -368,6 +372,29 @@ export function ProfileScreen({ active = true }: { active?: boolean }) {
               <Text style={styles.entryChevron}>›</Text>
             </Pressable>
           ) : null}
+        </View>
+
+        {/* ── 提醒 ─────────────────────────────────────── */}
+        <SectionLabel text="提醒" />
+        <View style={styles.themeCard}>
+          <View style={styles.switchRow}>
+            <View style={styles.switchBody}>
+              <Text style={styles.switchLabel}>任务完成时震动</Text>
+              <Text style={styles.hint}>
+                管家派出去的活干完时，手机会震两下，不用一直盯着屏幕
+              </Text>
+            </View>
+            <Switch
+              value={notifyOn}
+              onValueChange={(v: boolean) => {
+                setNotifyOn(v);
+                setNotifyEnabled(v);
+                if (v) vibrateShort('done');
+              }}
+              trackColor={{ true: tv.colors.accent, false: tv.colors.bgOverlay }}
+              thumbColor={tv.colors.bg}
+            />
+          </View>
         </View>
 
         {/* ── 连接 ─────────────────────────────────────── */}

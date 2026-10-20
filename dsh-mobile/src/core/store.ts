@@ -17,6 +17,7 @@ import { WorkspaceApi } from '../core/rpc/workspace';
 import { DirectoryPickerApi } from '../core/rpc/directory';
 import type { WorkspaceCustom } from '../core/workspace-custom';
 import { foldEvents, toChatItems, isInjectedMessage, stripModeTag, type ChatItem, type Turn } from '../core/fold';
+import { notifyDone } from '../core/notify';
 
 /** 已归档会话 id 的存储 key（DSH 不返回归档状态，只能客户端自己记） */
 const ARCHIVED_KEY = '@dsh/archivedSessions';
@@ -375,6 +376,10 @@ export class Store {
   private pushNotice(text: string): void {
     if (this.teamNotices.some((n) => n.text === text)) return;
     this.teamNotices = [...this.teamNotices, { id: `n-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`, text, time: Date.now() }].slice(-3);
+    // 手机提醒：震动 + 通知。
+    // 放在这里而不是 ChatScreen：store 是唯一的「任务完成」汇聚点，
+    // 用户在别的页面（工作区列表、我的）也应该被提醒到。
+    notifyDone(text);
   }
 
   dismissNotice(id: string): void {

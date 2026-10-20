@@ -78,15 +78,60 @@ powershell -NoProfile -ExecutionPolicy Bypass -File .\start-dsh-web.ps1
 
 ## 网络怎么选
 
-App 只认一个 URL，所以局域网、Tailscale、你自己的公网都能用：
+App 只认一个 URL，所以局域网、Tailscale、Cloudflare 隧道都能用：
 
 | 场景 | 地址 | 前提 |
 |---|---|---|
 | **同一个 WiFi** | `http://192.168.x.x:3095` | 什么都不用装，最简单（**需要放行防火墙**） |
 | **在外面也要用** | `http://100.x.x.x:3095` | 电脑和手机都装 [Tailscale](https://tailscale.com/download)，登录同一账号 |
-| **自己的公网** | `https://你的域名` | 自己配 frp / Cloudflare Tunnel 等反向代理 |
+| **在外面用、手机不想装东西** | `https://xxx.trycloudflare.com` | 电脑上跑 `start-tunnel.ps1`，**手机端零配置** |
 
 脚本默认优先 Tailscale（有就用），没有就用局域网。用 `-Bind` 可以强制指定。
+
+### Cloudflare 隧道（手机什么都不用装）
+
+Tailscale 要在手机上装 App，Cloudflare 隧道不用——就是一个普通 HTTPS 网址。
+
+```powershell
+.\start-tunnel.ps1          # 启动隧道（约 60-90 秒）
+.\start-tunnel.ps1 -Status  # 看当前隧道
+.\start-tunnel.ps1 -Stop    # 停止
+```
+
+脚本会自动：探测本机地址 → 起 cloudflared → 拿域名 → **用 `--trusted-host` 重启 DSH** → 抓新 token → 验证连通。
+
+两点注意：
+
+- **快速隧道的域名每次重启都会变**，变了手机要重新配对。想要固定域名得有自己的域名并配命名隧道。
+- **开启隧道会重启一次 DSH**，之前的配对 cookie 会失效（cookie 绑定了 authority）。
+
+> 为什么必须加 `--trusted-host`：DSH 的 Host/Origin 校验默认只接受绑定的那个 IP，
+> 通过隧道访问时 Host 是 `xxx.trycloudflare.com`，不在信任列表里就会 **403 forbidden**。
+> 它只做精确匹配、不支持通配符，所以必须拿到域名之后再重启服务。
+
+### 插件：桌面端一键连接
+
+装了 [`dsh-plugin-connect`](dsh-plugin-connect/) 之后，DSH 网页侧边栏底部会出现「📱 手机连接」：
+
+- 显示局域网 / Cloudflare 两个地址，各带二维码
+- 点「启动隧道」直接起 cloudflared（需要先跑一次 `start-tunnel-service.ps1`）
+- **IP 变了会显眼提示并给「一键修复」**——家用 WiFi 是 DHCP，地址会漂，漂了 DSH 就绑不上（`EADDRNOTAVAIL`），手机连不上而用户只看到「连不上」
+
+```
+http://192.168.x.x:3095  ─┐
+                          ├─→  📱 手机连接  →  两种方式 + 二维码 + [启动隧道]
+https://xxx.trycloudflare ─┘
+```
+
+### 开机自启
+
+```powershell
+.\setup-autostart.ps1          # 配置（DSH Web + 隧道服务）
+.\setup-autostart.ps1 -Show    # 查看
+.\setup-autostart.ps1 -Remove  # 取消
+```
+
+用启动文件夹实现，不需要管理员权限，登录即启动。
 
 ---
 
@@ -109,7 +154,8 @@ App 只认一个 URL，所以局域网、Tailscale、你自己的公网都能用
 | **协议无版本协商** | 用的是逆向出来的 DSH 内部 RPC（见 [docs/protocol-notes.md](docs/protocol-notes.md)）。DSH 升级后某些功能可能失效 |
 | **只支持 Android** | iOS 需要 Mac + 签名，暂未提供 |
 | **管家模式依赖 Agent Teams** | 需要 DSH 装了 agent-team 相关 profile |
-| **无推送通知** | 需要 App 在前台才能看到新消息 |
+| **提醒是本地震动，不是远程推送** | 任务干完时手机震两下。App 被系统杀掉后收不到——真正的远程推送要接 FCM（国内收不到）或厂商推送通道（小米/华为/OPPO 各一套 SDK），工作量远超本项目 |
+| **Cloudflare 隧道域名会变** | 快速隧道每次重启换域名，手机要重新配对。固定域名需要自己的域名 + 命名隧道 |
 
 ---
 

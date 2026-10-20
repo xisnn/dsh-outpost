@@ -1,0 +1,6 @@
+{
+  "meta": {
+    "title": "手机连接",
+    "description": "显示手机配对地址和二维码，支持局域网、Tailscale、Cloudflare Tunnel 三种方式。"
+  }
+}
