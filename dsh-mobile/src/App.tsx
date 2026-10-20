@@ -37,6 +37,8 @@ const OWNED_KEY = '@dsh/ownedSessions';
 const THEME_KEY = '@dsh/themeMode';
 const BUTLER_KEY = '@dsh/butlerMode';
 const BUTLER_SESSION_KEY = '@dsh/butlerSession';
+/** 管家会话绑定的工作区路径（决定 cwd，也决定队员归属哪个项目） */
+const BUTLER_WORKSPACE_KEY = '@dsh/butlerWorkspace';
 const BUTLER_PRIMED_KEY = '@dsh/butlerPrimed';
 
 export interface AppContextValue {
@@ -51,6 +53,12 @@ export interface AppContextValue {
   /** 管家会话（首次开启时创建并持久化） */
   butlerSessionId: string | null;
   butlerBusy: boolean;
+  /** 需要用户先选一个管家工作区（开启管家模式时还没绑过） */
+  butlerNeedWorkspace: boolean;
+  /** 用户选好工作区后调用，建会话并绑定 */
+  pickButlerWorkspace: (path: string) => void;
+  /** 当前管家绑定的工作区路径 */
+  butlerWorkspace: string | null;
   /** 退出后仍保留的上一次配对，可一键恢复，避免误触后要重新找 token */
   hasLastPairing: boolean;
   resumePairing: () => Promise<boolean>;
@@ -93,6 +101,9 @@ export default function App() {
   // 管家模式
   const [butlerMode, setButlerModeState] = useState(false);
   const [butlerSessionId, setButlerSessionId] = useState<string | null>(null);
+  // 管家绑定的工作区；null 表示还没选过，需要引导用户选一个
+  const [butlerWorkspace, setButlerWorkspace] = useState<string | null>(null);
+  const [butlerNeedWorkspace, setButlerNeedWorkspace] = useState(false);
   const [butlerBusy, setButlerBusy] = useState(false);
   const [hasLastPairing, setHasLastPairing] = useState(false);
 
@@ -111,6 +122,8 @@ export default function App() {
         setButlerModeState(savedButler === '1');
         const savedButlerSession = await AsyncStorage.getItem(BUTLER_SESSION_KEY);
         if (savedButlerSession) setButlerSessionId(savedButlerSession);
+        const savedButlerWs = await AsyncStorage.getItem(BUTLER_WORKSPACE_KEY);
+        if (savedButlerWs) setButlerWorkspace(savedButlerWs);
 
         const lastCookie = await AsyncStorage.getItem(LAST_COOKIE_KEY);
 
@@ -251,37 +264,67 @@ export default function App() {
   /**
    * 确保管家会话存在。
    *
-   * 管家会话的 cwd 用「最近活跃的那个工作区」—— 这样它派出去的队员
-   * 直接落在用户正在做的项目里，而不是一个空目录。
-   * 建会话走 store.createSession，内部会用 workspaceId 建（登记进注册表）。
+   * 管家会话绑一个工作区（cwd），派出去的队员就落在那个项目里。
+   * 队员是会话级的（TeamMemberSnapshot 挂在 parentSessionId 上），
+   * 所以「按项目复用队员」等价于「一个项目一个管家会话」。
+   *
+   * forceWorkspace：用户刚选的目录。不传就沿用上次绑定的。
    */
-  const ensureButlerSession = useCallback(async (): Promise<string | null> => {
-    if (butlerSessionId) {
-      void primeButler(butlerSessionId);
-      return butlerSessionId;
-    }
-    setButlerBusy(true);
-    try {
-      if (store.workspaces.length === 0) await store.loadSessions();
-      const cwd = store.workspaces.find((w) => !!w.path)?.path ?? '';
-      const id = await store.createSession(cwd);
-      setButlerSessionId(id);
-      await AsyncStorage.setItem(BUTLER_SESSION_KEY, id);
-      await AsyncStorage.removeItem(BUTLER_PRIMED_KEY);
-      void primeButler(id);
-      return id;
-    } catch {
-      return null;
-    } finally {
-      setButlerBusy(false);
-    }
-  }, [butlerSessionId, store, primeButler]);
+  const ensureButlerSession = useCallback(
+    async (forceWorkspace?: string): Promise<string | null> => {
+      setButlerBusy(true);
+      try {
+        if (store.workspaces.length === 0) await store.loadSessions();
+
+        const prevWs = await AsyncStorage.getItem(BUTLER_WORKSPACE_KEY);
+        const targetWs = forceWorkspace ?? prevWs ?? '';
+
+        // 会话还在、工作区也没变 → 直接复用（队员都还在，最省）
+        if (butlerSessionId && targetWs && prevWs === targetWs) {
+          void primeButler(butlerSessionId);
+          return butlerSessionId;
+        }
+        // 还没绑过工作区 → 返回 null，交给 UI 弹选择框
+        if (!targetWs) return null;
+
+        const id = await store.createSession(targetWs);
+        setButlerSessionId(id);
+        setButlerWorkspace(targetWs);
+        setButlerNeedWorkspace(false);
+        await AsyncStorage.setItem(BUTLER_SESSION_KEY, id);
+        await AsyncStorage.setItem(BUTLER_WORKSPACE_KEY, targetWs);
+        await AsyncStorage.removeItem(BUTLER_PRIMED_KEY);
+        void primeButler(id);
+        return id;
+      } catch {
+        return null;
+      } finally {
+        setButlerBusy(false);
+      }
+    },
+    [butlerSessionId, store, primeButler],
+  );
 
   const setButlerMode = useCallback(
     (on: boolean) => {
       setButlerModeState(on);
       void AsyncStorage.setItem(BUTLER_KEY, on ? '1' : '0');
-      if (on) void ensureButlerSession();
+      if (!on) return;
+      // 还没有会话或还没绑工作区 → 先让用户选一个项目。
+      // 每次都问太烦，所以只在「没绑过」或「会话丢了」时才弹。
+      void (async () => {
+        const id = await ensureButlerSession();
+        if (!id) setButlerNeedWorkspace(true);
+      })();
+    },
+    [ensureButlerSession],
+  );
+
+  /** 用户选好管家工作区：建会话并绑定 */
+  const pickButlerWorkspace = useCallback(
+    (path: string) => {
+      setButlerNeedWorkspace(false);
+      void ensureButlerSession(path);
     },
     [ensureButlerSession],
   );
@@ -297,6 +340,9 @@ export default function App() {
       setButlerMode,
       butlerSessionId,
       butlerBusy,
+      butlerNeedWorkspace,
+      pickButlerWorkspace,
+      butlerWorkspace,
       hasLastPairing,
       resumePairing,
     }),
@@ -310,6 +356,9 @@ export default function App() {
       setButlerMode,
       butlerSessionId,
       butlerBusy,
+      butlerNeedWorkspace,
+      pickButlerWorkspace,
+      butlerWorkspace,
       hasLastPairing,
       resumePairing,
     ],
