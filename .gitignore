@@ -68,3 +68,15 @@ _probe*.mjs
 
 # 管家任务产出的临时文件
 cover_out/
+
+# 隧道/服务运行期产物（含 token，绝不提交）
+_*.log
+_*.log.err
+_*.pid
+_*.mjs
+*_tunnel-service.pid
+
+# 隧道状态文件（含 token）
+tunnel.json
+pairing.json
+

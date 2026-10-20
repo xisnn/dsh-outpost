@@ -53,7 +53,8 @@ param(
   [string]$PermissionMode = 'workspace-write',
   [switch]$NoQr,
   # 局域网模式下自动添加防火墙放行规则（需要管理员权限）
-  [switch]$AllowFirewall
+  [switch]$AllowFirewall,
+[switch]$Foreground
 )
 
 $ErrorActionPreference = 'Stop'
@@ -251,14 +252,17 @@ $env:DSH_PERMISSION_MODE = $PermissionMode
 $logFile = Join-Path $env:TEMP ("dsh-web-" + $Port + ".log")
 if (Test-Path $logFile) { Remove-Item $logFile -Force }
 
-$argLine = '/c ""' + $dsh + '" --profile web --no-open --host ' + $bindIp + ' --port ' + $Port + ' > "' + $logFile + '" 2>&1"'
+$dshArgs = @('--profile', 'web', '--no-open', '--host', $bindIp, '--port', "$Port")
 
-$psi = New-Object System.Diagnostics.ProcessStartInfo
-$psi.FileName = 'cmd.exe'
-$psi.Arguments = $argLine
-$psi.UseShellExecute = $false
-$psi.CreateNoWindow = $true
-$proc = [System.Diagnostics.Process]::Start($psi)
+# 用 Start-Process + -PassThru，并且**不加 -Wait**：
+# 这样 dsh 是独立进程，脚本退出不会把它带走。
+# 之前用 ProcessStartInfo(UseShellExecute=false) 起 cmd.exe，子进程挂在
+# 父进程的作业对象上，脚本被终止时服务跟着消失 —— 这就是
+# 「服务莫名其妙自己退出、手机连不上」的根因。
+$proc = Start-Process -FilePath $dsh -ArgumentList $dshArgs `
+  -RedirectStandardOutput $logFile -RedirectStandardError "$logFile.err" `
+  -WindowStyle Hidden -PassThru
+if (-not $proc) { Write-Host "[X] 启动 dsh 失败" -ForegroundColor Red; exit 1 }
 
 $url = $null
 $deadline = (Get-Date).AddSeconds(120)
@@ -280,6 +284,29 @@ if (-not $url) {
   Get-Content $logFile -ErrorAction SilentlyContinue | Select-Object -Last 25 | ForEach-Object { Write-Host "  $_" -ForegroundColor DarkYellow }
   if (-not $proc.HasExited) { $proc.Kill() }
   exit 1
+}
+
+# ---- 把配对信息写成文件，供 DSH 插件读取 ----
+#
+# 插件在浏览器里，拿不到启动日志，也没有 API 能取 token。
+# 所以这里主动把 { url, token, host, port } 落到一个固定位置，
+# 插件用 /api/file 读它 —— 这样二维码里才能带上 token，
+# 手机扫码才会被识别为「DSH 配对链接」。
+try {
+  $pairFile = 'E:\cloudflared\pairing.json'
+  $pairDir = Split-Path $pairFile -Parent
+  if (-not (Test-Path $pairDir)) { New-Item -ItemType Directory -Path $pairDir -Force | Out-Null }
+  $tokMatch = [regex]::Match($url, '[?&]token=([A-Za-z0-9_\-]+)')
+  $pair = [ordered]@{
+    url   = $url
+    token = if ($tokMatch.Success) { $tokMatch.Groups[1].Value } else { '' }
+    host  = $bindIp
+    port  = $Port
+    writtenAt = (Get-Date).ToString('yyyy-MM-dd HH:mm:ss')
+  }
+  $pair | ConvertTo-Json -Depth 3 | Set-Content $pairFile -Encoding UTF8
+} catch {
+  # 写不进去不影响主流程
 }
 
 # ---- 输出 ----
@@ -319,12 +346,26 @@ if (-not $NoQr) {
   }
 }
 
-try {
-  while (-not $proc.HasExited) { Start-Sleep -Seconds 1 }
-  Write-Host "服务已退出（code $($proc.ExitCode)）；日志：$logFile" -ForegroundColor DarkYellow
-} finally {
-  if (-not $proc.HasExited) {
-    Write-Host '正在停止...' -ForegroundColor DarkGray
-    try { $proc.Kill($true) } catch { try { $proc.Kill() } catch {} }
+# ---- 收尾 ----
+#
+# 默认**不等**服务结束：脚本打印完信息就退出，dsh 作为独立进程继续跑。
+# 这样即使启动它的窗口/终端关掉，服务也不会跟着消失。
+#
+# 需要前台观察日志时加 -Foreground（比如排查启动失败）。
+if ($Foreground) {
+  Write-Host "  前台模式：按 Ctrl+C 停止服务（日志：$logFile）" -ForegroundColor DarkGray
+  Write-Host ""
+  try {
+    while (-not $proc.HasExited) { Start-Sleep -Seconds 1 }
+    Write-Host "服务已退出（code $($proc.ExitCode)）；日志：$logFile" -ForegroundColor DarkYellow
+  } finally {
+    if (-not $proc.HasExited) {
+      Write-Host "正在停止..." -ForegroundColor DarkGray
+      try { $proc.Kill($true) } catch { try { $proc.Kill() } catch {} }
+    }
   }
+} else {
+  Write-Host "  服务在后台运行（PID $($proc.Id)），关闭这个窗口不影响它。" -ForegroundColor DarkGray
+  Write-Host "  停止服务：Stop-Process -Id $($proc.Id)" -ForegroundColor DarkGray
+  Write-Host ""
 }
