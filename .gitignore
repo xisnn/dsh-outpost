@@ -65,3 +65,6 @@ _dsh-start.log
 _dsh-start.err
 _p*.mjs
 _probe*.mjs
+
+# 管家任务产出的临时文件
+cover_out/
