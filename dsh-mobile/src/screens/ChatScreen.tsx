@@ -38,6 +38,7 @@ import { SlideSegmented } from '../components/SlideSegmented';
 import { TeammateNote } from '../components/TeammateNote';
 import { CompletionNotice } from '../components/CompletionNotice';
 import { ButlerThinking } from '../components/ButlerThinking';
+import { ApprovalBanner } from '../components/ApprovalBanner';
 import type { ButlerMode } from '../core/butler';
 import { ThinkingAccordion, ThinkingDots } from '../components/Thinking';
 import { ToolCard } from '../components/ToolCard';
@@ -306,6 +307,12 @@ export function ChatScreen({
   // 空会话 = 还没有任何轮次、也没有内容；这种会话连不上属于正常（follow 流可能还没就绪）
   const isBlankChat = chat.turns.length === 0 && chat.items.length === 0;
 
+  // 最近一轮里还挂着的审批请求（已决的会被 fold 过滤掉）
+  const pendingApprovals = useMemo(() => {
+    const last = chat.turns.at(-1);
+    return last?.approvals ?? [];
+  }, [chat.turns]);
+
   const statusLabel = chat.loading
     ? '加载中'
     : chat.running
@@ -374,6 +381,9 @@ export function ChatScreen({
           value={butlerMode}
           onChange={switchButlerMode}
         /> : null}
+
+      {/* 有工具在等授权：手机端无法响应，明确告诉用户卡在哪、怎么办 */}
+      <ApprovalBanner approvals={pendingApprovals} />
 
       {/* 空会话还没内容时，连不上不该糊一条红条在脸上 —— 静默重试即可 */}
       {chat.error && (chat.items.length > 0 || !isBlankChat) ? (

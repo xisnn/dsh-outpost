@@ -80,6 +80,8 @@ export interface Step {
 
 export interface Turn {
   turn: number;
+  /** 这一轮里待处理的审批请求（权限不够时会出现，需要在电脑上确认） */
+  approvals?: Array<{ id: string; toolName: string; reason?: string; decided?: string }>;
   user?: {
     id?: string;
     text: string;
@@ -455,10 +457,51 @@ export function foldEvents(records: EventRecord[]): Turn[] {
         break;
       }
 
+      case 'approval/asked': {
+        // 工具需要用户授权。当前 App 没有审批响应通道（找不到对应 RPC），
+        // 所以只记录，由 UI 提示用户「去电脑上确认」或调高权限。
+        const turnNo = num(d.turn) ?? current?.turn.turn ?? 0;
+        const b = ensureTurn(turnNo);
+        const id = typeof d.id === 'string' ? d.id : '';
+        if (id) {
+          b.turn.approvals = [
+            ...(b.turn.approvals ?? []).filter((a) => a.id !== id),
+            {
+              id,
+              toolName: typeof d.toolName === 'string' ? d.toolName : 'tool',
+              reason: typeof d.reason === 'string' ? d.reason : undefined,
+            },
+          ];
+        }
+        current = b;
+        break;
+      }
+
+      case 'approval/decided': {
+        // 审批有结果了，标记掉，横幅随之消失
+        const turnNo = num(d.turn) ?? current?.turn.turn ?? 0;
+        const b = ensureTurn(turnNo);
+        const id = typeof d.id === 'string' ? d.id : '';
+        const outcome = typeof d.outcome === 'string' ? d.outcome : 'unknown';
+        b.turn.approvals = (b.turn.approvals ?? []).map((a) =>
+          a.id === id ? { ...a, decided: outcome } : a,
+        );
+        current = b;
+        break;
+      }
+
       default:
-        // 其它事件（job/*、approval/*、team/*、todo/write…）暂不进入消息模型
+        // 其它事件（job/*、team/*、todo/write…）暂不进入消息模型
         break;
     }
+  }
+
+  // 2.5 清掉已决的审批（横幅只该显示「还在等」的）
+  for (const b of turns.values()) {
+    const t = b.turn;
+    if (!t.approvals) continue;
+    t.approvals = t.approvals.filter((a) => !a.decided);
+    if (t.approvals.length === 0) delete t.approvals;
   }
 
   // 3. 收尾：排序 step，标记未结束的 turn

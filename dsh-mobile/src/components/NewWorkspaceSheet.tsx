@@ -26,6 +26,7 @@ import {
 
 import { useTheme } from '../design/theme';
 import { space } from '../design/tokens';
+import { DirectoryBrowser } from './DirectoryBrowser';
 
 export function NewWorkspaceSheet({
   visible,
@@ -50,6 +51,7 @@ export function NewWorkspaceSheet({
   const tv = useTheme();
   const styles = useMemo(() => makeStyles(tv), [tv]);
   const [value, setValue] = useState('');
+  const [browsing, setBrowsing] = useState(false);
 
   // 每次打开清空，避免上次的残留
   useEffect(() => {
@@ -81,20 +83,46 @@ export function NewWorkspaceSheet({
         <View style={styles.card}>
           <Text style={styles.title}>新建工作区</Text>
           <Text style={styles.hint}>
-            填写电脑上的目录路径。目录需要先在电脑上建好，App 不会替你创建文件夹。
+            选一个电脑上的文件夹。也可以直接输入路径，或在这里新建文件夹。
           </Text>
 
-          <TextInput
-            style={styles.input}
-            value={value}
-            onChangeText={setValue}
-            placeholder="E:\work\my-project"
-            placeholderTextColor={tv.colors.textFaint}
-            autoCapitalize="none"
-            autoCorrect={false}
-            editable={!busy}
-            returnKeyType="done"
-            onSubmitEditing={() => value.trim() && onSubmit(value)}
+          {/* 路径输入 + 浏览按钮 */}
+          <View style={styles.inputRow}>
+            <TextInput
+              style={styles.input}
+              value={value}
+              onChangeText={setValue}
+              placeholder="E:\work\my-project"
+              placeholderTextColor={tv.colors.textFaint}
+              autoCapitalize="none"
+              autoCorrect={false}
+              editable={!busy}
+              returnKeyType="done"
+              onSubmitEditing={() => value.trim() && onSubmit(value)}
+            />
+            <Pressable
+              onPress={() => setBrowsing(true)}
+              disabled={busy}
+              style={({ pressed }: { pressed: boolean }) => [
+                styles.browseBtn,
+                pressed ? { opacity: 0.7 } : null,
+              ]}
+              accessibilityRole="button"
+              accessibilityLabel="浏览电脑目录"
+            >
+              <Text style={styles.browseText}>浏览</Text>
+            </Pressable>
+          </View>
+
+          {/* 目录浏览器 */}
+          <DirectoryBrowser
+            visible={browsing}
+            initialPath={value.trim() || undefined}
+            onPick={(p) => {
+              setValue(p);
+              setBrowsing(false);
+            }}
+            onClose={() => setBrowsing(false)}
           />
 
           {error ? (
@@ -209,6 +237,14 @@ function makeStyles(tv: ReturnType<typeof useTheme>) {
       marginTop: space.xs,
       marginBottom: space.md,
     },
+    inputRow: { flexDirection: 'row', alignItems: 'center', gap: space.sm },
+    browseBtn: {
+      paddingHorizontal: space.md,
+      paddingVertical: space.md,
+      borderRadius: tv.radius.md,
+      backgroundColor: C.bgCard,
+    },
+    browseText: { color: C.accentBright, fontSize: tv.type.sm },
     input: {
       backgroundColor: C.bgCard,
       borderRadius: tv.radius.md,

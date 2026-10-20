@@ -14,6 +14,7 @@ import { ModelApi } from '../core/rpc/model';
 import { AccountApi, type BalanceResult } from '../core/rpc/account';
 import { UploadApi } from '../core/rpc/upload';
 import { WorkspaceApi } from '../core/rpc/workspace';
+import { DirectoryPickerApi } from '../core/rpc/directory';
 import type { WorkspaceCustom } from '../core/workspace-custom';
 import { foldEvents, toChatItems, isInjectedMessage, stripModeTag, type ChatItem, type Turn } from '../core/fold';
 
@@ -93,6 +94,8 @@ export class Store {
   readonly account: AccountApi;
   readonly upload: UploadApi;
   readonly workspace: WorkspaceApi;
+  /** 电脑目录浏览（directoryPicker） */
+  readonly dirs: DirectoryPickerApi;
   private conn: DshConnection;
 
   connection: ConnectionState = 'idle';
@@ -148,6 +151,7 @@ export class Store {
     this.account = new AccountApi(conn);
     this.upload = new UploadApi(conn);
     this.workspace = new WorkspaceApi(conn);
+    this.dirs = new DirectoryPickerApi(conn);
   }
 
   /** 拉取账户余额与登录态 */

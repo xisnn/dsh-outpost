@@ -68,6 +68,23 @@ export async function checkForUpdate(currentVersion: string): Promise<ReleaseInf
   }
 }
 
+/**
+ * 本地缓存的文件是否完整。
+ *
+ * 判据：文件存在 **且** 大小等于 release 声明的 size。
+ * release 没给 size 时退化成「存在即用」（无法校验，只能信任）。
+ */
+async function isComplete(path: string, expectedSize?: number): Promise<boolean> {
+  try {
+    if (!(await ReactNativeBlobUtil.fs.exists(path))) return false;
+    if (!expectedSize || expectedSize <= 0) return true;
+    const stat = await ReactNativeBlobUtil.fs.stat(path);
+    return Number(stat.size) === Number(expectedSize);
+  } catch {
+    return false;
+  }
+}
+
 /** 下载进度：比例 + 已下载/总字节（总大小可能拿不到，那就是 0） */
 export interface DownloadProgress {
   ratio: number;
@@ -86,9 +103,24 @@ export async function downloadAndInstall(
   const dir = ReactNativeBlobUtil.fs.dirs.CacheDir;
   const path = `${dir}/dsh-pocket-${release.version}.apk`;
 
-  // 已经下过就直接装，省一次流量
-  const exists = await ReactNativeBlobUtil.fs.exists(path);
-  if (!exists) {
+  // 缓存能不能用，必须校验大小。
+  //
+  // 曾经出过这个 bug：网络中断留下一半的 APK，下次点更新时
+  // `fs.exists` 为 true 就直接拿去装，系统报
+  // 「解析软件包时出现问题 / PackageInfo is null」。
+  // 所以这里要求「文件大小 == release 给的 size」，不一致就重新下载。
+  const usable = await isComplete(path, release.apkSize);
+  if (usable) {
+    // 缓存命中：直接给 100%，让 UI 知道「不用等下载」
+    onProgress?.({
+      ratio: 1,
+      received: release.apkSize ?? 0,
+      total: release.apkSize ?? 0,
+    });
+  } else {
+    // 先删掉残缺文件，避免 blob-util 往旧文件后面追加
+    await ReactNativeBlobUtil.fs.unlink(path).catch(() => undefined);
+
     const task = ReactNativeBlobUtil.config({
       fileCache: true,
       path,
@@ -107,6 +139,12 @@ export async function downloadAndInstall(
     });
 
     await task;
+
+    // 下载完再校验一次：网络中途断开时 blob-util 可能不抛错
+    if (!(await isComplete(path, release.apkSize))) {
+      await ReactNativeBlobUtil.fs.unlink(path).catch(() => undefined);
+      throw new Error('安装包下载不完整，请重试');
+    }
   }
 
   // 唤起系统安装界面。

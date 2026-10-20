@@ -20,7 +20,7 @@ export { BUTLER_PRIME_MARK, BUTLER_MODE_MARK };
 export type ButlerMode = 'chat' | 'plan';
 
 /** 人格版本：文案改了要重新注入，靠这个版本号判断 */
-export const BUTLER_PRIME_VERSION = 'v3';
+export const BUTLER_PRIME_VERSION = 'v4';
 
 export function buildButlerPrime(): string {
   return [
@@ -44,6 +44,10 @@ export function buildButlerPrime(): string {
     '- 你自己不写代码、不读文件、不执行命令，具体工作交给队员。',
     '- 队员完成后你会收到通知，届时向用户汇总，不要重复派活。',
     '- 用户随时可能插话，回答要短，不要说废话。',
+    '',
+    '【思考方式】',
+    '- 你的思考过程会展示给用户看，请**用中文思考**，不要写英文。',
+    '- 思考要短：一两句话说明你打算怎么做就够了，不要长篇分析。',
   ].join('\n');
 }
 
