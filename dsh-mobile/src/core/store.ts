@@ -750,8 +750,14 @@ export class Store {
     if (!injected) {
       // 乐观插入：本地先显示，等真实事件回来再被 fold 覆盖。
       // 注意剥掉尾部的模式标记，否则会闪一下 〔模式:计划〕。
+      //
+      // 同时把 running 置 true —— 这一步很关键。
+      // 之前只插入消息不设 running，界面要等下一次 refreshChatMeta 轮询
+      // （5 秒）才知道「开始跑了」；加上模型首字延迟十几秒，
+      // 用户发完消息后屏幕上长时间毫无反应，像是卡死了。
       this.chats.set(sessionId, {
         ...cur,
+        running: true,
         items: [
           ...cur.items,
           {
@@ -773,6 +779,8 @@ export class Store {
       const c = this.getChat(sessionId);
       this.chats.set(sessionId, {
         ...c,
+        // 发送失败必须把 running 复位，否则界面会一直显示「思考中」转圈
+        running: false,
         error: e instanceof Error ? e.message : String(e),
       });
       this.emit();

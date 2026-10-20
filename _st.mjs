@@ -4,7 +4,12 @@ const cookie=(r.headers.getSetCookie?.()??[]).map(s=>s.split(";")[0]).join("; ")
 const H={Host:`${HOST}:${PORT}`,"Content-Type":"application/json",Cookie:cookie};
 const res=await fetch(`http://${HOST}:${PORT}/api/session/list`,{method:"POST",headers:H,body:JSON.stringify({type:"client-request",rpcId:"r1",method:"session/list",payload:{args:{_request:{}}}})});
 const items=(await res.json())?.result?.value?.items ?? [];
-const recent = items.filter(s=>s.cwd && s.cwd.includes('default-workspace')).sort((a,b)=>b.updatedAt-a.updatedAt).slice(0,3);
-console.log("=== default-workspace 最近会话 ===");
-recent.forEach(s=>console.log(s.sessionId, "|", s.projections?.values?.title, "|", new Date(s.updatedAt).toLocaleTimeString()));
+const sid="session-15983b7b-4b2f-4d6c-b6ff-5d2b4acdd331";
+const row = items.find(s=>s.sessionId===sid);
+console.log("会话 running:", row?.running);
+console.log("agentAvailable:", row?.agentAvailable);
+console.log("updatedAt:", new Date(row?.updatedAt??0).toLocaleTimeString());
+const v = row?.projections?.values ?? {};
+console.log("sessionStats:", JSON.stringify(v.sessionStats));
+console.log("agentTeam:", JSON.stringify(v.agentTeam)?.slice(0,300));
 setTimeout(()=>process.exit(0),150);
