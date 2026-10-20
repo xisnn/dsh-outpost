@@ -39,6 +39,8 @@ import { TeammateNote } from '../components/TeammateNote';
 import { CompletionNotice } from '../components/CompletionNotice';
 import { ButlerThinking } from '../components/ButlerThinking';
 import { ApprovalBanner } from '../components/ApprovalBanner';
+import { FileCard } from '../components/FileCard';
+import { isImagePath } from '../core/filerefs';
 import type { ButlerMode } from '../core/butler';
 import { ThinkingAccordion, ThinkingDots } from '../components/Thinking';
 import { ToolCard } from '../components/ToolCard';
@@ -294,12 +296,31 @@ export function ChatScreen({
             <ButlerThinking key={`${keyPrefix}-r${i}`} text={b.text} live={isLive} />
           );
         }
+        // 交付物：管家 present 出来的图片/文件，渲染成可点开的卡片
+        if (b.kind === 'file') {
+          return (
+            <View key={`${keyPrefix}-f${i}`} style={styles.fileBlockWrap}>
+              <FileCard
+                path={b.path}
+                alt={b.description}
+                image={isImagePath(b.path)}
+              />
+            </View>
+          );
+        }
         return null;
       }
       if (b.kind === 'text') return <AssistantText key={`${keyPrefix}-t${i}`} text={b.text} />;
       if (b.kind === 'reasoning') {
         const isLive = i === blocks.length - 1 && chat.running;
         return <ThinkingAccordion key={`${keyPrefix}-r${i}`} text={b.text} done={!isLive} />;
+      }
+      if (b.kind === 'file') {
+        return (
+          <View key={`${keyPrefix}-f${i}`} style={styles.fileBlockWrap}>
+            <FileCard path={b.path} alt={b.description} image={isImagePath(b.path)} />
+          </View>
+        );
       }
       return <ToolCard key={`${keyPrefix}-c${i}`} block={b} />;
     });
@@ -790,6 +811,9 @@ function makeStyles(tv: ReturnType<typeof useTheme>) {
       paddingVertical: space.sm,
     },
     liveText: { color: C.textTertiary, fontSize: type.xs, marginLeft: 6 },
+
+    // 交付物卡片（assistant present 出来的文件）
+    fileBlockWrap: { paddingHorizontal: layout.screenPadding },
 
     composerWrap: {
       borderTopWidth: StyleSheet.hairlineWidth,

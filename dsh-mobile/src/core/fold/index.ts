@@ -71,7 +71,16 @@ export interface ToolBlock {
   pending?: boolean;
 }
 
-export type Block = TextBlock | ReasoningBlock | ToolBlock;
+/** 交付物：助手通过 present 工具发给用户的文件（图片/PDF 等） */
+export interface FileBlock {
+  kind: 'file';
+  /** 电脑上的绝对路径 */
+  path: string;
+  /** 展示用描述 */
+  description?: string;
+}
+
+export type Block = TextBlock | ReasoningBlock | ToolBlock | FileBlock;
 
 export interface Step {
   step: number;
@@ -129,13 +138,20 @@ export function parseTeammateMessage(
 ): { from: string; text: string; notice: boolean } | null {
   const t = text.trimStart();
 
-  // 1. 队员主动发的汇报
+  // 1. 队员主动发的汇报（旧格式）
   const m = /^Team message from\s+([^:\n]+):\s*([\s\S]+)$/.exec(t);
   if (m) {
     return { from: m[1].trim(), text: m[2].trim(), notice: false };
   }
 
-  // 2. subagent 完成通知
+  // 2. 队员汇报（新格式）："Agent <sessionId> sent a message: ..."
+  //    DSH 换过措辞，两种都要认，否则这类消息会漏成「用户发言」。
+  const a = /^Agent\s+([0-9a-zA-Z_-]{6,})\s+sent a message:\s*([\s\S]+)$/i.exec(t);
+  if (a) {
+    return { from: a[1].slice(0, 8), text: a[2].trim(), notice: false };
+  }
+
+  // 3. subagent 完成通知
   const n = /^Background subagent\s+([0-9a-f-]{8,})[\s\S]*?closing message:\s*([\s\S]+)$/i.exec(t);
   if (n) {
     return { from: n[1].slice(0, 8), text: n[2].trim(), notice: true };
@@ -454,6 +470,32 @@ export function foldEvents(records: EventRecord[]): Turn[] {
         b.turn.reason = reason?.kind;
         if (current?.turn.turn === turnNo) current = undefined;
         currentStepNo = undefined;
+        break;
+      }
+
+      case 'deliverables/presented': {
+        // 助手用 present 工具交付文件（图片/PDF 等）。
+        // 这些文件不会出现在 markdown 里，必须单独收集，
+        // 否则用户只看到「图就在上面那张卡片里」却找不到卡片。
+        const turnNo = num(d.turn) ?? current?.turn.turn ?? 0;
+        const b = ensureTurn(turnNo);
+        const stepNo = num(d.step) ?? currentStepNo ?? b.stepsByNumber.size ?? 1;
+        const step = ensureStep(b, stepNo);
+        const files = Array.isArray(d.files) ? (d.files as Array<Record<string, unknown>>) : [];
+        for (const f of files) {
+          const path = typeof f.path === 'string' ? f.path : '';
+          if (!path) continue;
+          // 同一路径只加一次（重新 follow 会重放事件）
+          const exists = step.blocks.some((x) => x.kind === 'file' && x.path === path);
+          if (exists) continue;
+          step.blocks.push({
+            kind: 'file',
+            path,
+            description: typeof f.description === 'string' ? f.description : undefined,
+          });
+        }
+        current = b;
+        currentStepNo = stepNo;
         break;
       }
 

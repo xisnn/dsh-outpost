@@ -3,6 +3,9 @@ import { parseTeammateMessage } from '../src/core/fold/index.ts';
 const cases = [
   ['Team message from weather-scout: 大连今天多云', { from: 'weather-scout', notice: false }],
   ['Team message from ui-theme-a:完成了吗', { from: 'ui-theme-a', notice: false }],
+  // DSH 换过措辞，新格式也要认
+  ['Agent 32378928-c706-4203 sent a message: STATUS: OK', { from: '32378928', notice: false }],
+  ['Agent 0eca3932-d77b-4691 sent a message: ■ 选中的图片', { from: '0eca3932', notice: false }],
 ];
 
 let pass = 0;
