@@ -151,9 +151,11 @@ export function ChatScreen({
   // 团队状态靠投影轮询刷新：team/* 事件不在会话日志里，拿不到增量
   useEffect(() => {
     if (!butler && !hasTeam) return;
+    // 2 秒一次：团队状态和 running 都靠它刷新。
+    // 之前是 5 秒，配合模型十几秒的首字延迟，用户会觉得发完消息没反应。
     const timer = setInterval(() => {
       void store.refreshChatMeta(sessionId);
-    }, 5000);
+    }, 2000);
     return () => clearInterval(timer);
   }, [store, sessionId, butler, hasTeam]);
 
@@ -491,7 +493,7 @@ export function ChatScreen({
               <ActivityIndicator color={tv.colors.accent} />
               <Text style={styles.loadingText}>正在读取会话…</Text>
             </View>
-          ) : chat.items.length === 0 ? (
+          ) : chat.items.length === 0 && !chat.running ? (
             <View style={styles.emptyBox}>
               <Text style={styles.emptyMark}>{butler ? '◈' : '◇'}</Text>
               <Text style={styles.emptyTitle}>{butler ? '管家' : title ?? '新会话'}</Text>
@@ -552,7 +554,7 @@ export function ChatScreen({
             })
           )}
 
-          {chat.running && chat.items.length > 0 ? (
+          {chat.running ? (
             <View style={styles.liveRow}>
               <ThinkingDots color={tv.colors.accent} size="large" />
               <Text style={styles.liveText}>{butler ? '管家在思考…' : '继续中…'}</Text>
