@@ -39,6 +39,7 @@ import { TeammateNote } from '../components/TeammateNote';
 import { CompletionNotice } from '../components/CompletionNotice';
 import { ButlerThinking } from '../components/ButlerThinking';
 import { ApprovalBanner } from '../components/ApprovalBanner';
+import { ButlerWorkspacePicker } from '../components/ButlerWorkspacePicker';
 import { FileCard } from '../components/FileCard';
 import { isImagePath } from '../core/filerefs';
 import type { ButlerMode } from '../core/butler';
@@ -84,7 +85,7 @@ export function ChatScreen({
   /** 只读（队员事件流不允许发消息） */
   readOnly?: boolean;
 }) {
-  const { store } = useApp();
+  const { store, butlerWorkspace, pickButlerWorkspace, butlerNeedWorkspace } = useApp();
   const nav = useNav();
   const insets = useSafeAreaInsets();
   const tv = useTheme();
@@ -99,6 +100,8 @@ export function ChatScreen({
   const [sendError, setSendError] = useState<string | undefined>(undefined);
   // 管家模式：chat=闲聊（默认，直接回答）/ plan=计划（先对齐需求再派活）
   const [butlerMode, setButlerMode] = useState<ButlerMode>('chat');
+  // 管家页顶部的「切换项目」弹层
+  const [switchWs, setSwitchWs] = useState(false);
   const scrollRef = useRef<ScrollView>(null);
   const [nearBottom, setNearBottom] = useState(true);
 
@@ -328,6 +331,13 @@ export function ChatScreen({
   // 空会话 = 还没有任何轮次、也没有内容；这种会话连不上属于正常（follow 流可能还没就绪）
   const isBlankChat = chat.turns.length === 0 && chat.items.length === 0;
 
+  // 顶部显示的项目名（取路径最后一段）
+  const butlerWsName = useMemo(() => {
+    if (!butlerWorkspace) return null;
+    const seg = butlerWorkspace.split(/[\\\\/]/).filter(Boolean).pop();
+    return seg ?? butlerWorkspace;
+  }, [butlerWorkspace]);
+
   // 最近一轮里还挂着的审批请求（已决的会被 fold 过滤掉）
   const pendingApprovals = useMemo(() => {
     const last = chat.turns.at(-1);
@@ -350,6 +360,25 @@ export function ChatScreen({
         title={title ?? '对话'}
         subtitle={readOnly ? '只读 · 执行记录' : undefined}
         compact
+        right={
+          butler ? (
+            <Pressable
+              onPress={() => setSwitchWs(true)}
+              hitSlop={10}
+              style={({ pressed }: { pressed: boolean }) => [
+                styles.wsBtn,
+                pressed ? { opacity: 0.6 } : null,
+              ]}
+              accessibilityRole="button"
+              accessibilityLabel="切换项目"
+            >
+              <Text style={styles.wsBtnText} numberOfLines={1}>
+                {butlerWsName ?? '选项目'}
+              </Text>
+              <Text style={styles.wsBtnChevron}>⌄</Text>
+            </Pressable>
+          ) : null
+        }
       />
 
       {/* 管家页顶部：团队头像条（点开看谁在干什么） */}
@@ -723,6 +752,18 @@ export function ChatScreen({
           });
         }}
       />
+
+      {/* 切换管家项目：换项目 = 换会话 = 换一套队员，上下文不会串 */}
+      <ButlerWorkspacePicker
+        visible={switchWs || butlerNeedWorkspace}
+        workspaces={store.workspaces}
+        allowCancel={!butlerNeedWorkspace}
+        onCancel={() => setSwitchWs(false)}
+        onPick={(path) => {
+          setSwitchWs(false);
+          pickButlerWorkspace(path);
+        }}
+      />
     </View>
   );
 }
@@ -811,6 +852,19 @@ function makeStyles(tv: ReturnType<typeof useTheme>) {
       paddingVertical: space.sm,
     },
     liveText: { color: C.textTertiary, fontSize: type.xs, marginLeft: 6 },
+
+    // 顶栏「切换项目」
+    wsBtn: {
+      flexDirection: 'row',
+      alignItems: 'center',
+      maxWidth: 130,
+      paddingHorizontal: 10,
+      paddingVertical: 5,
+      borderRadius: radius.pill ?? 14,
+      backgroundColor: C.bgCard,
+    },
+    wsBtnText: { color: C.textSecondary, fontSize: type.xs, flexShrink: 1 },
+    wsBtnChevron: { color: C.textFaint, fontSize: type.micro, marginLeft: 3 },
 
     // 交付物卡片（assistant present 出来的文件）
     fileBlockWrap: { paddingHorizontal: layout.screenPadding },
