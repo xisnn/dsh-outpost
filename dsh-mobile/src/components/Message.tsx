@@ -13,6 +13,7 @@ import { layout, motion, radius, space, type, weight } from '../design/tokens';
 import type { AttachRef } from '../core/types';
 import type { UploadApi } from '../core/rpc/upload';
 import { AttachmentGallery } from './Attachment';
+import { AssistantRichText } from './AssistantRichText';
 
 export function UserBubble({
   text,
@@ -90,19 +91,22 @@ export function UserBubble({
   );
 }
 
-export function AssistantText({ text }: { text: string }) {
-  const tv = useTheme();
-  const styles = useMemo(() => makeStyles(tv), [tv]);
+export function AssistantText({
+  text,
+  sessionId,
+}: {
+  text: string;
+  /** 会话 id：透给 RichText，让内嵌图片能走网关下载 */
+  sessionId?: string;
+}) {
   const trimmed = text?.trim();
   // 空文本不渲染，避免留下孤立的空白块
   if (!trimmed) return null;
-  return (
-    <View style={styles.assistantRow}>
-      <Text style={styles.assistantText} selectable>
-        {trimmed}
-      </Text>
-    </View>
-  );
+  // 必须走 AssistantRichText：它会把 markdown 里的 ![](path) 拆成文件引用，
+  // 图片才能真正显示成图。
+  // 这里曾经是纯 <Text>，结果管家贴的 ![封面](cover.jpg) 在手机上
+  // 只是一串字（或者被吞掉），用户看到的就是「图片显示不了」。
+  return <AssistantRichText text={trimmed} sessionId={sessionId} />;
 }
 
 function makeStyles(tv: ReturnType<typeof useTheme>) {

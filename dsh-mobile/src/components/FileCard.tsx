@@ -15,18 +15,22 @@ import { ActivityIndicator, Image, Pressable, StyleSheet, Text, View } from 'rea
 import { useTheme } from '../design/theme';
 import { useApp } from '../App';
 import { fetchRemoteFile, openLocalFile, type RemoteFile } from '../core/fileUrl';
+import { downloadWorkspaceFile } from '../core/gatewayFiles';
 
 export function FileCard({
   path,
   alt,
   image,
+  sessionId,
 }: {
-  /** 电脑上的绝对路径 */
+  /** 电脑上的绝对路径，或相对工作区的路径 */
   path: string;
   /** markdown 里的 alt 文本 */
   alt?: string;
   /** 是否按图片渲染 */
   image?: boolean;
+  /** 会话 id：有它就能走网关下载（比 /api/file 可靠） */
+  sessionId?: string;
 }) {
   const tv = useTheme();
   const styles = useMemo(() => makeStyles(tv), [tv]);
@@ -46,11 +50,29 @@ export function FileCard({
 
   const name = path.split(/[\\/]/).pop() ?? path;
 
-  // 图片：进组件就开始拉，拉完直接显示
+  // 图片：进组件就开始拉，拉完直接显示。
+  //
+  // 两条路，按可靠性排序：
+  //   1. 网关下载（按会话工作区解析）—— 能处理相对路径、中文名，
+  //      甚至带冒号的文件名（实测 `山脚客栈：雾岭茶香.png` 走这条能通）
+  //   2. /api/file?path=<绝对路径> —— 老路子，要求绝对路径拼对
+  // 先试 1，失败再退回 2。
   useEffect(() => {
     if (!image) return;
     let alive = true;
     void (async () => {
+      // 1. 网关
+      const gw = store.gatewayChannel;
+      if (gw && sessionId) {
+        try {
+          const f = await downloadWorkspaceFile(gw, sessionId, path, undefined);
+          if (alive) setLocal({ uri: f.path, fsPath: f.path.replace(/^file:\/\//, ''), name: f.name });
+          return;
+        } catch {
+          // 网关失败就往下走老路径
+        }
+      }
+      // 2. /api/file
       try {
         const f = await fetchRemoteFile(
           store.fileBaseUrl,
@@ -65,7 +87,7 @@ export function FileCard({
     return () => {
       alive = false;
     };
-  }, [image, absPath, store]);
+  }, [image, absPath, path, sessionId, store]);
 
   /** 用户点卡片：图片看大图，其他文件交给系统 */
   const onPress = async () => {

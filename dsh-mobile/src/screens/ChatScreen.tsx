@@ -85,7 +85,7 @@ export function ChatScreen({
   /** 只读（队员事件流不允许发消息） */
   readOnly?: boolean;
 }) {
-  const { store, butlerWorkspace, pickButlerWorkspace, butlerNeedWorkspace } = useApp();
+  const { store, baseUrl, butlerWorkspace, pickButlerWorkspace, butlerNeedWorkspace } = useApp();
   const nav = useNav();
   const insets = useSafeAreaInsets();
   const tv = useTheme();
@@ -293,7 +293,7 @@ export function ChatScreen({
       // 跑完就自动收起成一行，不占地方。
       if (butler) {
         if (b.kind === 'text') {
-          return <AssistantText key={`${keyPrefix}-t${i}`} text={b.text} />;
+          return <AssistantText key={`${keyPrefix}-t${i}`} text={b.text} sessionId={sessionId} />;
         }
         if (b.kind === 'reasoning') {
           const isLive = i === blocks.length - 1 && chat.running;
@@ -309,13 +309,14 @@ export function ChatScreen({
                 path={b.path}
                 alt={b.description}
                 image={isImagePath(b.path)}
+                sessionId={sessionId}
               />
             </View>
           );
         }
         return null;
       }
-      if (b.kind === 'text') return <AssistantText key={`${keyPrefix}-t${i}`} text={b.text} />;
+      if (b.kind === 'text') return <AssistantText key={`${keyPrefix}-t${i}`} text={b.text} sessionId={sessionId} />;
       if (b.kind === 'reasoning') {
         const isLive = i === blocks.length - 1 && chat.running;
         return <ThinkingAccordion key={`${keyPrefix}-r${i}`} text={b.text} done={!isLive} />;
@@ -323,7 +324,12 @@ export function ChatScreen({
       if (b.kind === 'file') {
         return (
           <View key={`${keyPrefix}-f${i}`} style={styles.fileBlockWrap}>
-            <FileCard path={b.path} alt={b.description} image={isImagePath(b.path)} />
+            <FileCard
+              path={b.path}
+              alt={b.description}
+              image={isImagePath(b.path)}
+              sessionId={sessionId}
+            />
           </View>
         );
       }
@@ -345,6 +351,13 @@ export function ChatScreen({
     const last = chat.turns.at(-1);
     return last?.approvals ?? [];
   }, [chat.turns]);
+
+  // 审批网关：进页面连上，离开断开。
+  // 这是条旁路连接，只收发审批，不影响现有 RPC。
+  useEffect(() => {
+    store.connectApprovals(baseUrl);
+    return () => store.disconnectApprovals();
+  }, [store, baseUrl]);
 
   const statusLabel = chat.loading
     ? '加载中'
@@ -435,7 +448,19 @@ export function ChatScreen({
         /> : null}
 
       {/* 有工具在等授权：手机端无法响应，明确告诉用户卡在哪、怎么办 */}
-      <ApprovalBanner approvals={pendingApprovals} />
+      <ApprovalBanner
+        approvals={(store.pendingApprovals ?? []).map((a) => ({
+          id: a.rpcId,
+          toolName: a.toolName,
+          reason: a.reason,
+        }))}
+        readonlyApprovals={pendingApprovals}
+        gatewayOnline={store.gatewayStatus === 'online'}
+        onAnswer={(a, outcome) => {
+          const hit = (store.pendingApprovals ?? []).find((p) => p.rpcId === a.id);
+          if (hit) store.answerApproval(hit, outcome);
+        }}
+      />
 
       {/* 空会话还没内容时，连不上不该糊一条红条在脸上 —— 静默重试即可 */}
       {chat.error && (chat.items.length > 0 || !isBlankChat) ? (
