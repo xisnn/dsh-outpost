@@ -39,6 +39,14 @@ const BUTLER_KEY = '@dsh/butlerMode';
 const BUTLER_SESSION_KEY = '@dsh/butlerSession';
 /** 管家会话绑定的工作区路径（决定 cwd，也决定队员归属哪个项目） */
 const BUTLER_WORKSPACE_KEY = '@dsh/butlerWorkspace';
+/**
+ * 工作区路径 → 该项目的管家会话 id。
+ *
+ * 为什么要这个映射：切项目再切回来时，原来的会话还在（上下文、队员都在），
+ * 应该恢复它而不是新建。只存一个 BUTLER_SESSION_KEY 的话，切回来会开新会话，
+ * 用户看到的就是「上下文不见了」。
+ */
+const BUTLER_WS_SESSIONS_KEY = '@dsh/butlerSessionsByWs';
 const BUTLER_PRIMED_KEY = '@dsh/butlerPrimed';
 
 export interface AppContextValue {
@@ -268,6 +276,10 @@ export default function App() {
    * 队员是会话级的（TeamMemberSnapshot 挂在 parentSessionId 上），
    * 所以「按项目复用队员」等价于「一个项目一个管家会话」。
    *
+   * 关键：每个工作区记住自己的会话（BUTLER_WS_SESSIONS_KEY 是个 map）。
+   * 切项目再切回来时恢复原会话 —— 上下文和队员都还在。
+   * 之前只存一个全局 sessionId 且无条件新建，用户切回来发现上下文没了。
+   *
    * forceWorkspace：用户刚选的目录。不传就沿用上次绑定的。
    */
   const ensureButlerSession = useCallback(
@@ -279,20 +291,50 @@ export default function App() {
         const prevWs = await AsyncStorage.getItem(BUTLER_WORKSPACE_KEY);
         const targetWs = forceWorkspace ?? prevWs ?? '';
 
-        // 会话还在、工作区也没变 → 直接复用（队员都还在，最省）
-        if (butlerSessionId && targetWs && prevWs === targetWs) {
-          void primeButler(butlerSessionId);
-          return butlerSessionId;
-        }
         // 还没绑过工作区 → 返回 null，交给 UI 弹选择框
         if (!targetWs) return null;
 
+        // 同一工作区且有会话 → 直接复用
+        if (butlerSessionId && prevWs === targetWs) {
+          void primeButler(butlerSessionId);
+          return butlerSessionId;
+        }
+
+        // 查这个工作区以前有没有管家会话
+        let byWs: Record<string, string> = {};
+        try {
+          const raw = await AsyncStorage.getItem(BUTLER_WS_SESSIONS_KEY);
+          if (raw) byWs = JSON.parse(raw) as Record<string, string>;
+        } catch {
+          // 解析失败就当没有
+        }
+
+        const remembered = byWs[targetWs];
+        // 记住的会话可能已经被用户删了，确认它还在列表里
+        const stillExists =
+          !!remembered && store.sessions.some((s) => s.sessionId === remembered);
+
+        if (remembered && stillExists) {
+          // 恢复原会话：上下文、队员都在
+          setButlerSessionId(remembered);
+          setButlerWorkspace(targetWs);
+          setButlerNeedWorkspace(false);
+          await AsyncStorage.setItem(BUTLER_SESSION_KEY, remembered);
+          await AsyncStorage.setItem(BUTLER_WORKSPACE_KEY, targetWs);
+          void primeButler(remembered);
+          return remembered;
+        }
+
+        // 这个项目第一次开 → 新建会话
         const id = await store.createSession(targetWs);
+        byWs[targetWs] = id;
         setButlerSessionId(id);
         setButlerWorkspace(targetWs);
         setButlerNeedWorkspace(false);
         await AsyncStorage.setItem(BUTLER_SESSION_KEY, id);
         await AsyncStorage.setItem(BUTLER_WORKSPACE_KEY, targetWs);
+        await AsyncStorage.setItem(BUTLER_WS_SESSIONS_KEY, JSON.stringify(byWs));
+        // 新会话要重新注入人格
         await AsyncStorage.removeItem(BUTLER_PRIMED_KEY);
         void primeButler(id);
         return id;
@@ -396,6 +438,7 @@ function renderScreen(screen: Screen) {
     case 'Chat':
       return (
         <ChatScreen
+          key={String(screen.params?.sessionId ?? '')}
           sessionId={String(screen.params?.sessionId ?? '')}
           title={screen.params?.title ? String(screen.params.title) : undefined}
           butler={screen.params?.butler === true}
