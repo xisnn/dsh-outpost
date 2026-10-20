@@ -5,10 +5,13 @@
  * 它依赖 react-native-screens，而后者在 RN 0.81 + Fabric 下存在
  * 原生 ABI 不兼容问题（RNSScreenStackHeaderConfigProps 析构崩溃）。
  * 三层导航本身很简单，自己实现更可控，也少一个原生依赖。
+ *
+ * 转场动画：新页面从右侧滑入 + 淡入，配合底层页面轻微左移。
+ * 用 Animated + useNativeDriver，Fabric 下正常工作。
  */
 
-import React, { createContext, useCallback, useContext, useMemo, useState } from 'react';
-import { BackHandler, View, StyleSheet } from 'react-native';
+import React, { createContext, useCallback, useContext, useEffect, useMemo, useRef, useState } from 'react';
+import { Animated, BackHandler, Dimensions, View, StyleSheet } from 'react-native';
 
 export interface Screen {
   name: string;
@@ -31,13 +34,76 @@ export function useNav(): NavContextValue {
   return ctx;
 }
 
-export interface NavHostProps {
-  initial: string;
+interface NavHostProps {
+  initial: Screen;
   render: (screen: Screen) => React.ReactNode;
 }
 
+const SCREEN_WIDTH = Dimensions.get('window').width;
+/** 转场时长：太快看不出、太慢显得卡 */
+const DURATION = 240;
+
+/** 单个页面容器：负责自己的入场动画 */
+function ScreenPane({
+  active,
+  /** 是否被新页面压在下面（需要轻微让位） */
+  covered,
+  children,
+}: {
+  active: boolean;
+  covered: boolean;
+  children: React.ReactNode;
+}) {
+  // 0 = 完全在右侧屏外，1 = 就位
+  const enter = useRef(new Animated.Value(1)).current;
+  const firstMount = useRef(true);
+
+  useEffect(() => {
+    if (firstMount.current) {
+      firstMount.current = false;
+      return;
+    }
+    // 页面被 push 上来：从右侧滑入
+    enter.setValue(0);
+    Animated.timing(enter, {
+      toValue: 1,
+      duration: DURATION,
+      useNativeDriver: true,
+    }).start();
+  }, [enter]);
+
+  const translateX = enter.interpolate({
+    inputRange: [0, 1],
+    outputRange: [SCREEN_WIDTH * 0.28, 0],
+  });
+  const opacity = enter.interpolate({
+    inputRange: [0, 1],
+    outputRange: [0.4, 1],
+  });
+
+  // 被覆盖时露出一点边缘，暗示下面还有页面
+  const coverShift = covered ? -SCREEN_WIDTH * 0.08 : 0;
+
+  return (
+    <Animated.View
+      style={[
+        styles.screen,
+        {
+          opacity,
+          transform: [{ translateX: Animated.add(translateX, coverShift) }],
+        },
+      ]}
+      pointerEvents={active ? 'auto' : 'none'}
+      accessibilityElementsHidden={!active}
+      importantForAccessibility={active ? 'auto' : 'no-hide-descendants'}
+    >
+      {children}
+    </Animated.View>
+  );
+}
+
 export function NavHost({ initial, render }: NavHostProps) {
-  const [stack, setStack] = useState<Screen[]>([{ name: initial }]);
+  const [stack, setStack] = useState<Screen[]>([initial]);
 
   const push = useCallback((name: string, params?: Record<string, unknown>) => {
     setStack((s) => [...s, { name, params }]);
@@ -52,27 +118,32 @@ export function NavHost({ initial, render }: NavHostProps) {
   }, []);
 
   // Android 返回键
-  React.useEffect(() => {
+  useEffect(() => {
     const sub = BackHandler.addEventListener('hardwareBackPress', () => {
-      if (stack.length > 1) {
-        pop();
-        return true;
-      }
-      return false;
+      let handled = false;
+      setStack((s) => {
+        if (s.length > 1) {
+          handled = true;
+          return s.slice(0, -1);
+        }
+        return s;
+      });
+      return handled;
     });
     return () => sub.remove();
-  }, [stack.length, pop]);
+  }, []);
 
   const value = useMemo<NavContextValue>(
-    () => ({ stack, push, pop, reset, canGoBack: stack.length > 1 }),
+    () => ({
+      stack,
+      push,
+      pop,
+      reset,
+      canGoBack: stack.length > 1,
+    }),
     [stack, push, pop, reset],
   );
 
-  // 整个栈都渲染，只有栈顶可见（其余 display:none）。
-  // 这样压栈/出栈不会卸载下层页面：
-  //   - 工作区列表的滚动位置、tab 选择都保留
-  //   - 返回时不会重新拉一遍数据、也没有白屏闪烁
-  // 这是 react-navigation 的标准行为，之前只渲染栈顶所以状态会丢。
   const topIndex = stack.length - 1;
 
   return (
@@ -81,15 +152,9 @@ export function NavHost({ initial, render }: NavHostProps) {
         {stack.map((screen, i) => {
           const isTop = i === topIndex;
           return (
-            <View
-              key={`${i}-${screen.name}`}
-              style={[styles.screen, isTop ? null : styles.hidden]}
-              pointerEvents={isTop ? 'auto' : 'none'}
-              accessibilityElementsHidden={!isTop}
-              importantForAccessibility={isTop ? 'auto' : 'no-hide-descendants'}
-            >
+            <ScreenPane key={`${i}-${screen.name}`} active={isTop} covered={!isTop}>
               {render(screen)}
-            </View>
+            </ScreenPane>
           );
         })}
       </View>
@@ -99,6 +164,8 @@ export function NavHost({ initial, render }: NavHostProps) {
 
 const styles = StyleSheet.create({
   root: { flex: 1 },
-  screen: { flex: 1 },
-  hidden: { display: 'none' },
+  screen: {
+    ...StyleSheet.absoluteFillObject,
+    backgroundColor: 'transparent',
+  },
 });

@@ -377,7 +377,7 @@ export default function App() {
       <ThemeProvider initial={initialMode} onChange={onThemeChange}>
         <AppContext.Provider value={ctxValue}>
           <ThemedStatusBar />
-          {authed ? <NavHost initial="Home" render={renderScreen} /> : <PairScreen />}
+          {authed ? <NavHost initial={{ name: 'Home' }} render={renderScreen} /> : <PairScreen />}
         </AppContext.Provider>
       </ThemeProvider>
     </SafeAreaProvider>
