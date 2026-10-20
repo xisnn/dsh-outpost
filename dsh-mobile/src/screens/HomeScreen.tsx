@@ -57,9 +57,14 @@ export function HomeScreen() {
 
   return (
     <View style={[styles.root, { backgroundColor: tv.colors.bg }]}>
-      {/* 首次开启管家模式：先选一个项目，队员就归属这里 */}
+      {/**
+       * 首次开启管家模式、还没绑项目时，这里负责让用户选。
+       * 注意：这个弹层只在「管家的 ChatScreen 还没挂载」时用 ——
+       * 会话建好后，切项目由 ChatScreen 顶栏那个按钮负责。
+       * 两处都挂就会出现两个 Modal 互相挡触摸（用户点了没反应）。
+       */}
       <ButlerWorkspacePicker
-        visible={butlerNeedWorkspace}
+        visible={butlerMode && !butlerSessionId && butlerNeedWorkspace}
         workspaces={store.workspaces}
         onPick={pickButlerWorkspace}
         onCancel={() => {}}

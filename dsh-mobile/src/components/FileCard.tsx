@@ -30,7 +30,16 @@ export function FileCard({
 }) {
   const tv = useTheme();
   const styles = useMemo(() => makeStyles(tv), [tv]);
-  const { store } = useApp();
+  const { store, butlerWorkspace } = useApp();
+
+  // 管家偶尔发相对路径（cover_out/a.png），用当前项目路径拼成绝对路径。
+  // 否则 /api/file 会 404。
+  const absPath = useMemo(() => {
+    if (/^[A-Za-z]:\\/.test(path) || /^\\\\/.test(path)) return path;
+    if (!butlerWorkspace) return path;
+    const rel = path.replace(/^[\\/]+/, '');
+    return `${butlerWorkspace}\\${rel}`;
+  }, [path, butlerWorkspace]);
   const [local, setLocal] = useState<RemoteFile | null>(null);
   const [failed, setFailed] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
@@ -46,7 +55,7 @@ export function FileCard({
         const f = await fetchRemoteFile(
           store.fileBaseUrl,
           store.fileCookie,
-          path,
+          absPath,
         );
         if (alive) setLocal(f);
       } catch (e) {
@@ -56,7 +65,7 @@ export function FileCard({
     return () => {
       alive = false;
     };
-  }, [image, path, store]);
+  }, [image, absPath, store]);
 
   /** 用户点卡片：图片看大图，其他文件交给系统 */
   const onPress = async () => {
@@ -65,7 +74,7 @@ export function FileCard({
     try {
       const f =
         local ??
-        (await fetchRemoteFile(store.fileBaseUrl, store.fileCookie, path));
+        (await fetchRemoteFile(store.fileBaseUrl, store.fileCookie, absPath));
       setLocal(f);
       await openLocalFile(f);
     } catch (e) {

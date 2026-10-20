@@ -50,7 +50,10 @@ export async function fetchRemoteFile(
   if (!exists) {
     const headers: Record<string, string> = {};
     if (cookie) headers.Cookie = cookie;
-    const res = await ReactNativeBlobUtil.config({ fileCache: false, path: fsPath }).fetch(
+    // 必须 fileCache: true。设成 false 时 blob-util 只把响应留在内存，
+    // 不会写进 path 指定的文件 —— 后面 Image 读 file:// 拿到的是空文件，
+    // 界面上就是一块灰色空白（用户报的「图片看不见」）。
+    const res = await ReactNativeBlobUtil.config({ fileCache: true, path: fsPath }).fetch(
       'GET',
       url,
       headers,
@@ -60,6 +63,15 @@ export async function fetchRemoteFile(
       // 失败清掉半截文件，避免下次误判为「已缓存」
       await ReactNativeBlobUtil.fs.unlink(fsPath).catch(() => undefined);
       throw new Error(status === 404 ? '文件不存在' : `读取失败（${status}）`);
+    }
+    // 再校验：文件得真的落盘且非空
+    if (!(await ReactNativeBlobUtil.fs.exists(fsPath))) {
+      throw new Error('文件下载失败');
+    }
+    const st = await ReactNativeBlobUtil.fs.stat(fsPath);
+    if (Number(st.size) === 0) {
+      await ReactNativeBlobUtil.fs.unlink(fsPath).catch(() => undefined);
+      throw new Error('文件为空，请重试');
     }
   }
 
