@@ -38,7 +38,13 @@ export function isImagePath(p: string): boolean {
 }
 
 function isLocalPath(p: string): boolean {
-  return /^[A-Za-z]:\\/.test(p);
+  // 绝对路径：盘符（E:\...）或 UNC（\\server\share）
+  if (/^[A-Za-z]:\\/.test(p) || /^\\\\/.test(p)) return true;
+  // 带协议前缀的（http://、file://）不是本地路径
+  if (/^[a-z][a-z0-9+.-]*:/i.test(p)) return false;
+  // 相对路径：管家有时发 cover_out/a.png 这种相对工作区的写法。
+  // 只要够像一个文件名就认，交给上层用工作区路径拼成绝对路径。
+  return /^[^<>|?*\\/][^<>|?*]*\.[A-Za-z0-9]{2,6}$/.test(p);
 }
 
 /** 把一段助手文本切成「普通文字」和「文件引用」片段 */

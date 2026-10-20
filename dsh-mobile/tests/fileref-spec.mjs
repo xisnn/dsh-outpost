@@ -38,6 +38,11 @@ const plain = '没有文件路径的一段话';
 check('纯文本只有一个片段', splitFileRefs(plain).length === 1);
 check('纯文本片段是 text', splitFileRefs(plain)[0]?.kind === 'text');
 
+// 相对路径（管家有时发 cover_out\/a.png）
+const rel = splitFileRefs('![封面](cover_out\/封面.png)').filter(s => s.kind === 'file');
+check('识别相对路径', rel.length === 1, String(rel.length));
+check('相对路径正确', rel[0]?.path === 'cover_out\/封面.png', String(rel[0]?.path));
+
 // 扩展名判断
 check('png 是图片', isImagePath('a\\b.png') === true);
 check('pdf 不是图片', isImagePath('a\\b.pdf') === false);

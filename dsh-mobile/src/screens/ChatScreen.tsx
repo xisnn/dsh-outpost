@@ -755,9 +755,9 @@ export function ChatScreen({
 
       {/* 切换管家项目：换项目 = 换会话 = 换一套队员，上下文不会串 */}
       <ButlerWorkspacePicker
-        visible={switchWs || butlerNeedWorkspace}
+        visible={switchWs}
         workspaces={store.workspaces}
-        allowCancel={!butlerNeedWorkspace}
+        allowCancel
         onCancel={() => setSwitchWs(false)}
         onPick={(path) => {
           setSwitchWs(false);
