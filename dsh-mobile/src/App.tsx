@@ -449,6 +449,23 @@ function GlobalNotices() {
     };
   }, [store]);
 
+  // 通知初始化 + 点通知跳转。
+  // initNotifications 会申请权限、建通道；原生模块缺失时静默降级。
+  React.useEffect(() => {
+    let off: (() => void) | undefined;
+    void (async () => {
+      try {
+        const { initNotifications, onNotificationOpen } = await import('./core/notify');
+        await initNotifications();
+        off = await onNotificationOpen((sid) => store.requestOpenSession(sid));
+      } catch (e) {
+        // 不能让通知初始化把整个 App 拖垮
+        console.warn('[dsh] 通知初始化失败', e);
+      }
+    })();
+    return () => off?.();
+  }, [store]);
+
   return (
     <NoticeHost
       items={store.notices}

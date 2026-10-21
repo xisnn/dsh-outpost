@@ -29,7 +29,7 @@ import { SectionLabel } from '../components/ui';
 import { ConfirmSheet } from '../components/ConfirmSheet';
 import { SlideSegmented } from '../components/SlideSegmented';
 import { APP_VERSION, APP_VERSION_LABEL } from '../core/version';
-import { isNotifyEnabled, setNotifyEnabled, vibrateShort } from '../core/notify';
+import { isNotifyEnabled, notifyDebugState, setNotifyEnabled, vibrateShort } from '../core/notify';
 import {
   checkForUpdate,
   downloadAndInstall,
@@ -408,7 +408,7 @@ export function ProfileScreen({ active = true }: { active?: boolean }) {
             ]}
           >
             <Text style={styles.entryLabel}>试一下通知</Text>
-            <Text style={styles.entryMeta}>弹一条示例横幅</Text>
+            <Text style={styles.entryMeta}>{notifyDebugState()}</Text>
             <Text style={styles.entryChevron}>›</Text>
           </Pressable>
         </View>
