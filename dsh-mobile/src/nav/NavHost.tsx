@@ -240,10 +240,32 @@ export function NavHost({ initial, render }: NavHostProps) {
       PanResponder.create({
         // 只在左缘起手时才愿意接管
         onStartShouldSetPanResponder: () => false,
+
+        // ⚠️ 必须用 Capture 版本，否则手势永远不生效。
+        //
+        // 页面里全是 ScrollView / FlatList。RN 的响应者系统里，
+        // 子级（ScrollView）会先一步抢到 move 事件，父级的
+        // onMoveShouldSetPanResponder 根本没机会被调用 ——
+        // 表现就是「在真机上怎么划都没反应」。
+        //
+        // Capture 阶段是父级先挑，只在「左缘 + 横向为主」时才接，
+        // 所以不会误抢列表的纵向滚动。
+        onStartShouldSetPanResponderCapture: () => false,
+        onMoveShouldSetPanResponderCapture: (evt, g) => {
+          const startX = evt.nativeEvent.pageX - g.dx;
+          return isBackGesture(startX, g.dx, g.dy, canGoBackRef.current);
+        },
+
+        // 非 Capture 的也留着：万一 Capture 没被调用（某些 RN 版本/嵌套
+        // 场景），还能退回到冒泡阶段兜底。
         onMoveShouldSetPanResponder: (evt, g) => {
           const startX = evt.nativeEvent.pageX - g.dx;
           return isBackGesture(startX, g.dx, g.dy, canGoBackRef.current);
         },
+
+        // 一旦我们接管了，就别再让子级抢回去（否则滑到一半会断）
+        onPanResponderTerminationRequest: () => false,
+
         onPanResponderGrant: () => {
           committed.current = true;
         },

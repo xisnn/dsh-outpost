@@ -437,7 +437,7 @@ export default function App() {
  * 由 NavHost 里的页面消费——见 store.pendingOpenSession。
  */
 function GlobalNotices() {
-  const { store } = useApp();
+  const { store, baseUrl } = useApp();
   const [, force] = React.useState(0);
 
   React.useEffect(() => {
@@ -448,6 +448,20 @@ function GlobalNotices() {
       store.stopNoticeScan();
     };
   }, [store]);
+
+  // 审批网关：在 App 级连一次，不要绑在聊天页上。
+  //
+  // 原来是在 ChatScreen 的 useEffect 里 connect，离开页面就 disconnect。
+  // 后果：
+  //   1. 在会话列表/「我的」页收到审批时无法处理（网关已断）
+  //   2. 每进一次会话都要重新申请配对码，路径长了容易失败
+  //   3. 「我的」里那个状态永远显示「未连接」，没法用来排查
+  // 网关本来就是个轻量旁路连接，常驻更合理。
+  React.useEffect(() => {
+    if (!baseUrl) return;
+    store.connectApprovals(baseUrl);
+    return () => store.disconnectApprovals();
+  }, [store, baseUrl]);
 
   // 通知初始化 + 点通知跳转。
   // initNotifications 会申请权限、建通道；原生模块缺失时静默降级。

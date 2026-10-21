@@ -352,12 +352,12 @@ export function ChatScreen({
     return last?.approvals ?? [];
   }, [chat.turns]);
 
-  // 审批网关：进页面连上，离开断开。
-  // 这是条旁路连接，只收发审批，不影响现有 RPC。
-  useEffect(() => {
-    store.connectApprovals(baseUrl);
-    return () => store.disconnectApprovals();
-  }, [store, baseUrl]);
+  // 审批网关的连/断已经上移到 App 级（见 App.tsx 的 GlobalNotices）。
+  //
+  // 原来在这里 connect + 卸载时 disconnect，问题有两个：
+  //   1. 离开聊天页就收不到审批了（在列表页看审批时按钮点不了）
+  //   2. 每次进会话都重新申请配对码，链路更长、更容易失败
+  // 网关是旁路连接，常驻更稳。
 
   const statusLabel = chat.loading
     ? '加载中'
