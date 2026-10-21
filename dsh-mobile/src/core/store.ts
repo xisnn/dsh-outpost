@@ -18,6 +18,7 @@ import { DirectoryPickerApi } from '../core/rpc/directory';
 import type { WorkspaceCustom } from '../core/workspace-custom';
 import { foldEvents, toChatItems, isInjectedMessage, stripModeTag, type ChatItem, type Turn } from '../core/fold';
 import { notifyDone } from '../core/notify';
+import type { NoticeItem, NoticeKind } from '../components/NoticeHost';
 import {
   ApprovalGateway,
   type ApprovalOutcome,
@@ -352,6 +353,182 @@ export class Store {
   /** UI 弹一条就算消费掉，最多留 3 条 */
   teamNotices: TeamNotice[] = [];
 
+  // ── 应用内通知（多会话） ─────────────────────────────────────────
+  //
+  // 和 teamNotices 的区别：teamNotices 是聊天页内的短提示，
+  // 这个是全局横幅，任意页面都能看到——因为管家可能同时在跑好几个会话，
+  // 用户切到别的页面时也应该被提醒。
+  notices: NoticeItem[] = [];
+  /** 上一次扫描时各会话的快照，用来做差异检测 */
+  private lastScan = new Map<
+    string,
+    { running: boolean; title: string; tasks: Map<string, string>; pendingApprovals: number }
+  >();
+  private scanTimer?: ReturnType<typeof setInterval>;
+
+  /**
+   * 开始全局扫描。
+   *
+   * 轮询策略：只在「有会话在跑」时才查，空闲时完全停掉，
+   * 避免手机待机时还在发请求。
+   */
+  startNoticeScan(): void {
+    if (this.scanTimer) return;
+    // 立刻扫一次，别等 5 秒 —— 用户刚发完任务就想看到反馈
+    void this.scanOnce();
+    this.scanTimer = setInterval(() => {
+      void this.scanOnce();
+    }, 5000);
+  }
+
+  /**
+   * 手动推一条通知（调试/自测用）。
+   *
+   * 之所以需要：真实任务常常比扫描间隔还快，或者要等几十秒才结束，
+   * 手工验通知很费劲。留一个能直接触发横幅的入口，
+   * 可以立刻确认 UI 那条链路是通的。
+   */
+  debugNotice(text = '测试通知：这轮跑完了'): void {
+    this.pushBanner({ kind: 'done', text, detail: '调试' });
+  }
+
+  stopNoticeScan(): void {
+    if (this.scanTimer) {
+      clearInterval(this.scanTimer);
+      this.scanTimer = undefined;
+    }
+  }
+
+  /** 扫一遍所有会话，发现状态变化就推通知 */
+  private async scanOnce(): Promise<void> {
+    try {
+      const items = await this.api.list();
+      await this.ensureArchivedLoaded();
+      const archived = this.archived;
+      const live = items.filter((s) => !archived.has(s.sessionId));
+
+      // 注意：这里**不能**用「有没有会话在跑」来决定要不要扫。
+      // 踩过的坑：任务跑得比扫描间隔还快时，两次扫描都看到 running=false，
+      // 中间的 running→false 转变被完全跳过，用户永远收不到通知。
+      // 正确做法是每次都扫，靠 lastScan 快照做差异检测。
+      const anyRunning = live.some((s) => s.running);
+      if (this.lastScan.size === 0 && !anyRunning) {
+        // 首次扫描且全空闲：只建立基线，不通知（省一次推送）
+        for (const row of live) {
+          const st = readStatus(row.projections);
+          this.lastScan.set(row.sessionId, {
+            running: row.running,
+            title: st.title ?? '会话',
+            tasks: new Map(
+              (st.agentTeam?.tasks ?? []).map((t) => [t.id, t.status]),
+            ),
+            pendingApprovals: 0,
+          });
+        }
+        return;
+      }
+
+      for (const row of live) {
+        const status = readStatus(row.projections);
+        const title = status.title ?? '会话';
+        const prev = this.lastScan.get(row.sessionId);
+        const tasks = new Map(
+          (status.agentTeam?.tasks ?? []).map((t) => [t.id, t.status]),
+        );
+        const pendingApprovals = this.pendingApprovals.filter(
+          (a) => a.sessionId === row.sessionId,
+        ).length;
+
+        // 第一次见到这个会话：只记基线，不通知（避免一开 App 就刷一堆）
+        if (prev) {
+          // 任务完成
+          for (const t of status.agentTeam?.tasks ?? []) {
+            const before = prev.tasks.get(t.id);
+            if (t.status === 'completed' && before !== undefined && before !== 'completed') {
+              this.pushBanner({
+                kind: 'done',
+                text: `${t.ownerName ?? '队员'} 完成了「${t.subject}」`,
+                detail: title,
+                sessionId: row.sessionId,
+              });
+            }
+          }
+
+          // 从「在跑」变成「不跑了」= 这一轮结束。
+          // 没有 error 字段可查（readStatus 不返回），所以统一按「跑完了」报，
+          // 失败时聊天页里的工具卡会显示红色，不影响用户判断。
+          if (prev.running && !row.running) {
+            this.pushBanner({
+              kind: 'done',
+              text: '这轮跑完了',
+              detail: title,
+              sessionId: row.sessionId,
+            });
+          }
+
+          // 新的审批请求
+          if (pendingApprovals > prev.pendingApprovals) {
+            this.pushBanner({
+              kind: 'approval',
+              text: '需要你授权',
+              detail: title,
+              sessionId: row.sessionId,
+            });
+          }
+        }
+
+        this.lastScan.set(row.sessionId, {
+          running: row.running,
+          title,
+          tasks,
+          pendingApprovals,
+        });
+      }
+
+      // 清理已删除/归档的会话，避免快照无限增长
+      const alive = new Set(live.map((s) => s.sessionId));
+      for (const key of [...this.lastScan.keys()]) {
+        if (!alive.has(key)) this.lastScan.delete(key);
+      }
+    } catch {
+      // 扫描失败静默，不影响主流程
+    }
+  }
+
+  private pushBanner(n: {
+    kind: NoticeKind;
+    text: string;
+    detail?: string;
+    sessionId?: string;
+  }): void {
+    // 同样的文案 10 秒内不重复推（轮询可能连着两次看到同一状态）
+    const now = Date.now();
+    if (
+      this.notices.some(
+        (x) => x.text === n.text && x.sessionId === n.sessionId && now - x.time < 10_000,
+      )
+    ) {
+      return;
+    }
+    const item: NoticeItem = {
+      id: `nt-${now}-${Math.random().toString(36).slice(2, 6)}`,
+      kind: n.kind,
+      text: n.text,
+      detail: n.detail,
+      sessionId: n.sessionId,
+      time: now,
+    };
+    this.notices = [item, ...this.notices].slice(0, 3);
+    // 同时震动提醒
+    notifyDone(n.text);
+    this.emit();
+  }
+
+  dismissNotice(id: string): void {
+    this.notices = this.notices.filter((n) => n.id !== id);
+    this.emit();
+  }
+
   // ── 审批网关 ─────────────────────────────────────────────────────
   //
   // 为什么单独开一条连接：DSH 的审批是 Host 侧 waterfall，结果靠 Remote Event
@@ -490,9 +667,29 @@ export class Store {
     notifyDone(text);
   }
 
-  dismissNotice(id: string): void {
+  /** 关掉聊天页内的短提示（teamNotices） */
+  dismissTeamNotice(id: string): void {
     this.teamNotices = this.teamNotices.filter((n) => n.id !== id);
     this.emit();
+  }
+
+  /**
+   * 待打开的会话。
+   *
+   * 通知横幅点一下要跳到对应会话，但 GlobalNotices 拿不到 nav 上下文
+   * （它在 NavHost 外面）。所以这里记一个请求，由 HomeScreen 消费。
+   */
+  pendingOpenSession: string | null = null;
+
+  requestOpenSession(sessionId: string): void {
+    this.pendingOpenSession = sessionId;
+    this.emit();
+  }
+
+  consumeOpenSession(): string | null {
+    const s = this.pendingOpenSession;
+    this.pendingOpenSession = null;
+    return s;
   }
 
   // ── 订阅 ──────────────────────────────────────────────────────────
