@@ -131,6 +131,29 @@ if ($gw) {
 }
 Write-Host ''
 
+# ── 管家工具 ──
+# 这些是 DSH 自带的子代理工具，默认 disabled。
+# 不启用的话 butler.ts 里的「先 list_agents、用 send_message 复用队员」
+# 全部落空 —— 模型找不到工具，只能自己干。
+Write-Host '管家工具' -ForegroundColor White
+$profileYml = Join-Path $env:USERPROFILE '.dsh\profiles\web\cordis.patch.yml'
+$enabledCount = 0
+if (Test-Path $profileYml) {
+    $yml = [IO.File]::ReadAllText($profileYml, [Text.Encoding]::UTF8)
+    foreach ($t in @('tool-subagent-control', 'tool-subagent-list-agents', 'tool-subagent', 'tool-subagent-fork')) {
+        $hit = [regex]::IsMatch($yml, "(?m)^- id:\s*$([regex]::Escape($t))\s*\r?\n\s*disabled:\s*false")
+        if ($hit) { $enabledCount++ }
+    }
+}
+if ($enabledCount -eq 4) {
+    Line $true '子代理委派工具' 'list_agents / send_message / spawn 已启用'
+} elseif ($enabledCount -gt 0) {
+    Line 'warn' '子代理委派工具' "只启用 $enabledCount/4 —— 检查 cordis.patch.yml"
+} else {
+    Line 'warn' '子代理委派工具' '未启用 —— 管家无法派队员，只能自己干'
+    Write-Host '        修法见 docs/butler-tools.md' -ForegroundColor DarkGray
+}
+Write-Host ''
 # ── 状态文件 ──
 Write-Host '状态文件' -ForegroundColor White
 $pair = Join-Path $stateDir 'pairing.json'
