@@ -1,6 +1,6 @@
 {
   "name": "dsh-pocket",
-  "version": "0.5.0",
+  "version": "0.5.2",
   "private": true,
   "description": "DSH 原生移动客户端：工作区 / 会话 / 聊天",
   "scripts": {
