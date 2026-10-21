@@ -87,3 +87,15 @@ _commitmsg.txt
 
 # 根目录误建的 package.json（真配置在 dsh-mobile/）
 /package.json
+
+# 临时验证脚本与数据（模拟器调试用）
+_w/
+_w2/
+_wstest/
+_wst/
+_*.db
+_cookie*.txt
+_*.sql
+_qrcheck/
+_qc/
+_q2/

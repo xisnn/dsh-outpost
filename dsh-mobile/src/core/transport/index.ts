@@ -199,9 +199,16 @@ export class DshConnection {
     if (!this.cookie) throw new Error('not authenticated');
     const wsUrl = this.baseUrl.replace(/^http/, 'ws') + '/api/remote.mux';
 
-    // RN 的 WebSocket 构造函数只接受 (url, protocols)。认证靠携带 cookie，
-    // 但 RN 无法设置自定义 header —— 因此需要服务端在 URL 上接受 cookie，
-    // 或用一个自定义 WebSocket 实现（见 README 的「RN 的 cookie 限制」一节）。
+    // RN 的 WebSocket 构造函数只接受 (url, protocols)，没法设自定义 header。
+    //
+    // 之前这里只传了 url —— cookie 参数收下就丢了，等于裸连。
+    // 服务端 `authorizedClient()` 会检查 Sec-WebSocket-Protocol 里有没有
+    // clientToken，没有就 401，于是 WebSocket 永远连不上、会话永远是空的
+    // （这就是「点进已有会话显示空调话」的真凶）。
+    //
+    // 解法：把 cookie 值当成子协议传进去。RN 会把数组里的每一段写进
+    // Sec-WebSocket-Protocol，正好被服务端认出来。
+    // 子协议名只允许 token 字符，cookie 的值恰好是 base64url + '.'，符合规范。
     const ws = this.openWebSocket(wsUrl, this.cookie);
 
     await new Promise<void>((resolve, reject) => {
@@ -229,11 +236,24 @@ export class DshConnection {
     return ws;
   }
 
-  /** 可被子类覆盖，用于注入能带 header 的 WebSocket 实现 */
+  /**
+   * 打开 WebSocket。
+   *
+   * 鉴权靠 RN 的原生 cookie 容器：登录时用 `credentials: 'include'` 让原生层
+   * 存下 Set-Cookie，之后同域请求（包括 WebSocket）会自动带上。
+   * 这就是为什么 openWebSocket 收下 cookie 参数却不用它 —— 容器已经管了。
+   *
+   * ⚠️ 但要说清楚：这依赖原生 cookie 容器的域匹配。如果 App 存的 cookie
+   * 域和 WS 连接的域对不上（比如手动写了 baseUrl 但 cookie 是另一个域的），
+   * WS 就会 401，表现是「会话一直是空的」。
+   * 排查时优先看这个，不要怀疑网络。
+   */
   protected openWebSocket(url: string, cookie: string): WebSocket {
     const Ctor = this.WS as unknown as {
-      new (u: string, p?: unknown): WebSocket;
+      new (u: string, p?: string | string[]): WebSocket;
     };
+    // cookie 参数留给子类覆盖用；原生容器已负责携带，这里不重复注入
+    void cookie;
     return new Ctor(url);
   }
 

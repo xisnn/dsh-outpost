@@ -462,8 +462,11 @@ export function ChatScreen({
         }}
       />
 
-      {/* 空会话还没内容时，连不上不该糊一条红条在脸上 —— 静默重试即可 */}
-      {chat.error && (chat.items.length > 0 || !isBlankChat) ? (
+      {/* 加载失败必须让用户知道。
+          之前这里加了「空会话且没内容就不显示」的条件，理由是「静默重试即可」——
+          结果后端明明有 46 条记录、App 却只显示「空调话」，用户完全不知道为什么。
+          错误信息宁可打扰，也好过让人对着空白猜。 */}
+      {chat.error ? (
         <View style={styles.errorBar}>
           <Text style={styles.errorText} numberOfLines={3}>
             {chat.error}
