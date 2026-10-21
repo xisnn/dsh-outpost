@@ -10,7 +10,15 @@
  *   - 其他文件：文件名 + 点击用系统应用打开
  */
 import React, { useEffect, useMemo, useState } from 'react';
-import { ActivityIndicator, Image, Pressable, StyleSheet, Text, View } from 'react-native';
+import {
+  ActivityIndicator,
+  Dimensions,
+  Image,
+  Pressable,
+  StyleSheet,
+  Text,
+  View,
+} from 'react-native';
 
 import ReactNativeBlobUtil from 'react-native-blob-util';
 
@@ -51,6 +59,12 @@ export function FileCard({
   const [busy, setBusy] = useState(false);
 
   const name = path.split(/[\\/]/).pop() ?? path;
+
+  // 图片显示宽度：屏幕宽减去左右内边距（见 fileBlockWrap 的 screenPadding*2）。
+  // 用固定像素而不用 '100%' —— 见下面 <Image> 上的踩坑注释。
+  // 注意：不要包 useMemo（依赖变化时可能拿到旧值/0），直接算。
+  const screenW = Dimensions.get('window').width;
+  const imageWidth = Math.max(160, Math.round(screenW - tv.layout.screenPadding * 2 - 8));
 
   // 图片：进组件就开始拉，拉完直接显示。
   //
@@ -147,18 +161,28 @@ export function FileCard({
         accessibilityRole="imagebutton"
         accessibilityLabel={`查看图片 ${alt || name}`}
       >
-        <Image
-          source={{ uri: local.uri }}
-          style={styles.image}
-          resizeMode="cover"
-          // 图片解码失败时把原因显示出来，别只留一块灰底让人猜。
-          // RN 的 onError 在 file:// 读不到/解码失败时才会触发。
-          onError={(e) => {
-            const msg =
-              (e.nativeEvent as { error?: string }).error ?? '图片解码失败';
-            setFailed(`图片加载失败：${msg}`);
-          }}
-        />
+        {/*
+          ⚠️ 图片显示的两个必要条件（缺一个都会变成灰块）：
+          1. <Image> 自身给「固定像素宽高」，不能用 width:'100%'；
+          2. 外层容器**不能有 overflow:'hidden'**（Fabric 会裁成 0）。
+          圆角放在 Image 自己的 style 上。
+        */}
+        <View style={{ width: imageWidth, height: imageWidth * 0.75 }}>
+          <Image
+            source={{ uri: local.uri }}
+            style={{
+              width: imageWidth,
+              height: imageWidth * 0.75,
+              borderRadius: tv.radius.md,
+            }}
+            resizeMode="cover"
+            onError={(e) => {
+              const msg =
+                (e.nativeEvent as { error?: string }).error ?? '图片解码失败';
+              setFailed(`图片加载失败：${msg}`);
+            }}
+          />
+        </View>
         {failed ? (
           <Text style={styles.imageCaption} numberOfLines={2}>
             {failed}
@@ -211,11 +235,18 @@ function makeStyles(tv: ReturnType<typeof useTheme>) {
   return StyleSheet.create({
     imageWrap: {
       marginVertical: tv.space.sm,
-      borderRadius: tv.radius.md,
-      overflow: 'hidden',
+      // ⚠️ 这里绝对不能加 overflow:'hidden'。
+      //
+      // 踩坑记录（查了很久）：RN 0.81 + 新架构（Fabric）下，
+      // 容器上带 overflow:'hidden' 会把里面的 <Image> 裁剪成 0 尺寸，
+      // 渲染出来就是一块灰底 —— 但 onLoad 正常触发、文件也下载成功、
+      // 尺寸计算也对，所以极难定位。去掉后立刻正常。
+      //
+      // 圆角改由 <Image> 自己的 borderRadius 实现（见下面 Image 的 style）。
       backgroundColor: C.bgCard,
     },
-    image: { width: '100%', height: 220 },
+    // 只放不会被覆盖的样式；宽高在组件里按屏幕宽度算（见 <Image> 上方注释）
+    image: { borderRadius: 0 },
     imageCaption: {
       color: C.textFaint,
       fontSize: tv.type.micro,

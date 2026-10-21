@@ -1,6 +1,6 @@
 {
   "name": "dsh-pocket",
-  "version": "0.6.1",
+  "version": "0.6.2",
   "private": true,
   "description": "DSH 原生移动客户端：工作区 / 会话 / 聊天",
   "scripts": {
@@ -12,7 +12,7 @@
     "test:cwd": "node tests/cwd-spec.mjs",
     "test:pairing": "tsx tests/pairing-spec.mjs",
     "test:e2e": "tsx tests/e2e.mjs",
-    "test": "npm run test:fold && npm run test:cwd && npm run test:pairing && npm run test:semver && npm run test:teammate && npm run test:fileref && npm run test:archive && npm run test:approval && npm run test:deliverable && npm run test:notify && npm run test:gateway && npm run test:image && npm run test:bugfix && npm run test:chaterror && npm run test:gesture && npm run typecheck",
+    "test": "npm run test:fold && npm run test:cwd && npm run test:pairing && npm run test:semver && npm run test:teammate && npm run test:fileref && npm run test:archive && npm run test:approval && npm run test:deliverable && npm run test:notify && npm run test:gateway && npm run test:image && npm run test:bugfix && npm run test:chaterror && npm run test:gesture && npm run test:imgrender && npm run typecheck",
     "test:semver": "tsx tests/updater-spec.mjs",
     "test:teammate": "tsx tests/teammate-spec.mjs",
     "test:fileref": "tsx tests/fileref-spec.mjs",
@@ -24,7 +24,8 @@
     "test:image": "tsx tests/image-render-spec.mjs",
     "test:bugfix": "tsx tests/gateway-bugfix-spec.mjs",
     "test:chaterror": "tsx tests/chat-error-spec.mjs",
-    "test:gesture": "tsx tests/gesture-notice-spec.mjs"
+    "test:gesture": "tsx tests/gesture-notice-spec.mjs",
+    "test:imgrender": "tsx tests/image-render-regression-spec.mjs"
   },
   "dependencies": {
     "@react-native-async-storage/async-storage": "^2.1.0",
