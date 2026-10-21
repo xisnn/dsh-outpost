@@ -395,6 +395,22 @@ export function ProfileScreen({ active = true }: { active?: boolean }) {
               thumbColor={tv.colors.bg}
             />
           </View>
+          {/*
+            自测入口：点一下弹一条应用内横幅。
+            真实通知要等任务跑完才有，等待时间不可控；
+            这个按钮让用户（和我）能立刻确认横幅链路是通的。
+          */}
+          <Pressable
+            onPress={() => store.debugNotice()}
+            style={({ pressed }: { pressed: boolean }) => [
+              styles.entryRow,
+              pressed ? { opacity: tv.motion.pressOpacity } : null,
+            ]}
+          >
+            <Text style={styles.entryLabel}>试一下通知</Text>
+            <Text style={styles.entryMeta}>弹一条示例横幅</Text>
+            <Text style={styles.entryChevron}>›</Text>
+          </Pressable>
         </View>
 
         {/* ── 连接 ─────────────────────────────────────── */}

@@ -16,6 +16,7 @@ import { TabBar, type HomeTab } from '../components/TabBar';
 import { useTheme } from '../design/theme';
 import { ButlerWorkspacePicker } from '../components/ButlerWorkspacePicker';
 import { useApp } from '../App';
+import { useNav } from '../nav/NavHost';
 import { ChatScreen } from './ChatScreen';
 import { ProfileScreen } from './ProfileScreen';
 import { WorkspacesScreen } from './WorkspacesScreen';
@@ -52,6 +53,20 @@ export function HomeScreen() {
       return butlerMode ? 'butler' : 'workspaces';
     });
   }, [butlerMode]);
+
+  // 点了通知横幅 → 跳到对应会话。
+  // 通知在 NavHost 外面渲染，拿不到 nav，所以走 store 传一个「请求」过来。
+  const nav = useNav();
+  useEffect(() => {
+    const consume = () => {
+      const sid = store.consumeOpenSession();
+      if (sid) nav.push('Chat', { sessionId: sid });
+    };
+    // 挂载时先检查一次（可能在别的页面点的通知）
+    consume();
+    const unsub = store.subscribe(consume);
+    return unsub;
+  }, [store, nav]);
 
   const tabs: HomeTab[] = butlerMode ? ['butler', 'me'] : ['workspaces', 'me'];
 

@@ -44,6 +44,17 @@ export function isNotifyEnabled(): boolean {
  *
  * 选「两短震」而不是长震：长震太吵，两下足够引起注意又不烦人。
  */
+/**
+ * 震动。
+ *
+ * ⚠️ Android 必须声明 `android.permission.VIBRATE`，否则原生层会抛
+ * SecurityException（"Neither user ... nor current process has
+ * android.permission.VIBRATE"）。这个异常在 try/catch 里**抓不到** ——
+ * 它是原生线程抛的，直接把 App 崩掉。实测崩过一次。
+ *
+ * 所以：manifest 里必须有 VIBRATE 权限（已加），这里再包一层防御，
+ * 万一将来权限被改掉也不至于崩。
+ */
 export function vibrateShort(kind: 'done' | 'ask' = 'done'): void {
   try {
     if (Platform.OS === 'android') {

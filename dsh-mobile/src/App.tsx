@@ -23,6 +23,7 @@ import { ThemeProvider, useTheme } from './design/theme';
 import { palettes, type ThemeMode } from './design/tokens';
 import { buildButlerPrime, BUTLER_PRIME_VERSION } from './core/butler';
 import { NavHost, type Screen } from './nav/NavHost';
+import { NoticeHost } from './components/NoticeHost';
 import { PairScreen } from './screens/PairScreen';
 import { HomeScreen } from './screens/HomeScreen';
 import { SessionsScreen } from './screens/SessionsScreen';
@@ -420,9 +421,42 @@ export default function App() {
         <AppContext.Provider value={ctxValue}>
           <ThemedStatusBar />
           {authed ? <NavHost initial={{ name: 'Home' }} render={renderScreen} /> : <PairScreen />}
+          {/* 全局通知横幅：盖在导航之上，任意页面都能看到 */}
+          {authed ? <GlobalNotices /> : null}
         </AppContext.Provider>
       </ThemeProvider>
     </SafeAreaProvider>
+  );
+}
+
+/**
+ * 全局通知横幅的挂载点。
+ *
+ * 单独抽出来是为了能在 useApp() 内部拿 store（App 组件本身在 Provider 外面）。
+ * 同时负责「点通知跳会话」：这里拿不到 nav，所以用 store 记录待跳转的会话，
+ * 由 NavHost 里的页面消费——见 store.pendingOpenSession。
+ */
+function GlobalNotices() {
+  const { store } = useApp();
+  const [, force] = React.useState(0);
+
+  React.useEffect(() => {
+    const unsub = store.subscribe(() => force((n) => n + 1));
+    store.startNoticeScan();
+    return () => {
+      unsub();
+      store.stopNoticeScan();
+    };
+  }, [store]);
+
+  return (
+    <NoticeHost
+      items={store.notices}
+      onPress={(item) => {
+        if (item.sessionId) store.requestOpenSession(item.sessionId);
+      }}
+      onDismiss={(id) => store.dismissNotice(id)}
+    />
   );
 }
 
