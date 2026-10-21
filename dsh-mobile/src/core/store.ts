@@ -519,8 +519,12 @@ export class Store {
       time: now,
     };
     this.notices = [item, ...this.notices].slice(0, 3);
-    // 同时震动提醒
-    notifyDone(n.text);
+    // 同时震动 + 弹系统通知（后台也能看到）。
+    // 把会话 id 传过去，用户点通知能直接跳回对应会话。
+    notifyDone(n.text, false, {
+      sessionId: n.sessionId,
+      detail: n.detail ? `${n.detail} · DSH` : 'DSH',
+    });
     this.emit();
   }
 

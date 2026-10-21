@@ -1,6 +1,6 @@
 {
   "name": "dsh-pocket",
-  "version": "0.6.0",
+  "version": "0.6.1",
   "private": true,
   "description": "DSH 原生移动客户端：工作区 / 会话 / 聊天",
   "scripts": {
@@ -34,6 +34,7 @@
     "react-native": "0.81.4",
     "react-native-blob-util": "^0.25.1",
     "react-native-camera-kit": "^18.0.1",
+    "react-native-notify-kit": "^10.9.0",
     "react-native-safe-area-context": "^5.5.2"
   },
   "devDependencies": {
