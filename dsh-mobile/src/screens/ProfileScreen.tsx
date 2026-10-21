@@ -53,6 +53,14 @@ const NET_LABELS: Record<NetState, string> = {
   fail: '连接失败',
 };
 
+/** 审批网关状态的中文说明 */
+const GATEWAY_LABELS: Record<'idle' | 'connecting' | 'online' | 'offline', string> = {
+  idle: '未连接',
+  connecting: '连接中…',
+  online: '已连通',
+  offline: '未连通',
+};
+
 type NetState = 'checking' | 'ok' | 'fail';
 
 export function ProfileScreen({ active = true }: { active?: boolean }) {
@@ -432,6 +440,29 @@ export function ProfileScreen({ active = true }: { active?: boolean }) {
               ]}
             >
               {NET_LABELS[net]}
+            </Text>
+          </View>
+
+          {/* 审批通道状态。
+              没有这一行时，审批回答不了只能看到一句「到电脑上确认」，
+              完全不知道是网关没连上、还是被防火墙拦了。
+              把状态和原因直接摆出来，省得来回猜。 */}
+          <View style={styles.infoSep} />
+          <View style={styles.infoRow}>
+            <Text style={styles.infoKey}>审批通道</Text>
+            <Text
+              style={[
+                styles.infoVal,
+                store.gatewayStatus === 'offline'
+                  ? { color: tv.colors.danger }
+                  : store.gatewayStatus === 'online'
+                    ? { color: tv.colors.accent }
+                    : null,
+              ]}
+              numberOfLines={2}
+            >
+              {GATEWAY_LABELS[store.gatewayStatus]}
+              {store.gatewayHint ? ` · ${store.gatewayHint}` : ''}
             </Text>
           </View>
         </View>

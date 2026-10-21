@@ -94,6 +94,9 @@ export class ApprovalGateway {
   private readonly baseUrl: string;
   private deviceId = '';
   private token = '';
+  /** /mgw/pair 返回的候选地址（用于挑一个能连的，见 pickUrl） */
+  private endpoints?: string[];
+  private publicUrl?: string;
   private closed = false;
   private retry = 0;
   private retryTimer?: ReturnType<typeof setTimeout>;
@@ -114,6 +117,63 @@ export class ApprovalGateway {
   }
 
   get url(): string {
+    return this.pickUrl();
+  }
+
+  /**
+   * 选一个能连的网关地址。
+   *
+   * ⚠️ 这里踩过坑：原来直接硬编码 `ws://<主机>:3081/ws/mobile`。
+   * 在真机上 3081 很可能被 Windows 防火墙拦掉（而 3095 因为是
+   * DSH 自己的端口，之前调试过所以放行了），结果网关一直 offline，
+   * 审批只能显示「到电脑上确认」。
+   *
+   * `/mgw/pair` 返回的 endpoints 里其实同时给了两条路：
+   *   ws://<host>:3095/ws/mobile   ← 走 DSH Web 端口（手机必然可达）
+   *   ws://<host>:3081/ws/mobile   ← 网关直连
+   * 还有几条是虚拟网卡地址（VMware 之类），手机根本连不到。
+   *
+   * 所以顺序是：
+   *   1. 和 baseUrl 完全同源（host + port 都一致）的 endpoint —— 这是
+   *      已经被验证可达的地址，最可靠；
+   *   2. publicUrl；
+   *   3. 和 baseUrl 同 host 的 endpoint（端口可能不同）；
+   *   4. 退回硬编码 3081。
+   */
+  private pickUrl(): string {
+    const eps = this.endpoints ?? [];
+    try {
+      const base = new URL(this.baseUrl);
+      const wantHost = base.hostname;
+      const wantPort = base.port || (base.protocol === 'https:' ? '443' : '80');
+
+      // 1. 完全同源
+      for (const e of eps) {
+        try {
+          const u = new URL(e);
+          const port = u.port || (u.protocol === 'wss:' ? '443' : '80');
+          if (u.hostname === wantHost && port === wantPort) return e;
+        } catch {
+          /* 跳过坏地址 */
+        }
+      }
+
+      // 2. publicUrl
+      if (this.publicUrl) return this.publicUrl;
+
+      // 3. 同 host，端口不同
+      for (const e of eps) {
+        try {
+          if (new URL(e).hostname === wantHost) return e;
+        } catch {
+          /* 跳过 */
+        }
+      }
+    } catch {
+      /* baseUrl 不合法，走兜底 */
+    }
+
+    // 4. 兜底：老的硬编码行为
     return gatewayUrlFrom(this.baseUrl);
   }
 
@@ -138,7 +198,12 @@ export class ApprovalGateway {
     //
     // POST /mgw/pair 用 App 现有的 cookie 鉴权，返回一次性配对码。
     if (!pairingCode && !this.token) {
-      pairingCode = (await this.requestPairingCode()) ?? undefined;
+      const paired = await this.requestPairingCode();
+      pairingCode = paired?.pairingCode;
+      // 顺手把地址列表存下来 —— 真机上 3081 常被防火墙拦，
+      // 需要用 endpoints 里走 3095 的那条（见 pickUrl）
+      this.endpoints = paired?.endpoints;
+      this.publicUrl = paired?.publicUrl;
       if (!pairingCode) {
         this.events.onStatus?.('offline', '网关未开启');
         return;
@@ -164,10 +229,27 @@ export class ApprovalGateway {
 
     this.events.onStatus?.('connecting');
     try {
-      // RN 的 WebSocket 只接受 (url, protocols?) —— 没有第三参数，
-      // 所以设备 id 走查询串（协议文档允许 `?pairingCode=`，同理可用其他参数）。
-      const fullUrl = `${url}?deviceId=${encodeURIComponent(this.deviceId)}`;
-      const ws = new WebSocket(fullUrl, protocols);
+      // ⚠️ 这里必须带 `X-DSH-Device-ID` 请求头，否则服务端直接 400。
+      //
+      // 网关源码里是硬性要求的：
+      //   if (!clientDeviceId) {
+      //     log('pairing rejected: missing X-DSH-Device-ID (outdated client)')
+      //     rejectUpgrade(socket, 400, ...)
+      //   }
+      // 而且它只认 header（query 里塞 deviceId 不认）——之前把 deviceId
+      // 放查询串是错的，结果网关永远 offline，审批只能显示「到电脑上确认」。
+      //
+      // RN 的 WebSocket 构造函数有第三个参数可以传 headers（非标准但 RN 支持），
+      // Android 端会逐个 addHeader。这是唯一能在 RN 里设置 WS 请求头的办法，
+      // 不需要写原生模块。
+      const TypeCtor = WebSocket as unknown as new (
+        url: string,
+        protocols?: string | string[],
+        options?: { headers?: Record<string, string> },
+      ) => WebSocket;
+      const ws = new TypeCtor(url, protocols, {
+        headers: { 'X-DSH-Device-ID': this.deviceId },
+      });
       this.ws = ws;
 
       ws.onopen = () => {
@@ -183,10 +265,36 @@ export class ApprovalGateway {
         this.events.onStatus?.('offline', '连接失败');
       };
 
-      ws.onclose = () => {
+      ws.onclose = (ev: { code?: number; reason?: string }) => {
         this.ws = undefined;
         if (this.closed) return;
-        this.events.onStatus?.('offline');
+        // 把关闭码带出来 —— 400/401 的含义完全不同，排查时全靠它：
+        //   400 = 缺 X-DSH-Device-ID 头（RN 没发出去）
+        //   401 = 配对码无效/已用/过期，或设备 token 已失效
+        const code = ev?.code ?? 0;
+        const why = String(ev?.reason ?? '');
+        this.events.onStatus?.(
+          'offline',
+          code ? `连接被关闭 ${code}${why ? ` ${why}` : ''}` : '连接已断开',
+        );
+
+        // ⚠️ 自愈：凭据失效时必须清掉本地 token 并重新配对。
+        //
+        // 踩坑：网关的配对是一次性的（服务端 claimPairing 里
+        // `pairings.delete(codeHash)`，即使后续握手失败也算用掉），
+        // 而 devices 注册表可能随网关重启而重置。
+        // 如果本地存着一个已经失效的 token，connect() 会因为
+        // 「有 token 就不配对」而一直拿它重试，永远 401 —— 用户看到
+        // 的就是审批永远只能「到电脑上确认」。
+        const unauthorized = /401|unauthorized|invalid|expired/i.test(why);
+        if (unauthorized) {
+          this.token = '';
+          void AsyncStorage.removeItem(DEVICE_TOKEN_KEY).catch(() => undefined);
+          // 不传旧配对码：让下次 connect() 重新申请一个新的
+          this.scheduleRetry();
+          return;
+        }
+
         this.scheduleRetry(pairingCode);
       };
     } catch (e) {
@@ -203,7 +311,11 @@ export class ApprovalGateway {
    * 失败返回 null —— 多半是移动网关没装或没开，
    * 由调用方显示「网关未开启」而不是当成错误。
    */
-  private async requestPairingCode(): Promise<string | null> {
+  private async requestPairingCode(): Promise<{
+    pairingCode: string;
+    endpoints?: string[];
+    publicUrl?: string;
+  } | null> {
     try {
       // 管理接口在 web server 端口上（不是网关的 3081）
       const base = this.baseUrl.replace(/\/+$/, '');
@@ -214,8 +326,16 @@ export class ApprovalGateway {
         body: '{}',
       });
       if (!res.ok) return null;
-      const j = (await res.json()) as { payload?: { pairingCode?: string } };
-      return j.payload?.pairingCode ?? null;
+      const j = (await res.json()) as {
+        payload?: { pairingCode?: string; endpoints?: string[]; publicUrl?: string };
+      };
+      const code = j.payload?.pairingCode;
+      if (!code) return null;
+      return {
+        pairingCode: code,
+        endpoints: j.payload?.endpoints,
+        publicUrl: j.payload?.publicUrl,
+      };
     } catch {
       return null;
     }
