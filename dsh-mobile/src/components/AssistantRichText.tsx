@@ -9,6 +9,7 @@ import { StyleSheet, Text, View } from 'react-native';
 import { useTheme } from '../design/theme';
 import { splitFileRefs } from '../core/filerefs';
 import { FileCard } from './FileCard';
+import { MarkdownView } from './MarkdownView';
 
 export { splitFileRefs, isImagePath } from '../core/filerefs';
 
@@ -27,15 +28,12 @@ export function AssistantRichText({
   const styles = useMemo(() => makeStyles(tv), [tv]);
   const segs = useMemo(() => splitFileRefs(text), [text]);
 
-  // 没有文件引用就走纯文本路径，避免无谓的嵌套
+  // 没有文件引用：整段走 Markdown 渲染
+  //
+  // 之前这里是纯 <Text>，导致 AI 输出里的 `**加粗**`、`#` 标题、
+  // `| 表格 |` 全部原样显示星号和竖线。现在统一交给 MarkdownView。
   if (!segs.some((s) => s.kind === 'file')) {
-    return (
-      <View style={[styles.row, inset ? null : styles.rowFlat]}>
-        <Text style={styles.body} selectable>
-          {text.trim()}
-        </Text>
-      </View>
-    );
+    return <MarkdownView text={text.trim()} inset={inset} />;
   }
 
   return (
@@ -50,9 +48,7 @@ export function AssistantRichText({
             sessionId={sessionId}
           />
         ) : (
-          <Text key={`t${i}`} style={styles.body} selectable>
-            {s.text.trim()}
-          </Text>
+          <MarkdownView key={`t${i}`} text={s.text.trim()} inset={false} />
         ),
       )}
     </View>
