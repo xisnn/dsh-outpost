@@ -84,3 +84,6 @@ pairing.json
 # 提交信息临时文件
 _msg.txt
 _commitmsg.txt
+
+# 根目录误建的 package.json（真配置在 dsh-mobile/）
+/package.json
