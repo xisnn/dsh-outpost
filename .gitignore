@@ -80,3 +80,7 @@ _*.mjs
 tunnel.json
 pairing.json
 
+
+# 提交信息临时文件
+_msg.txt
+_commitmsg.txt
