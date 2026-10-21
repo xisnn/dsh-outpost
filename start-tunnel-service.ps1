@@ -26,10 +26,22 @@ param(
 
 $ErrorActionPreference = 'Stop'
 
-$ServiceScript = 'E:\work\dsBot\dsh-plugin-connect\tunnel-service.mjs'
-$Port = 3199
-$LogFile = 'E:\work\dsBot\_tunnel-service.log'
-$PidFile = 'E:\work\dsBot\_tunnel-service.pid'
+# 路径从脚本位置推导，不写死；可用环境变量覆盖
+$RepoRoot = if ($env:DSH_POCKET_ROOT) { $env:DSH_POCKET_ROOT } else { $PSScriptRoot }
+
+$StateDir = if ($env:DSH_STATE_DIR) {
+    $env:DSH_STATE_DIR
+} else {
+    Join-Path $env:LOCALAPPDATA 'dsh-pocket'
+}
+if (-not (Test-Path $StateDir)) {
+    New-Item -ItemType Directory -Path $StateDir -Force | Out-Null
+}
+
+$ServiceScript = Join-Path $RepoRoot 'dsh-plugin-connect\tunnel-service.mjs'
+$Port = if ($env:DSH_TUNNEL_PORT) { [int]$env:DSH_TUNNEL_PORT } else { 3199 }
+$LogFile = Join-Path $StateDir 'tunnel-service.log'
+$PidFile = Join-Path $StateDir 'tunnel-service.pid'
 
 function Write-Step($msg) { Write-Host "  $msg" -ForegroundColor Gray }
 function Write-Ok($msg)   { Write-Host "  [OK] $msg" -ForegroundColor Green }

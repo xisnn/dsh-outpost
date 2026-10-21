@@ -37,11 +37,58 @@ param(
 
 $ErrorActionPreference = 'Stop'
 
-$Cloudflared = 'E:\cloudflared\cloudflared.exe'
-$StateFile   = 'E:\cloudflared\tunnel.json'
-$LogFile     = 'E:\cloudflared\tunnel.log'
-$PidFile     = 'E:\cloudflared\tunnel.pid'
+# ── 路径都通过环境变量配置，不写死 ──────────────────────────────────
+#
+# 之前这里写死 E:\cloudflared\...，别人 clone 到别的盘就跑不起来。
+# 现在：
+#   DSH_CLOUDFLARED    cloudflared 可执行文件（默认自动找）
+#   DSH_STATE_DIR      状态目录（默认 %LOCALAPPDATA%\dsh-pocket）
+#   DSH_POCKET_ROOT    仓库根（默认：本脚本所在目录）
 
+$RepoRoot = if ($env:DSH_POCKET_ROOT) { $env:DSH_POCKET_ROOT } else { $PSScriptRoot }
+
+$StateDir = if ($env:DSH_STATE_DIR) {
+    $env:DSH_STATE_DIR
+} else {
+    Join-Path $env:LOCALAPPDATA 'dsh-pocket'
+}
+if (-not (Test-Path $StateDir)) {
+    New-Item -ItemType Directory -Path $StateDir -Force | Out-Null
+}
+
+# cloudflared：环境变量 → PATH → 常见位置
+$Cloudflared = $env:DSH_CLOUDFLARED
+if (-not $Cloudflared -or -not (Test-Path $Cloudflared)) {
+    $onPath = Get-Command cloudflared -ErrorAction SilentlyContinue
+    if ($onPath) {
+        $Cloudflared = $onPath.Source
+    } else {
+        $tries = @(
+            'E:\cloudflared\cloudflared.exe',
+            (Join-Path $env:LOCALAPPDATA 'cloudflared\cloudflared.exe'),
+            (Join-Path $env:ProgramFiles 'cloudflared\cloudflared.exe')
+        )
+        $Cloudflared = $tries | Where-Object { Test-Path $_ } | Select-Object -First 1
+    }
+}
+
+$StateFile   = Join-Path $StateDir 'tunnel.json'
+$PairingFile = Join-Path $StateDir 'pairing.json'
+$LogFile     = Join-Path $StateDir 'tunnel.log'
+$PidFile     = Join-Path $StateDir 'tunnel.pid'
+
+# dsh 可执行文件：环境变量 → PATH → 常见安装位置
+function Get-DshPath {
+    if ($env:DSH_CLI -and (Test-Path $env:DSH_CLI)) { return $env:DSH_CLI }
+    $onPath = Get-Command dsh -ErrorAction SilentlyContinue
+    if ($onPath) { return $onPath.Source }
+    $cands = @(
+        (Join-Path $env:LOCALAPPDATA 'Programs\DeepSeek Harness\resources\runtime\cli\bin\dsh.cmd'),
+        (Join-Path ${env:ProgramFiles} 'DeepSeek Harness\resources\runtime\cli\bin\dsh.cmd'),
+        'E:\DSH\resources\runtime\cli\bin\dsh.cmd'
+    )
+    return $cands | Where-Object { Test-Path $_ } | Select-Object -First 1
+}
 function Write-Step($msg) { Write-Host "  $msg" -ForegroundColor Gray }
 function Write-Ok($msg)   { Write-Host "  [OK] $msg" -ForegroundColor Green }
 function Write-Warn2($msg){ Write-Host "  [!] $msg" -ForegroundColor Yellow }
@@ -170,12 +217,7 @@ if ($listening) {
     $bindIp = $chosen.IPAddress
 
     # 用计划任务启动（独立于本脚本，脚本退出不影响它）
-    $dshCands = @(
-        'E:\DSH\resources\runtime\cli\bin\dsh.cmd',
-        (Join-Path $env:LOCALAPPDATA 'Programs\DeepSeek Harness\resources\runtime\cli\bin\dsh.cmd'),
-        (Join-Path ${env:ProgramFiles} 'DeepSeek Harness\resources\runtime\cli\bin\dsh.cmd')
-    )
-    $dshExe = $dshCands | Where-Object { Test-Path $_ } | Select-Object -First 1
+    $dshExe = Get-DshPath
     if (-not $dshExe) { Write-Err '找不到 dsh'; exit 1 }
 
     $taskName0 = "DSH-Web-$Port"
@@ -335,12 +377,7 @@ $dshLog = Join-Path $env:TEMP "dsh-web-$Port.log"
 if (Test-Path $dshLog) { Remove-Item $dshLog -Force -ErrorAction SilentlyContinue }
 
 # 找 dsh 可执行文件
-$dshCandidates = @(
-    'E:\DSH\resources\runtime\cli\bin\dsh.cmd',
-    (Join-Path $env:LOCALAPPDATA 'Programs\DeepSeek Harness\resources\runtime\cli\bin\dsh.cmd'),
-    (Join-Path ${env:ProgramFiles} 'DeepSeek Harness\resources\runtime\cli\bin\dsh.cmd')
-)
-$dsh = $dshCandidates | Where-Object { Test-Path $_ } | Select-Object -First 1
+$dsh = Get-DshPath
 if (-not $dsh) {
     Write-Err '找不到 dsh'
     exit 1
@@ -455,7 +492,7 @@ $state | ConvertTo-Json -Depth 4 | Set-Content $StateFile -Encoding UTF8
 
 # 同步更新 pairing.json，让插件两个二维码都带 token
 try {
-    $pairFile = 'E:\cloudflared\pairing.json'
+    $pairFile = $PairingFile
     $pair = [ordered]@{
         url       = "http://${bindIp}:$Port/?token=$newToken"
         token     = $newToken

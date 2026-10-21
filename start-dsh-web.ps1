@@ -57,6 +57,18 @@ param(
 [switch]$Foreground
 )
 
+# dsh 可执行文件：环境变量 → PATH → 常见安装位置
+function Get-DshPath {
+    if ($env:DSH_CLI -and (Test-Path $env:DSH_CLI)) { return $env:DSH_CLI }
+    $onPath = Get-Command dsh -ErrorAction SilentlyContinue
+    if ($onPath) { return $onPath.Source }
+    $cands = @(
+        (Join-Path $env:LOCALAPPDATA 'Programs\DeepSeek Harness\resources\runtime\cli\bin\dsh.cmd'),
+        (Join-Path ${env:ProgramFiles} 'DeepSeek Harness\resources\runtime\cli\bin\dsh.cmd'),
+        'E:\DSH\resources\runtime\cli\bin\dsh.cmd'
+    )
+    return $cands | Where-Object { Test-Path $_ } | Select-Object -First 1
+}
 $ErrorActionPreference = 'Stop'
 $OutputEncoding = [System.Text.Encoding]::UTF8
 
@@ -293,7 +305,13 @@ if (-not $url) {
 # 插件用 /api/file 读它 —— 这样二维码里才能带上 token，
 # 手机扫码才会被识别为「DSH 配对链接」。
 try {
-  $pairFile = 'E:\cloudflared\pairing.json'
+  # 状态目录可配（和 start-tunnel.ps1 / tunnel-service.mjs 保持一致）
+  $stateDir = if ($env:DSH_STATE_DIR) {
+    $env:DSH_STATE_DIR
+  } else {
+    Join-Path $env:LOCALAPPDATA 'dsh-pocket'
+  }
+  $pairFile = Join-Path $stateDir 'pairing.json'
   $pairDir = Split-Path $pairFile -Parent
   if (-not (Test-Path $pairDir)) { New-Item -ItemType Directory -Path $pairDir -Force | Out-Null }
   $tokMatch = [regex]::Match($url, '[?&]token=([A-Za-z0-9_\-]+)')

@@ -31,7 +31,17 @@
 
 ### 2. 启动 Web 服务
 
-**Windows（PowerShell）**
+**先跑一次自检**，确认依赖都就绪：
+
+```powershell
+cd <本仓库目录>
+.\doctor.ps1
+```
+
+它会把 `dsh` / `cloudflared` / `node` 的查找结果、端口占用、状态文件一次性列出来，
+哪里不对会直接告诉你怎么办。
+
+**然后启动**
 
 ```powershell
 cd <本仓库目录>
@@ -180,6 +190,30 @@ https://xxx.trycloudflare ─┘
 | **提醒是本地震动，不是远程推送** | 任务干完时手机震两下。App 被系统杀掉后收不到——真正的远程推送要接 FCM（国内收不到）或厂商推送通道（小米/华为/OPPO 各一套 SDK），工作量远超本项目 |
 | **Cloudflare 隧道域名会变** | 快速隧道每次重启换域名，手机要重新配对。固定域名需要自己的域名 + 命名隧道 |
 | **审批不支持「始终允许」** | 协议只有一次性决定（`allowed-once` / `rejected`）。要长期放行请调权限模式 |
+
+---
+
+## 配置
+
+**不配置也能跑** —— 默认值从脚本位置和 `%LOCALAPPDATA%` 推导，代码里没有写死盘符。
+
+需要改的时候用环境变量：
+
+| 变量 | 默认 | 说明 |
+|---|---|---|
+| `DSH_POCKET_ROOT` | 脚本所在目录 | 仓库根 |
+| `DSH_STATE_DIR` | `%LOCALAPPDATA%\dsh-pocket` | 状态文件目录 |
+| `DSH_CLI` | 自动查找 | `dsh.cmd` 路径 |
+| `DSH_CLOUDFLARED` | 自动查找 | `cloudflared.exe` 路径 |
+| `DSH_WEB_PORT` | `3095` | DSH Web 端口 |
+| `DSH_TUNNEL_PORT` | `3199` | 隧道控制服务端口 |
+
+改完可以随时用 `.\doctor.ps1` 验证路径解析对不对。
+
+完整说明见 [docs/configuration.md](docs/configuration.md)。
+
+> **安全提醒**：状态目录里的 `tunnel.json` / `pairing.json` **含 token**，
+> 拿到就能操作你电脑上的 DSH。别提交、别外传。
 
 ---
 

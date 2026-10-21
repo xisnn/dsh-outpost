@@ -32,7 +32,7 @@ param(
 
 $ErrorActionPreference = 'Stop'
 
-$RepoRoot = 'E:\work\dsBot'
+$RepoRoot = if ($env:DSH_POCKET_ROOT) { $env:DSH_POCKET_ROOT } else { $PSScriptRoot }
 $StartupDir = [Environment]::GetFolderPath('Startup')
 
 # 自启项定义
