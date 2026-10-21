@@ -34,7 +34,7 @@ src/
 
 ```bash
 npm install
-npm test          # 231 项单测 + typecheck
+npm test          # 261 项单测 + typecheck
 npm run android   # 需要 Android SDK + JDK 21
 ```
 
@@ -56,6 +56,8 @@ npm run android   # 需要 Android SDK + JDK 21
 | 父级 PanResponder 要用 Capture 版本，否则被 ScrollView 抢先 | `nav/NavHost.tsx` |
 | `session/follow` 必须走 WS，HTTP 调会 signature-invalid | `core/transport/` |
 | `session/follow` 的 address 必须包成 `{request:{address:{...}}}` | `core/store.ts` |
+| Hermes 没有 `TextDecoder`，mammoth 会崩，要装 polyfill | `core/textdecoder.ts` |
+| xlsx 主入口在 Metro 下报 `Requiring unknown module "867"`，要用 `xlsx.mini.min.js` | `components/DocumentViewer.tsx` |
 
 ## 协议
 
