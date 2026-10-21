@@ -98,8 +98,10 @@ check('base64 字节数计算去掉 padding', () =>
   files.includes("endsWith('==')") ? true : 'padding 没处理',
 );
 check('eof 判断用 chunk.eof', () => files.includes('chunk.eof') ? true : '没有 eof 判断');
+// 落盘方式见 gateway-bugfix-spec：必须逐块 append，不能拼 base64 字符串。
+// 这里只确认首块用了 base64 模式写入。
 check('落盘用 base64 模式', () =>
-  /writeFile\(dest, base64, 'base64'\)/.test(files) ? true : '写入方式不对',
+  /writeFile\(dest, parts\[0\], 'base64'\)/.test(files) ? true : '写入方式不对',
 );
 
 // ── ChatScreen 透传 ──────────────────────────────────────────────

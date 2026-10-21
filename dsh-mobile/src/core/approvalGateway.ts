@@ -117,7 +117,7 @@ export class ApprovalGateway {
     return gatewayUrlFrom(this.baseUrl);
   }
 
-  /** 建立连接。没有设备 token 时先要配对码 */
+  /** 建立连接。没有设备 token 时自动申请配对码 */
   async connect(pairingCode?: string): Promise<void> {
     this.closed = false;
     this.deviceId = await ensureDeviceId();
@@ -127,6 +127,21 @@ export class ApprovalGateway {
         this.token = (await AsyncStorage.getItem(DEVICE_TOKEN_KEY)) || '';
       } catch {
         this.token = '';
+      }
+    }
+
+    // 没 token 也没传配对码 → 向 DSH 申请一个
+    //
+    // 这一步之前缺了，导致网关永远连不上：connect() 只在「有 pairingCode」
+    // 或「有已保存 token」时才连，而首次两者都没有，直接 return 了。
+    // 用户看到的就是「审批无法在手机上回答」。
+    //
+    // POST /mgw/pair 用 App 现有的 cookie 鉴权，返回一次性配对码。
+    if (!pairingCode && !this.token) {
+      pairingCode = (await this.requestPairingCode()) ?? undefined;
+      if (!pairingCode) {
+        this.events.onStatus?.('offline', '网关未开启');
+        return;
       }
     }
 
@@ -176,6 +191,33 @@ export class ApprovalGateway {
       };
     } catch (e) {
       this.events.onStatus?.('offline', e instanceof Error ? e.message : '连接出错');
+    }
+  }
+
+  /**
+   * 向 DSH 申请一次性配对码。
+   *
+   * `POST /mgw/pair` 用 App 现有的 cookie 鉴权（和普通 RPC 一样的登录态），
+   * 返回 `{ payload: { pairingCode, endpoints } }`。
+   *
+   * 失败返回 null —— 多半是移动网关没装或没开，
+   * 由调用方显示「网关未开启」而不是当成错误。
+   */
+  private async requestPairingCode(): Promise<string | null> {
+    try {
+      // 管理接口在 web server 端口上（不是网关的 3081）
+      const base = this.baseUrl.replace(/\/+$/, '');
+      const res = await fetch(`${base}/mgw/pair`, {
+        method: 'POST',
+        credentials: 'include',
+        headers: { 'Content-Type': 'application/json' },
+        body: '{}',
+      });
+      if (!res.ok) return null;
+      const j = (await res.json()) as { payload?: { pairingCode?: string } };
+      return j.payload?.pairingCode ?? null;
+    } catch {
+      return null;
     }
   }
 
