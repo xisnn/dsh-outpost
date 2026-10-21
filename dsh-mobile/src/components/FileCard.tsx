@@ -26,6 +26,8 @@ import { useTheme } from '../design/theme';
 import { useApp } from '../App';
 import { fetchRemoteFile, openLocalFile, type RemoteFile } from '../core/fileUrl';
 import { downloadWorkspaceFile } from '../core/gatewayFiles';
+import { ImageViewer } from './ImageViewer';
+import { DocumentViewer, canPreviewInside } from './DocumentViewer';
 
 export function FileCard({
   path,
@@ -57,6 +59,10 @@ export function FileCard({
   const [local, setLocal] = useState<RemoteFile | null>(null);
   const [failed, setFailed] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
+  /** 图片全屏查看器 */
+  const [viewerOpen, setViewerOpen] = useState(false);
+  /** 文档内置查看器 */
+  const [docOpen, setDocOpen] = useState(false);
 
   const name = path.split(/[\\/]/).pop() ?? path;
 
@@ -132,7 +138,7 @@ export function FileCard({
     };
   }, [image, absPath, path, sessionId, store]);
 
-  /** 用户点卡片：图片看大图，其他文件交给系统 */
+  /** 用户点卡片：图片进全屏查看器，文档进内置查看器，其余交给系统 */
   const onPress = async () => {
     if (busy) return;
     setBusy(true);
@@ -141,6 +147,19 @@ export function FileCard({
         local ??
         (await fetchRemoteFile(store.fileBaseUrl, store.fileCookie, absPath));
       setLocal(f);
+
+      // 图片：全屏查看器（原来走 actionViewIntent 会弹「用什么应用打开」，
+      // 看图是最常见的操作，每次让用户选一遍应用完全不符合手机习惯）
+      if (image) {
+        setViewerOpen(true);
+        return;
+      }
+      // 文档：能在 App 内看的就内置看
+      if (canPreviewInside(f.name)) {
+        setDocOpen(true);
+        return;
+      }
+      // 其余（pdf / doc / ppt / zip…）交给系统
       await openLocalFile(f);
     } catch (e) {
       setFailed(e instanceof Error ? e.message : '打开失败');
@@ -152,72 +171,92 @@ export function FileCard({
   // 图片加载成功 → 直接显示预览
   if (image && local) {
     return (
-      <Pressable
-        onPress={() => void onPress()}
-        style={({ pressed }: { pressed: boolean }) => [
-          styles.imageWrap,
-          pressed ? { opacity: 0.85 } : null,
-        ]}
-        accessibilityRole="imagebutton"
-        accessibilityLabel={`查看图片 ${alt || name}`}
-      >
-        {/*
-          ⚠️ 图片显示的两个必要条件（缺一个都会变成灰块）：
-          1. <Image> 自身给「固定像素宽高」，不能用 width:'100%'；
-          2. 外层容器**不能有 overflow:'hidden'**（Fabric 会裁成 0）。
-          圆角放在 Image 自己的 style 上。
-        */}
-        <View style={{ width: imageWidth, height: imageWidth * 0.75 }}>
-          <Image
-            source={{ uri: local.uri }}
-            style={{
-              width: imageWidth,
-              height: imageWidth * 0.75,
-              borderRadius: tv.radius.md,
-            }}
-            resizeMode="cover"
-            onError={(e) => {
-              const msg =
-                (e.nativeEvent as { error?: string }).error ?? '图片解码失败';
-              setFailed(`图片加载失败：${msg}`);
-            }}
-          />
-        </View>
-        {failed ? (
-          <Text style={styles.imageCaption} numberOfLines={2}>
-            {failed}
-          </Text>
-        ) : (
-          <Text style={styles.imageCaption} numberOfLines={1}>
-            {alt || name}
-          </Text>
-        )}
-      </Pressable>
+      <>
+        <Pressable
+          onPress={() => void onPress()}
+          style={({ pressed }: { pressed: boolean }) => [
+            styles.imageWrap,
+            pressed ? { opacity: 0.85 } : null,
+          ]}
+          accessibilityRole="imagebutton"
+          accessibilityLabel={`查看图片 ${alt || name}`}
+        >
+          {/*
+            ⚠️ 图片显示的两个必要条件（缺一个都会变成灰块）：
+            1. <Image> 自身给「固定像素宽高」，不能用 width:'100%'；
+            2. 外层容器**不能有 overflow:'hidden'**（Fabric 会裁成 0）。
+            圆角放在 Image 自己的 style 上。
+          */}
+          <View style={{ width: imageWidth, height: imageWidth * 0.75 }}>
+            <Image
+              source={{ uri: local.uri }}
+              style={{
+                width: imageWidth,
+                height: imageWidth * 0.75,
+                borderRadius: tv.radius.md,
+              }}
+              resizeMode="cover"
+              onError={(e) => {
+                const msg =
+                  (e.nativeEvent as { error?: string }).error ?? '图片解码失败';
+                setFailed(`图片加载失败：${msg}`);
+              }}
+            />
+          </View>
+          {failed ? (
+            <Text style={styles.imageCaption} numberOfLines={2}>
+              {failed}
+            </Text>
+          ) : (
+            <Text style={styles.imageCaption} numberOfLines={1}>
+              {alt || name}
+            </Text>
+          )}
+        </Pressable>
+
+        {/* 全屏看图：缩放 / 拖动 / 下滑关闭 */}
+        <ImageViewer
+          visible={viewerOpen}
+          images={[{ uri: local.uri, caption: alt || name }]}
+          onClose={() => setViewerOpen(false)}
+        />
+      </>
     );
   }
 
   return (
-    <Pressable
-      onPress={() => void onPress()}
-      disabled={busy}
-      style={({ pressed }: { pressed: boolean }) => [
-        styles.card,
-        pressed ? { opacity: 0.7 } : null,
-      ]}
-      accessibilityRole="button"
-      accessibilityLabel={`打开 ${name}`}
-    >
-      <Text style={styles.icon}>{failed ? '⚠' : iconFor(name)}</Text>
-      <View style={styles.meta}>
-        <Text style={styles.name} numberOfLines={1}>
-          {alt || name}
-        </Text>
-        <Text style={styles.path} numberOfLines={1}>
-          {failed ?? (busy ? '正在打开…' : path)}
-        </Text>
-      </View>
-      {busy ? <ActivityIndicator size="small" color={tv.colors.accent} /> : null}
-    </Pressable>
+    <>
+      <Pressable
+        onPress={() => void onPress()}
+        disabled={busy}
+        style={({ pressed }: { pressed: boolean }) => [
+          styles.card,
+          pressed ? { opacity: 0.7 } : null,
+        ]}
+        accessibilityRole="button"
+        accessibilityLabel={`打开 ${name}`}
+      >
+        <Text style={styles.icon}>{failed ? '⚠' : iconFor(name)}</Text>
+        <View style={styles.meta}>
+          <Text style={styles.name} numberOfLines={1}>
+            {alt || name}
+          </Text>
+          <Text style={styles.path} numberOfLines={1}>
+            {failed ?? (busy ? '正在打开…' : path)}
+          </Text>
+        </View>
+        {busy ? <ActivityIndicator size="small" color={tv.colors.accent} /> : null}
+      </Pressable>
+
+      {/* 文档内置查看：md / docx / xlsx / csv */}
+      {local ? (
+        <DocumentViewer
+          visible={docOpen}
+          file={{ uri: local.uri, name: local.name }}
+          onClose={() => setDocOpen(false)}
+        />
+      ) : null}
+    </>
   );
 }
 
