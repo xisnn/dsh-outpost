@@ -77,7 +77,7 @@ export async function downloadWorkspaceFile(
   const mediaType = String(opened.mediaType ?? 'application/octet-stream');
   if (!transferId) throw new Error('网关没有返回 transferId');
 
-  // 2. 分块拉，边拉边写
+  // 2. 分块拉
   const dest = `${ReactNativeBlobUtil.fs.dirs.CacheDir}/dsh-${Date.now()}-${name.replace(/[^\w.\-]/g, '_')}`;
   const parts: string[] = [];
   let offset = 0;
@@ -102,8 +102,25 @@ export async function downloadWorkspaceFile(
     }
 
     // 3. 落盘
-    const base64 = parts.join('');
-    await ReactNativeBlobUtil.fs.writeFile(dest, base64, 'base64');
+    //
+    // ⚠️ 这里**绝对不能**把每块的 base64 直接拼起来再整体解码。
+    //
+    // 每块的 base64 都是**独立编码**的，末尾可能带 `=` padding：
+    //   块1: QUFBQUFBQUE=
+    //   块2: QkJCQkJCQkI=
+    // 直接拼成 'QUFBQUFBQUE=QkJCQkJCQkI=' 后，解码器遇到中间的 `=` 就认为
+    // 数据结束了 —— 结果只解出第一块。
+    //
+    // 实测症状：2.5 MB 的图，5 块拉完后文件只有 524288 字节（正好第一块），
+    // PNG 头正常但整体截断，<Image> 解码失败 → 界面上是一个灰方块。
+    // 这就是「图片显示不了」的真凶。
+    //
+    // 正确做法：**逐块追加写入**，每次都用 base64 模式解码后 append。
+    // blob-util 的 writeFile 在 append 模式下会把内容接在文件末尾。
+    await ReactNativeBlobUtil.fs.writeFile(dest, parts[0], 'base64');
+    for (let i = 1; i < parts.length; i += 1) {
+      await ReactNativeBlobUtil.fs.appendFile(dest, parts[i], 'base64');
+    }
     return { path: `file://${dest}`, name, size: received, mediaType };
   } catch (e) {
     // 失败要显式取消，否则服务端句柄要等 2 分钟空闲才释放
