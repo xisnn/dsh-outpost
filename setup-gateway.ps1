@@ -65,12 +65,21 @@ if (Test-Path $pluginDir) {
     Write-Ok "已安装（$ver）"
 } else {
     Write-Warn2 '未安装，正在装 ...'
-    $dshCands = @(
-        'E:\DSH\resources\runtime\cli\bin\dsh.cmd',
-        (Join-Path $env:LOCALAPPDATA 'Programs\DeepSeek Harness\resources\runtime\cli\bin\dsh.cmd'),
-        (Join-Path ${env:ProgramFiles} 'DeepSeek Harness\resources\runtime\cli\bin\dsh.cmd')
-    )
-    $dsh = $dshCands | Where-Object { Test-Path $_ } | Select-Object -First 1
+    # dsh 可执行文件：环境变量 → PATH → 常见安装位置
+    $dsh = $env:DSH_CLI
+    if (-not $dsh -or -not (Test-Path $dsh)) {
+        $onPath = Get-Command dsh -ErrorAction SilentlyContinue
+        if ($onPath) {
+            $dsh = $onPath.Source
+        } else {
+            $dshCands = @(
+                (Join-Path $env:LOCALAPPDATA 'Programs\DeepSeek Harness\resources\runtime\cli\bin\dsh.cmd'),
+                (Join-Path ${env:ProgramFiles} 'DeepSeek Harness\resources\runtime\cli\bin\dsh.cmd'),
+                'E:\DSH\resources\runtime\cli\bin\dsh.cmd'
+            )
+            $dsh = $dshCands | Where-Object { Test-Path $_ } | Select-Object -First 1
+        }
+    }
     if (-not $dsh) {
         Write-Err2 '找不到 dsh，请手动安装：npx dsh plugin add ' + $PluginName
         exit 1

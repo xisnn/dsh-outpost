@@ -2349,14 +2349,14 @@ var qrcode = function() {
     }
     // ── 状态读取 ─────────────────────────────────────────────────
     //
-    // 隧道信息由 start-tunnel.ps1 写进 E:\cloudflared\tunnel.json，
-    // 插件通过 DSH 的 /api/file 读它（Host 侧暴露的文件接口，
-    // 浏览器拿不到本地文件系统，只能走这个）。
-
-    /** 配对信息（由 start-dsh-web.ps1 写入） */
-    const PAIRING_FILE = 'E:\\cloudflared\\pairing.json';
-    /** 隧道状态（由 start-tunnel.ps1 写入） */
-    const TUNNEL_STATE = 'E:\\cloudflared\\tunnel.json';
+    // 状态**只从本地小服务读**（tunnel-service.mjs），不写死文件路径。
+    //
+    // 为什么不再直接读文件：插件跑在浏览器里，拿不到环境变量也拿不到
+    // 本地文件系统路径。之前这里写死了 E:\cloudflared\xxx.json，
+    // 换台机器就完全废了。现在路径由服务端决定（它支持 DSH_STATE_DIR），
+    // 插件只认 HTTP 接口。
+    //
+    // 服务没起来时面板会提示「隧道服务未运行」，而不是静默失败。
 
     /** 从 /api/file 读一个本地 JSON */
     async function readLocalJson(path) {
@@ -2442,6 +2442,8 @@ var qrcode = function() {
       const [tunnel, setTunnel] = useState(null);
       const [token, setToken] = useState('');
       const [loading, setLoading] = useState(false);
+      // 隧道服务没起来：面板要明说，不然用户对着空面板猜
+      const [serviceDown, setServiceDown] = useState(false);
 
       // 面板打开时才读状态
       useEffect(() => {
@@ -2483,35 +2485,24 @@ var qrcode = function() {
 
             // 把整个状态带上：PanelBody 需要 ipChanged / currentIp 等诊断字段
             setTunnel(st || null);
+            setServiceDown(false);
           })
           .catch(() => {
-            // 服务没起，退回直接读文件
-            return Promise.all([readLocalJson(PAIRING_FILE), readLocalJson(TUNNEL_STATE)]).then(
-              ([pair, tun]) => {
-                if (!alive) return;
-                let tok = (pair && pair.token) || '';
-                if (!tok) {
-                  try {
-                    const u = new URL(window.location.href);
-                    tok = u.searchParams.get('token') || '';
-                  } catch {
-                    /* ignore */
-                  }
-                }
-                setToken(tok);
-                const lanBase =
-                  pair && pair.host && pair.port
-                    ? 'http://' + pair.host + ':' + pair.port
-                    : origin;
-                setLanUrl(withToken(lanBase, tok));
-                setTunnel(tun);
-              },
-            );
-          })
-          .catch(() => {
-            if (alive) setLanUrl(withToken(origin, ''));
-          })
-          .then(() => {
+            // 服务没起来：不再回退去读文件（路径不该写死在插件里）。
+            // 只用当前页面地址兜底，并在面板上提示服务未运行。
+            if (!alive) return;
+            let tok = '';
+            try {
+              const u = new URL(window.location.href);
+              tok = u.searchParams.get('token') || '';
+            } catch {
+              /* ignore */
+            }
+            setToken(tok);
+            setLanUrl(withToken(origin, tok));
+            setTunnel(null);
+            setServiceDown(true);
+          }).then(() => {
             if (alive) setLoading(false);
           });
 
@@ -2530,7 +2521,7 @@ var qrcode = function() {
         ? h(
             PanelBoundary,
             null,
-            h(PanelBody, { lanUrl, tunnel, token, loading, onRefresh: reload }),
+            h(PanelBody, { lanUrl, tunnel, token, loading, serviceDown, onRefresh: reload }),
           )
         : null;
 
@@ -2658,7 +2649,7 @@ var qrcode = function() {
     }
 
     /** 面板：局域网 + Cloudflare，各带二维码 + 隧道启停 */
-    function PanelBody({ lanUrl, tunnel, token, loading, onRefresh }) {
+    function PanelBody({ lanUrl, tunnel, token, loading, serviceDown, onRefresh }) {
       const [busy, setBusy] = useState(false);
       const [err, setErr] = useState('');
       const cfUrl = tunnel && tunnel.url ? withToken(tunnel.url, token) : '';
@@ -2714,6 +2705,27 @@ var qrcode = function() {
                 'div',
                 { key: 'ld', style: { fontSize: 9.5, opacity: 0.5, marginTop: 4 } },
                 '读取中…',
+              )
+            : null,
+
+          // 隧道服务没起来：说清楚怎么起，别让用户猜
+          serviceDown
+            ? h(
+                'div',
+                { key: 'sd', style: { marginTop: 6, fontSize: 9, lineHeight: 1.55, opacity: 0.7 } },
+                [
+                  h('div', { key: 'a' }, '隧道控制服务未运行，隧道启停按钮不可用。'),
+                  h(
+                    'div',
+                    { key: 'b', style: { marginTop: 3, opacity: 0.8 } },
+                    '在电脑上运行：start-tunnel-service.ps1',
+                  ),
+                  h(
+                    'div',
+                    { key: 'c', style: { marginTop: 3, opacity: 0.7 } },
+                    '局域网地址和二维码仍然可用。',
+                  ),
+                ],
               )
             : null,
 

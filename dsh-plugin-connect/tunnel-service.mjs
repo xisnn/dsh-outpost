@@ -20,20 +20,50 @@
 
 import http from 'node:http';
 import os from 'node:os';
+import path from 'node:path';
+import { fileURLToPath } from 'node:url';
 import { execFile } from 'node:child_process';
 import { readFile } from 'node:fs/promises';
+import { mkdirSync } from 'node:fs';
 import { promisify } from 'node:util';
 
 const execFileAsync = promisify(execFile);
 
 const PORT = Number(process.env.DSH_TUNNEL_PORT || 3199);
-const TUNNEL_SCRIPT = 'E:\\work\\dsBot\\start-tunnel.ps1';
-const DSH_SCRIPT = 'E:\\work\\dsBot\\start-dsh-web.ps1';
-const TUNNEL_STATE = 'E:\\cloudflared\\tunnel.json';
-const PAIRING_FILE = 'E:\\cloudflared\\pairing.json';
+
+/**
+ * 路径全部可配置，不写死。
+ *
+ * 原则：优先用环境变量，其次从本文件位置往上找。
+ * 这样别人 clone 到任何盘符都能跑 —— 之前这里写死了 E:\work\dsBot
+ * 和 E:\cloudflared，换台机器就废了。
+ *
+ * 环境变量：
+ *   DSH_POCKET_ROOT   仓库根目录（默认：本文件的上两级）
+ *   DSH_STATE_DIR     状态文件目录（默认：%LOCALAPPDATA%\dsh-pocket）
+ */
+const HERE = path.dirname(fileURLToPath(import.meta.url));
+const REPO_ROOT = process.env.DSH_POCKET_ROOT || path.resolve(HERE, '..');
+
+/** 状态目录：存 tunnel.json / pairing.json / 日志 */
+const STATE_DIR =
+  process.env.DSH_STATE_DIR ||
+  path.join(process.env.LOCALAPPDATA || os.homedir(), 'dsh-pocket');
+
+// 主动创建，别等第一次写文件才发现目录不存在
+try {
+  mkdirSync(STATE_DIR, { recursive: true });
+} catch {
+  /* 建不了就算了，后面写文件时会报具体错 */
+}
+
+const TUNNEL_SCRIPT = path.join(REPO_ROOT, 'start-tunnel.ps1');
+const DSH_SCRIPT = path.join(REPO_ROOT, 'start-dsh-web.ps1');
+const TUNNEL_STATE = path.join(STATE_DIR, 'tunnel.json');
+const PAIRING_FILE = path.join(STATE_DIR, 'pairing.json');
 
 /** DSH Web 的端口 */
-const DSH_PORT = 3095;
+const DSH_PORT = Number(process.env.DSH_WEB_PORT || 3095);
 
 /** 只允许这些来源访问（本机页面） */
 const ALLOWED_ORIGIN =
