@@ -195,7 +195,9 @@ export function SessionsScreen({
         initialNumToRender={12}
         maxToRenderPerBatch={12}
         windowSize={7}
-        removeClippedSubviews
+        // ⚠️ 不要加 removeClippedSubviews。
+        // Android 上它会把离屏视图从原生层级里摘掉，导致**卡片点不动**
+        // （触摸事件打不到已被移除的视图）。实测踩过：整个列表点了没反应。
         keyboardShouldPersistTaps="handled"
         refreshControl={
           <RefreshControl
