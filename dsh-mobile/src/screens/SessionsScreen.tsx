@@ -4,14 +4,16 @@
  * 视觉：卡片式会话行，手机创建的会话带橙色标记。
  * 右上角「＋」新建手机专属会话（可切换模型、可发消息）。
  */
-import React, { useEffect, useMemo, useState } from 'react';
+import React, { useEffect, useMemo, useRef, useState } from 'react';
 import {
   ActivityIndicator,
   FlatList,
+  Platform,
   Pressable,
   RefreshControl,
   StyleSheet,
   Text,
+  TextInput,
   View,
 } from 'react-native';
 
@@ -22,6 +24,10 @@ import { useTheme } from '../design/theme';
 import { radius, space, type, weight } from '../design/tokens';
 import { Dot, Pill } from '../components/ui';
 import { ConfirmSheet } from '../components/ConfirmSheet';
+import { RenameSheet } from '../components/RenameSheet';
+import { filterSessions } from '../core/sessionSearch';
+
+export { filterSessions } from '../core/sessionSearch';
 
 function formatAgo(ts: number): string {
   if (!ts) return '';
@@ -51,9 +57,17 @@ export function SessionsScreen({
   const [refreshing, setRefreshing] = useState(false);
   const [creating, setCreating] = useState(false);
   const [createError, setCreateError] = useState<string | null>(null);
-  // 长按删除：待确认的会话
+  // 长按会话：先弹操作菜单（改名 / 删除），避免长按直接删除导致误操作
+  const [actionTarget, setActionTarget] = useState<{ id: string; title: string } | null>(null);
+  // 删除确认
   const [pendingDelete, setPendingDelete] = useState<{ id: string; title: string } | null>(null);
   const [deleting, setDeleting] = useState(false);
+  // 搜索
+  const [query, setQuery] = useState('');
+  // 重命名
+  const [pendingRename, setPendingRename] = useState<{ id: string; title: string } | null>(null);
+  const [renaming, setRenaming] = useState(false);
+  const [renameError, setRenameError] = useState<string | null>(null);
 
   useEffect(() => {
     const unsub = store.subscribe(() => force((n) => n + 1));
@@ -66,9 +80,23 @@ export function SessionsScreen({
     setRefreshing(false);
   };
 
-  /** 长按会话：弹确认框（删除 = 归档，可恢复） */
-  const askDelete = (id: string, title: string) => {
-    setPendingDelete({ id, title });
+  /** 长按会话：弹操作菜单（改名 / 删除） */
+  const askActions = (id: string, title: string) => {
+    setActionTarget({ id, title });
+  };
+
+  const doRename = async (next: string) => {
+    if (!pendingRename) return;
+    setRenaming(true);
+    setRenameError(null);
+    try {
+      await store.renameSession(pendingRename.id, next);
+      setPendingRename(null);
+    } catch (e) {
+      setRenameError(e instanceof Error ? e.message : '改名失败');
+    } finally {
+      setRenaming(false);
+    }
   };
 
   const confirmDelete = async () => {
@@ -98,12 +126,17 @@ export function SessionsScreen({
   };
 
   const sessions = store.workspaces.find((w) => w.path === workspacePath)?.sessions ?? [];
+  const shown = useMemo(() => filterSessions(sessions, query), [sessions, query]);
 
   return (
     <View style={styles.root}>
       <Header
         title={workspaceName || '会话'}
-        subtitle={`${sessions.length} 个会话`}
+        subtitle={
+          query.trim()
+            ? `${shown.length} / ${sessions.length} 个会话`
+            : `${sessions.length} 个会话`
+        }
         compact
         right={
           <Pressable
@@ -133,10 +166,37 @@ export function SessionsScreen({
         </View>
       ) : null}
 
+      {/* 搜索框。会话多了以后靠滚动找太费劲，这是最直接的解法 */}
+      <View style={styles.searchWrap}>
+        <Text style={styles.searchIcon}>⌕</Text>
+        <TextInput
+          value={query}
+          onChangeText={setQuery}
+          placeholder="搜索会话"
+          placeholderTextColor={tv.colors.textFaint}
+          style={styles.searchInput}
+          returnKeyType="search"
+          autoCorrect={false}
+          autoCapitalize="none"
+          clearButtonMode="while-editing"
+        />
+        {query ? (
+          <Pressable onPress={() => setQuery('')} hitSlop={10} style={styles.clearBtn}>
+            <Text style={styles.clearText}>✕</Text>
+          </Pressable>
+        ) : null}
+      </View>
+
       <FlatList
         contentContainerStyle={styles.content}
-        data={sessions}
+        data={shown}
         keyExtractor={(s) => s.sessionId}
+        // 长列表性能：限制首屏渲染数量，滚动时再补
+        initialNumToRender={12}
+        maxToRenderPerBatch={12}
+        windowSize={7}
+        removeClippedSubviews
+        keyboardShouldPersistTaps="handled"
         refreshControl={
           <RefreshControl
             refreshing={refreshing}
@@ -147,18 +207,28 @@ export function SessionsScreen({
           />
         }
         ListHeaderComponent={
-          <View style={styles.pathBox}>
-            <Text style={styles.pathText} numberOfLines={2}>
-              {workspacePath || workspaceName}
-            </Text>
-          </View>
+          query.trim() ? null : (
+            <View style={styles.pathBox}>
+              <Text style={styles.pathText} numberOfLines={2}>
+                {workspacePath || workspaceName}
+              </Text>
+            </View>
+          )
         }
         ListEmptyComponent={
-          <View style={styles.emptyBox}>
-            <Text style={styles.emptyIcon}>◌</Text>
-            <Text style={styles.empty}>这个工作区还没有会话</Text>
-            <Text style={styles.emptyHint}>点右上角「新建」创建手机专属会话</Text>
-          </View>
+          query.trim() ? (
+            <View style={styles.emptyBox}>
+              <Text style={styles.emptyIcon}>⌕</Text>
+              <Text style={styles.empty}>没找到匹配「{query.trim()}」的会话</Text>
+              <Text style={styles.emptyHint}>试试别的关键词，或者清空搜索</Text>
+            </View>
+          ) : (
+            <View style={styles.emptyBox}>
+              <Text style={styles.emptyIcon}>◌</Text>
+              <Text style={styles.empty}>这个工作区还没有会话</Text>
+              <Text style={styles.emptyHint}>点右上角「新建」创建手机专属会话</Text>
+            </View>
+          )
         }
         renderItem={({ item }: { item: (typeof sessions)[number] }) => {
           const v = item.projections?.values;
@@ -178,7 +248,7 @@ export function SessionsScreen({
                 pressed && styles.cardPressed,
               ]}
               onPress={() => nav.push('Chat', { sessionId: item.sessionId, title })}
-              onLongPress={() => askDelete(item.sessionId, title)}
+              onLongPress={() => askActions(item.sessionId, title)}
               delayLongPress={450}
             >
               <View style={styles.cardTop}>
@@ -233,7 +303,76 @@ export function SessionsScreen({
         }}
       />
 
-      {/* 长按删除确认。删除 = 归档，能在「最近删除」里恢复 */}
+      {/* 长按会话后的操作菜单 */}
+      {actionTarget ? (
+        <View style={styles.actionBackdrop}>
+          <Pressable style={StyleSheet.absoluteFill} onPress={() => setActionTarget(null)} />
+          <View style={styles.actionSheet}>
+            <Text style={styles.actionTitle} numberOfLines={1}>
+              {actionTarget.title}
+            </Text>
+            <Pressable
+              onPress={() => {
+                setPendingRename(actionTarget);
+                setActionTarget(null);
+              }}
+              style={({ pressed }: { pressed: boolean }) => [
+                styles.actionRow,
+                pressed ? { backgroundColor: tv.colors.bgCard } : null,
+              ]}
+            >
+              <Text style={styles.actionText}>重命名</Text>
+            </Pressable>
+            <View style={styles.actionSep} />
+            <Pressable
+              onPress={() => {
+                setPendingDelete(actionTarget);
+                setActionTarget(null);
+              }}
+              style={({ pressed }: { pressed: boolean }) => [
+                styles.actionRow,
+                pressed ? { backgroundColor: tv.colors.bgCard } : null,
+              ]}
+            >
+              <Text style={[styles.actionText, { color: tv.colors.danger }]}>删除</Text>
+            </Pressable>
+            <View style={styles.actionSep} />
+            <Pressable
+              onPress={() => setActionTarget(null)}
+              style={({ pressed }: { pressed: boolean }) => [
+                styles.actionRow,
+                pressed ? { backgroundColor: tv.colors.bgCard } : null,
+              ]}
+            >
+              <Text style={[styles.actionText, { color: tv.colors.textTertiary }]}>
+                取消
+              </Text>
+            </Pressable>
+          </View>
+        </View>
+      ) : null}
+
+      {/* 重命名 */}
+      <RenameSheet
+        visible={!!pendingRename}
+        initialValue={pendingRename?.title ?? ''}
+        busy={renaming}
+        onCancel={() => {
+          setPendingRename(null);
+          setRenameError(null);
+        }}
+        onConfirm={(next) => void doRename(next)}
+      />
+
+      {renameError ? (
+        <View style={styles.errorBar}>
+          <Text style={styles.errorText} numberOfLines={2}>
+            改名失败：{renameError}
+          </Text>
+        </View>
+      ) : null}
+
+      {/* 删除确认。删除 = 归档，能在「最近删除」里恢复 */}
       <ConfirmSheet
         visible={!!pendingDelete}
         title="删除这个对话？"
@@ -267,6 +406,65 @@ function makeStyles(tv: ReturnType<typeof useTheme>) {
       paddingVertical: space.sm,
     },
     errorText: { color: C.danger, fontSize: type.xs },
+
+    // 搜索框
+    searchWrap: {
+      flexDirection: 'row',
+      alignItems: 'center',
+      marginHorizontal: space.md,
+      marginBottom: space.sm,
+      paddingHorizontal: space.sm,
+      borderRadius: radius.md,
+      backgroundColor: C.bgCard,
+      borderWidth: StyleSheet.hairlineWidth,
+      borderColor: C.border,
+    },
+    searchIcon: {
+      color: C.textFaint,
+      fontSize: type.base,
+      marginRight: 6,
+    },
+    searchInput: {
+      flex: 1,
+      color: C.text,
+      fontSize: type.sm,
+      paddingVertical: Platform.OS === 'ios' ? 10 : 8,
+    },
+    clearBtn: { padding: 6 },
+    clearText: { color: C.textFaint, fontSize: type.sm },
+
+    // 长按操作菜单
+    actionBackdrop: {
+      ...StyleSheet.absoluteFillObject,
+      backgroundColor: 'rgba(0,0,0,0.35)',
+      justifyContent: 'flex-end',
+      padding: space.md,
+      paddingBottom: space.xxl,
+    },
+    actionSheet: {
+      backgroundColor: C.bgRaised,
+      borderRadius: radius.lg,
+      overflow: 'hidden',
+      borderWidth: StyleSheet.hairlineWidth,
+      borderColor: C.border,
+    },
+    actionTitle: {
+      color: C.textFaint,
+      fontSize: type.xs,
+      paddingHorizontal: space.lg,
+      paddingTop: space.md,
+      paddingBottom: space.sm,
+    },
+    actionRow: {
+      paddingHorizontal: space.lg,
+      paddingVertical: space.md,
+    },
+    actionText: { color: C.text, fontSize: type.base },
+    actionSep: {
+      height: StyleSheet.hairlineWidth,
+      backgroundColor: C.border,
+      marginLeft: space.lg,
+    },
 
     pathBox: {
       paddingHorizontal: space.lg,
