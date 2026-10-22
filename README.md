@@ -41,6 +41,13 @@
 - 队员全干完后自动唤醒管家做汇总
 - 按项目复用队员，不重复创建
 
+### 会话管理
+
+- **搜索**：按标题实时过滤，支持中文、多关键词
+- **重命名**：长按会话改名，写回 DSH 原生标题
+- **删除 / 恢复**：删除 = 归档，内容还在电脑上
+- 长会话虚拟化渲染，100 轮以上也不卡
+
 ### 审批（不用再去电脑上点）
 
 - 需要授权时手机弹出横幅，直接点「拒绝」/「允许一次」
@@ -296,7 +303,7 @@ https://xxx.trycloudflare ─┘
 ```bash
 cd dsh-mobile
 npm install
-npm test              # 261 项单测 + typecheck
+npm test              # 285 项单测 + typecheck
 npm run android       # 需要 Android SDK + JDK 21
 ```
 
@@ -318,7 +325,7 @@ npm run android       # 需要 Android SDK + JDK 21
 │   │   ├── screens/      # 页面
 │   │   ├── components/   # 组件
 │   │   └── design/       # 主题 token
-│   └── tests/            # Node 单测（261 项）
+│   └── tests/            # Node 单测（285 项）
 ├── dsh-plugin-connect/   # 桌面端插件：侧边栏「手机连接」+ 二维码
 ├── docs/                 # 协议笔记、真机验证清单、截图
 ├── start-dsh-web.ps1     # Windows 一键启动脚本
@@ -330,13 +337,14 @@ npm run android       # 需要 Android SDK + JDK 21
 
 ## 版本
 
-当前 **v0.7.0**。完整变更见 [Releases](../../releases)。
+当前 **v0.8.0**。完整变更见 [Releases](../../releases)。
 
 最近的几个版本：
 
 | 版本 | 内容 |
 |---|---|
-| **v0.7.0** | 图片全屏查看 + Word/Excel/Markdown 内置查看；聊天里的 markdown 终于真渲染了 |
+| **v0.8.0** | 会话搜索、重命名、长会话虚拟化（100 轮以上的会话不再卡顿） |
+| v0.7.0 | 图片全屏查看 + Word/Excel/Markdown 内置查看；聊天里的 markdown 终于真渲染了 |
 | v0.6.3 | 手机端审批可用了（修了 WS 请求头、端点选择、凭据自愈三个问题）+ 手势真正生效 |
 | v0.6.2 | 图片终于能显示（`overflow:'hidden'` 在 Fabric 下会把 Image 裁成 0） |
 | v0.6.1 | 系统通知（通知栏可见，后台也能收） |
