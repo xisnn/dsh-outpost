@@ -9,6 +9,7 @@
 import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import {
   ActivityIndicator,
+  FlatList,
   Image,
   Keyboard,
   KeyboardAvoidingView,
@@ -50,7 +51,7 @@ import { pickAttachments, formatBytes, type PickMode } from '../core/picker';
 import { guessImageMime, readFileBase64 } from '../core/rpc/upload';
 import type { OutgoingAttachment } from '../core/store';
 import { withModeTag } from '../core/butler';
-import type { Block } from '../core/fold';
+import type { Block, ChatItem } from '../core/fold';
 import type { SessionAddress } from '../core/types';
 
 /** 管家模式（闲聊/计划）的持久化 key */
@@ -102,7 +103,7 @@ export function ChatScreen({
   const [butlerMode, setButlerMode] = useState<ButlerMode>('chat');
   // 管家页顶部的「切换项目」弹层
   const [switchWs, setSwitchWs] = useState(false);
-  const scrollRef = useRef<ScrollView>(null);
+  const scrollRef = useRef<FlatList<ChatItem>>(null);
   const [nearBottom, setNearBottom] = useState(true);
 
   // 地址是对象，不能直接进依赖：用字符串 key 固定住
@@ -479,10 +480,28 @@ export function ChatScreen({
         behavior={Platform.OS === 'ios' ? 'padding' : undefined}
         keyboardVerticalOffset={0}
       >
-        <ScrollView
+        {/*
+          ⚠️ 用 FlatList 而不是 ScrollView + map：长会话（100 轮以上）
+          一次性渲染所有消息会明显卡顿。FlatList 只渲染可视区域附近的项。
+
+          几个容易踩的点：
+          1. `onContentSizeChange` 在 FlatList 里也会触发，行为一致；
+          2. 自动滚到底用 `scrollToEnd`，但只在「本来就在底部」时才滚，
+             否则用户往上翻历史时会被强行拽回底部；
+          3. 「加载更早」按钮放在 ListHeaderComponent —— 它在列表最上方，
+             和原来的视觉位置一致。
+        */}
+        <FlatList
           ref={scrollRef}
           style={styles.scroll}
           contentContainerStyle={styles.scrollContent}
+          data={chat.items}
+          keyExtractor={(item: ChatItem) => item.key}
+          // 长会话性能：控制首屏和每批渲染量
+          initialNumToRender={14}
+          maxToRenderPerBatch={12}
+          windowSize={9}
+          removeClippedSubviews={false}
           onScroll={(e: {
             nativeEvent: {
               layoutMeasurement: { height: number };
@@ -498,99 +517,94 @@ export function ChatScreen({
           onContentSizeChange={() => {
             if (nearBottom) scrollRef.current?.scrollToEnd({ animated: false });
           }}
-        >
-          {chat.hasOlder ? (
-            <Pressable
-              style={({ pressed }: { pressed: boolean }) => [
-                styles.loadOlder,
-                pressed ? { opacity: 0.6 } : null,
-              ]}
-              onPress={() => void store.loadOlder(sessionId)}
-              disabled={chat.loadingOlder}
-            >
-              {chat.loadingOlder ? (
-                <ActivityIndicator size="small" color={tv.colors.textTertiary} />
-              ) : (
-                <Text style={styles.loadOlderText}>↑ 加载更早的消息</Text>
-              )}
-            </Pressable>
-          ) : null}
-
-          {chat.loading ? (
-            <View style={styles.loadingBox}>
-              <ActivityIndicator color={tv.colors.accent} />
-              <Text style={styles.loadingText}>正在读取会话…</Text>
-            </View>
-          ) : chat.items.length === 0 && !chat.running ? (
-            <View style={styles.emptyBox}>
-              <Text style={styles.emptyMark}>{butler ? '◈' : '◇'}</Text>
-              <Text style={styles.emptyTitle}>{butler ? '管家' : title ?? '新会话'}</Text>
-              <Text style={styles.emptyText}>
-                {butler
-                  ? '告诉管家你要做什么\n它会拆解任务、派给队员，再汇总给你'
-                  : `在下面输入第一条消息\n指令会在电脑上执行`}
-              </Text>
-            </View>
-          ) : (
-            chat.items.map((item) => {
-              if (item.kind === 'user') {
-                return (
-                  <UserBubble
-                    key={item.key}
-                    text={item.text}
-                    time={item.time}
-                    parts={item.parts}
-                    sessionId={sessionId}
-                    api={store.upload}
-                  />
-                );
-              }
-              if (item.kind === 'divider') {
-                return (
-                  <View key={item.key} style={styles.divider}>
-                    <View style={styles.dividerLine} />
-                    <Text style={styles.dividerText}>
-                      {item.reason === 'aborted' ? '已打断' : item.reason ?? '中断'}
-                    </Text>
-                    <View style={styles.dividerLine} />
-                  </View>
-                );
-              }
-              if (item.kind === 'teammate') {
-                return (
-                  <TeammateNote
-                    key={item.key}
-                    from={item.from}
-                    text={item.text}
-                    notice={item.notice}
-                  />
-                );
-              }
-              // 派过活的那一轮：管家的汇总默认折叠，点开才看
-              // （闲聊回复 delegated 为 false，直接显示，不打扰用户）
-              if (item.delegated) {
-                const doneCount = (chat.agentTeam?.tasks ?? []).filter(
-                  (t) => t.status === 'completed',
-                ).length;
-                return (
-                  <CompletionNotice key={item.key} taskCount={doneCount}>
-                    {renderBlocks(item.blocks, item.key)}
-                  </CompletionNotice>
-                );
-              }
-              return <View key={item.key}>{renderBlocks(item.blocks, item.key)}</View>;
-            })
-          )}
-
-          {chat.running ? (
-            <View style={styles.liveRow}>
-              <ThinkingDots color={tv.colors.accent} size="large" />
-              <Text style={styles.liveText}>{butler ? '管家在思考…' : '继续中…'}</Text>
-            </View>
-          ) : null}
-
-          <View style={{ height: space.lg }} />
-        </ScrollView>
+          ListHeaderComponent={
+            chat.hasOlder ? (
+              <Pressable
+                style={({ pressed }: { pressed: boolean }) => [
+                  styles.loadOlder,
+                  pressed ? { opacity: 0.6 } : null,
+                ]}
+                onPress={() => void store.loadOlder(sessionId)}
+                disabled={chat.loadingOlder}
+              >
+                {chat.loadingOlder ? (
+                  <ActivityIndicator size="small" color={tv.colors.textTertiary} />
+                ) : (
+                  <Text style={styles.loadOlderText}>↑ 加载更早的消息</Text>
+                )}
+              </Pressable>
+            ) : null
+          }
+          ListEmptyComponent={
+            chat.loading ? (
+              <View style={styles.loadingBox}>
+                <ActivityIndicator color={tv.colors.accent} />
+                <Text style={styles.loadingText}>正在读取会话…</Text>
+              </View>
+            ) : (
+              <View style={styles.emptyBox}>
+                <Text style={styles.emptyMark}>{butler ? '◈' : '◇'}</Text>
+                <Text style={styles.emptyTitle}>{butler ? '管家' : title ?? '新会话'}</Text>
+                <Text style={styles.emptyText}>
+                  {butler
+                    ? '告诉管家你要做什么\n它会拆解任务、派给队员，再汇总给你'
+                    : `在下面输入第一条消息\n指令会在电脑上执行`}
+                </Text>
+              </View>
+            )
+          }
+          ListFooterComponent={
+            <>
+              {chat.running ? (
+                <View style={styles.liveRow}>
+                  <ThinkingDots color={tv.colors.accent} size="large" />
+                  <Text style={styles.liveText}>{butler ? '管家在思考…' : '继续中…'}</Text>
+                </View>
+              ) : null}
+              <View style={{ height: space.lg }} />
+            </>
+          }
+          renderItem={({ item }: { item: ChatItem }) => {
+            if (item.kind === 'user') {
+              return (
+                <UserBubble
+                  text={item.text}
+                  time={item.time}
+                  parts={item.parts}
+                  sessionId={sessionId}
+                  api={store.upload}
+                />
+              );
+            }
+            if (item.kind === 'divider') {
+              return (
+                <View style={styles.divider}>
+                  <View style={styles.dividerLine} />
+                  <Text style={styles.dividerText}>
+                    {item.reason === 'aborted' ? '已打断' : item.reason ?? '中断'}
+                  </Text>
+                  <View style={styles.dividerLine} />
+                </View>
+              );
+            }
+            if (item.kind === 'teammate') {
+              return <TeammateNote from={item.from} text={item.text} notice={item.notice} />;
+            }
+            // 派过活的那一轮：管家的汇总默认折叠，点开才看
+            // （闲聊回复 delegated 为 false，直接显示，不打扰用户）
+            if (item.delegated) {
+              const doneCount = (chat.agentTeam?.tasks ?? []).filter(
+                (t) => t.status === 'completed',
+              ).length;
+              return (
+                <CompletionNotice taskCount={doneCount}>
+                  {renderBlocks(item.blocks, item.key)}
+                </CompletionNotice>
+              );
+            }
+            return <View>{renderBlocks(item.blocks, item.key)}</View>;
+          }}
+        />
 
         {/* 输入区（队员事件流是只读的，不显示） */}
         {readOnly ? null : (

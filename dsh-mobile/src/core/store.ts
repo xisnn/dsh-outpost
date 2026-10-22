@@ -833,6 +833,35 @@ export class Store {
     }
   }
 
+  /**
+   * 重命名会话。
+   *
+   * DSH 有 `session/rename`，改完会把新标题写进会话投影，
+   * 所以这里也顺手更新本地的 sessions 缓存，列表立刻能看到新名字
+   * （不用等下一次 loadSessions）。
+   */
+  async renameSession(sessionId: string, title: string): Promise<void> {
+    const next = title.trim();
+    if (!next) throw new Error('名字不能为空');
+    await this.api.rename(sessionId, next);
+    // 本地同步：会话列表 + 已打开的聊天缓存
+    this.sessions = this.sessions.map((s) =>
+      s.sessionId === sessionId
+        ? {
+            ...s,
+            projections: {
+              ...s.projections,
+              values: { ...s.projections?.values, title: next },
+            },
+          }
+        : s,
+    );
+    this.workspaces = groupByWorkspace(this.visibleSessions(this.sessions));
+    const cur = this.chats.get(sessionId);
+    if (cur) this.chats.set(sessionId, { ...cur, title: next });
+    this.emit();
+  }
+
   /** 用户视角的「删除对话」= 归档。会立刻从列表里移除 */
   async archiveSession(sessionId: string): Promise<void> {
     await this.ensureArchivedLoaded();
