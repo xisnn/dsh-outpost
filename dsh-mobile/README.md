@@ -34,7 +34,7 @@ src/
 
 ```bash
 npm install
-npm test          # 261 项单测 + typecheck
+npm test          # 285 项单测 + typecheck
 npm run android   # 需要 Android SDK + JDK 21
 ```
 
