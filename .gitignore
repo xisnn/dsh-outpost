@@ -99,3 +99,10 @@ _*.sql
 _qrcheck/
 _qc/
 _q2/
+
+# 桌面助手构建产物
+dsh-pocket-desktop/release/
+dsh-pocket-desktop/node_modules/
+dsh-pocket-desktop/_build.bat
+dsh-pocket-desktop/_e.log
+dsh-pocket-desktop/_e.err

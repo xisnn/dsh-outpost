@@ -1,0 +1,100 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8" />
+  <meta http-equiv="Content-Security-Policy" content="default-src 'self'; img-src 'self' data:; style-src 'self' 'unsafe-inline'; script-src 'self';" />
+  <title>DSH Pocket</title>
+  <link rel="stylesheet" href="style.css" />
+</head>
+<body>
+  <!-- 标题栏（无边框窗口，自己画） -->
+  <header class="titlebar">
+    <div class="brand">
+      <span class="logo">◈</span>
+      <span class="brand-name">DSH Pocket</span>
+    </div>
+    <div class="win-actions">
+      <button class="icon-btn" id="btnHide" title="隐藏到托盘">–</button>
+      <button class="icon-btn" id="btnQuit" title="退出">✕</button>
+    </div>
+  </header>
+
+  <main class="content">
+    <!-- 状态区 -->
+    <section class="card status-card">
+      <div class="status-row" id="rowDsh">
+        <span class="dot" data-state="unknown"></span>
+        <span class="status-label">DSH 服务</span>
+        <span class="status-value" id="dshValue">检测中…</span>
+      </div>
+      <div class="status-row" id="rowLan">
+        <span class="dot" data-state="unknown"></span>
+        <span class="status-label">局域网</span>
+        <span class="status-value" id="lanValue">—</span>
+      </div>
+      <div class="status-row" id="rowTunnel">
+        <span class="dot" data-state="unknown"></span>
+        <span class="status-label">隧道</span>
+        <span class="status-value" id="tunnelValue">—</span>
+      </div>
+    </section>
+
+    <!-- IP 变了横幅 -->
+    <div class="banner warn hidden" id="ipBanner">
+      <div class="banner-text">
+        <strong>网络地址变了</strong>
+        <span id="ipBannerDetail"></span>
+      </div>
+      <button class="btn small" id="btnRepair">一键修复</button>
+    </div>
+
+    <!-- 二维码区 -->
+    <section class="qr-area">
+      <div class="qr-col">
+        <div class="qr-box" id="qrLanBox"><div class="qr-placeholder">局域网</div></div>
+        <div class="qr-label">局域网扫码</div>
+        <button class="btn tiny ghost" data-copy="lan">复制链接</button>
+      </div>
+      <div class="qr-col">
+        <div class="qr-box" id="qrTunnelBox"><div class="qr-placeholder">隧道</div></div>
+        <div class="qr-label">隧道扫码</div>
+        <button class="btn tiny ghost" data-copy="tunnel">复制链接</button>
+      </div>
+    </section>
+
+    <!-- 操作 -->
+    <section class="actions">
+      <button class="btn primary" id="btnStartTunnel">启动隧道</button>
+      <button class="btn" id="btnStopTunnel">停止隧道</button>
+      <button class="btn ghost" id="btnRefresh">刷新</button>
+    </section>
+
+    <!-- 设备 -->
+    <section class="card devices-card">
+      <div class="section-head">
+        <span>已连接设备</span>
+        <span class="muted" id="deviceCount">—</span>
+      </div>
+      <ul class="device-list" id="deviceList">
+        <li class="muted">加载中…</li>
+      </ul>
+    </section>
+
+    <!-- 设置 -->
+    <section class="card settings-card">
+      <label class="switch-row">
+        <span>开机自启</span>
+        <input type="checkbox" id="chkAutoLaunch" />
+      </label>
+      <label class="switch-row">
+        <span>失焦时自动隐藏</span>
+        <input type="checkbox" id="chkAutoHide" checked />
+      </label>
+    </section>
+
+    <div class="hint" id="hint"></div>
+  </main>
+
+  <script src="app.js"></script>
+</body>
+</html>

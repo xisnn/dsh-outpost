@@ -1,0 +1,44 @@
+{
+  "$schema": "https://raw.githubusercontent.com/electron-userland/electron-builder/master/packages/app-builder-lib/scheme.json",
+  "appId": "com.dshpocket.desktop",
+  "productName": "DSH Pocket",
+  "directories": {
+    "output": "release",
+    "buildResources": "assets"
+  },
+  "files": [
+    "src/**/*",
+    "assets/tray.png",
+    "package.json"
+  ],
+  "extraResources": [
+    {
+      "from": "../dsh-plugin-connect/tunnel-service.mjs",
+      "to": "tunnel-service.mjs"
+    }
+  ],
+  "win": {
+    "target": [
+      {
+        "target": "nsis",
+        "arch": ["x64"]
+      },
+      {
+        "target": "portable",
+        "arch": ["x64"]
+      }
+    ],
+    "icon": "assets/tray.png",
+    "artifactName": "DSHPocket-Desktop-${version}-${arch}.${ext}"
+  },
+  "nsis": {
+    "oneClick": false,
+    "allowToChangeInstallationDirectory": true,
+    "createDesktopShortcut": true,
+    "createStartMenuShortcut": true,
+    "shortcutName": "DSH Pocket"
+  },
+  "portable": {
+    "artifactName": "DSHPocket-Desktop-${version}-portable.${ext}"
+  }
+}
