@@ -1,0 +1,422 @@
+/**
+ * 面板样式。
+ *
+ * 延续 DSH Pocket 的视觉：暖白底、细边框、圆角卡片、克制的强调色。
+ * 配色和手机 App 的 tokens 对齐（bg #faf9f7 / accent 蓝）。
+ */
+
+:root {
+  --bg: #faf9f7;
+  --bg-raised: #ffffff;
+  --bg-card: #f3f1ee;
+  --border: #e5e2dd;
+  --border-strong: #d5d1ca;
+  --text: #1f1d1a;
+  --text-secondary: #5a554e;
+  --text-tertiary: #8c867d;
+  --text-faint: #b0aaa1;
+  --accent: #2563eb;
+  --accent-wash: #eaf0fe;
+  --success: #16a34a;
+  --warn: #d97706;
+  --warn-wash: #fef3e2;
+  --danger: #dc2626;
+  --radius: 10px;
+}
+
+* {
+  box-sizing: border-box;
+}
+
+html,
+body {
+  margin: 0;
+  padding: 0;
+  height: 100%;
+  background: var(--bg);
+  color: var(--text);
+  font-family: -apple-system, "Segoe UI", "Microsoft YaHei", system-ui, sans-serif;
+  font-size: 13px;
+  user-select: none;
+  overflow: hidden;
+}
+
+/* ── 标题栏 ───────────────────────────────────── */
+
+.titlebar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  height: 38px;
+  padding: 0 8px 0 12px;
+  background: var(--bg-raised);
+  border-bottom: 1px solid var(--border);
+  -webkit-app-region: drag;
+}
+
+.brand {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+}
+
+.logo {
+  color: var(--accent);
+  font-size: 15px;
+}
+
+.brand-name {
+  font-size: 13px;
+  font-weight: 600;
+  letter-spacing: 0.2px;
+}
+
+.win-actions {
+  display: flex;
+  gap: 2px;
+  -webkit-app-region: no-drag;
+}
+
+.icon-btn {
+  width: 28px;
+  height: 26px;
+  border: none;
+  background: transparent;
+  color: var(--text-tertiary);
+  font-size: 13px;
+  border-radius: 6px;
+  cursor: pointer;
+  line-height: 1;
+}
+
+.icon-btn:hover {
+  background: var(--bg-card);
+  color: var(--text);
+}
+
+/* ── 内容区 ───────────────────────────────────── */
+
+.content {
+  padding: 12px;
+  height: calc(100% - 38px);
+  overflow-y: auto;
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+
+.content::-webkit-scrollbar {
+  width: 8px;
+}
+
+.content::-webkit-scrollbar-thumb {
+  background: var(--border-strong);
+  border-radius: 4px;
+}
+
+.card {
+  background: var(--bg-raised);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  padding: 10px 12px;
+}
+
+/* ── 状态行 ───────────────────────────────────── */
+
+.status-card {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.status-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.dot {
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  background: var(--text-faint);
+  flex-shrink: 0;
+}
+
+.dot[data-state="ok"] {
+  background: var(--success);
+  box-shadow: 0 0 0 3px rgba(22, 163, 74, 0.12);
+}
+
+.dot[data-state="bad"] {
+  background: var(--danger);
+  box-shadow: 0 0 0 3px rgba(220, 38, 38, 0.12);
+}
+
+.dot[data-state="idle"] {
+  background: var(--text-faint);
+}
+
+.dot[data-state="unknown"] {
+  background: var(--text-faint);
+  animation: pulse 1.4s ease-in-out infinite;
+}
+
+@keyframes pulse {
+  0%, 100% { opacity: 0.35; }
+  50% { opacity: 1; }
+}
+
+.status-label {
+  color: var(--text-secondary);
+  flex: 1;
+}
+
+.status-value {
+  color: var(--text);
+  font-variant-numeric: tabular-nums;
+  max-width: 230px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+/* ── 横幅 ─────────────────────────────────────── */
+
+.banner {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 9px 12px;
+  border-radius: var(--radius);
+  border: 1px solid;
+}
+
+.banner.warn {
+  background: var(--warn-wash);
+  border-color: #f5d9a8;
+}
+
+.banner-text {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  font-size: 12px;
+  color: var(--warn);
+}
+
+.banner-text strong {
+  font-size: 12.5px;
+}
+
+.hidden {
+  display: none !important;
+}
+
+/* ── 二维码 ───────────────────────────────────── */
+
+.qr-area {
+  display: flex;
+  gap: 10px;
+}
+
+.qr-col {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 6px;
+}
+
+.qr-box {
+  width: 100%;
+  aspect-ratio: 1;
+  background: #fff;
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 6px;
+  overflow: hidden;
+}
+
+.qr-box img {
+  width: 100%;
+  height: 100%;
+  object-fit: contain;
+  image-rendering: pixelated;
+}
+
+.qr-placeholder {
+  color: var(--text-faint);
+  font-size: 12px;
+}
+
+.qr-label {
+  font-size: 11.5px;
+  color: var(--text-tertiary);
+}
+
+/* ── 按钮 ─────────────────────────────────────── */
+
+.actions {
+  display: flex;
+  gap: 8px;
+}
+
+.btn {
+  flex: 1;
+  padding: 7px 12px;
+  border-radius: 8px;
+  border: 1px solid var(--border-strong);
+  background: var(--bg-raised);
+  color: var(--text);
+  font-size: 12.5px;
+  font-family: inherit;
+  cursor: pointer;
+  transition: background 0.12s, border-color 0.12s;
+}
+
+.btn:hover:not(:disabled) {
+  background: var(--bg-card);
+}
+
+.btn:disabled {
+  opacity: 0.45;
+  cursor: default;
+}
+
+.btn.primary {
+  background: var(--accent);
+  border-color: var(--accent);
+  color: #fff;
+}
+
+.btn.primary:hover:not(:disabled) {
+  background: #1d4ed8;
+}
+
+.btn.ghost {
+  background: transparent;
+}
+
+.btn.small {
+  flex: none;
+  padding: 5px 10px;
+  font-size: 11.5px;
+}
+
+.btn.tiny {
+  flex: none;
+  padding: 3px 8px;
+  font-size: 11px;
+  border-color: transparent;
+  color: var(--text-tertiary);
+}
+
+.btn.tiny:hover:not(:disabled) {
+  color: var(--accent);
+  background: var(--accent-wash);
+}
+
+/* ── 设备列表 ─────────────────────────────────── */
+
+.section-head {
+  display: flex;
+  justify-content: space-between;
+  font-size: 11.5px;
+  color: var(--text-tertiary);
+  margin-bottom: 6px;
+}
+
+.device-list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  max-height: 100px;
+  overflow-y: auto;
+}
+
+.device-list li {
+  display: flex;
+  justify-content: space-between;
+  font-size: 12px;
+  padding: 3px 0;
+}
+
+.dev-name {
+  color: var(--text);
+}
+
+.muted {
+  color: var(--text-faint);
+  font-size: 11.5px;
+}
+
+/* ── 设置 ─────────────────────────────────────── */
+
+.settings-card {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.switch-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  font-size: 12.5px;
+  color: var(--text-secondary);
+  cursor: pointer;
+}
+
+.switch-row input[type="checkbox"] {
+  appearance: none;
+  width: 34px;
+  height: 20px;
+  border-radius: 10px;
+  background: var(--border-strong);
+  position: relative;
+  cursor: pointer;
+  transition: background 0.16s;
+  flex-shrink: 0;
+}
+
+.switch-row input[type="checkbox"]::after {
+  content: "";
+  position: absolute;
+  top: 2px;
+  left: 2px;
+  width: 16px;
+  height: 16px;
+  border-radius: 50%;
+  background: #fff;
+  transition: transform 0.16s;
+}
+
+.switch-row input[type="checkbox"]:checked {
+  background: var(--accent);
+}
+
+.switch-row input[type="checkbox"]:checked::after {
+  transform: translateX(14px);
+}
+
+/* ── 提示 ─────────────────────────────────────── */
+
+.hint {
+  font-size: 11.5px;
+  color: var(--text-tertiary);
+  text-align: center;
+  min-height: 14px;
+  padding: 2px 0 6px;
+}
+
+.hint.error {
+  color: var(--danger);
+}

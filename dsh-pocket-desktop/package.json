@@ -1,0 +1,22 @@
+{
+  "name": "dsh-pocket-desktop",
+  "version": "0.1.0",
+  "description": "DSH Pocket 桌面托盘助手 —— 扫码连接手机、管理隧道",
+  "main": "src/main/main.js",
+  "private": true,
+  "scripts": {
+    "start": "electron .",
+    "dev": "electron . --dev",
+    "build": "electron-builder --win",
+    "build:dir": "electron-builder --win --dir"
+  },
+  "author": "dsh-pocket",
+  "license": "MIT",
+  "devDependencies": {
+    "electron": "^33.2.0",
+    "electron-builder": "^25.1.8"
+  },
+  "dependencies": {
+    "qrcode": "^1.5.4"
+  }
+}
