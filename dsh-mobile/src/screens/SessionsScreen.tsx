@@ -125,8 +125,29 @@ export function SessionsScreen({
     }
   };
 
-  const sessions = store.workspaces.find((w) => w.path === workspacePath)?.sessions ?? [];
+  const ws = store.workspaces.find((w) => w.path === workspacePath);
+  const sessions = ws?.sessions ?? [];
   const shown = useMemo(() => filterSessions(sessions, query), [sessions, query]);
+
+  /**
+   * 工作区消失时自动返回。
+   *
+   * 触发场景：用户停在某个临时工作区（Temp 下的 dsh-prop-xxx）的会话列表，
+   * 此时 store 刷新、临时工作区被过滤掉 → 这个 path 再也找不到。
+   * 不自动退出的话，用户会看到一个「这个工作区还没有会话」的空页面，
+   * 而且点「新建」还会往一个已经不存在的目录里建会话。
+   *
+   * 给一点延迟：加载中（workspaces 还是空）时不要误退。
+   */
+  useEffect(() => {
+    if (ws) return;
+    // workspaces 还没加载出来（首次进页面），不退
+    if (store.workspaces.length === 0) return;
+    const timer = setTimeout(() => {
+      if (nav.canGoBack) nav.pop();
+    }, 1200);
+    return () => clearTimeout(timer);
+  }, [ws, store.workspaces.length, nav]);
 
   return (
     <View style={styles.root}>
