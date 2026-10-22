@@ -11,8 +11,18 @@
  * 所以要去重，只渲染一个卡片。
  */
 
-/** markdown 图片：![alt](path) */
-const IMG_RE = /!\[([^\]]*)\]\(([^)\n]+)\)/g;
+/**
+ * markdown 图片：`![alt](path)` 或 `![alt](<path>)`
+ *
+ * ⚠️ 必须同时支持**尖括号包裹的路径**。踩过的坑：
+ * 我们在 README 里给 AI 的示例是 `![Description](<path/to/image.png>)`
+ * （带尖括号，因为路径里可能有空格），结果模型照着发的时候也带上尖括号。
+ * 原来的正则只认不带尖括号的，于是整段退化成纯文本，
+ * 界面上显示成 `!标题` 加一个链接 —— 图片根本不出来。
+ *
+ * 捕获组 2 仍然只取路径本身（自动去掉尖括号），下游不用改。
+ */
+const IMG_RE = /!\[([^\]]*)\]\((?:<([^>\n]+)>|([^)\n]+))\)/g;
 /** 行内代码里的 Windows 绝对路径：`D:\xxx` */
 const CODE_PATH_RE = /`([A-Za-z]:\\[^`\n]+)`/g;
 
@@ -54,7 +64,9 @@ export function splitFileRefs(text: string): TextSegment[] {
 
   // 1. markdown 图片（优先级最高，带 alt）
   for (const m of text.matchAll(IMG_RE)) {
-    const path = (m[2] ?? '').trim();
+    // 两个捕获组：m[2] 是尖括号里的路径，m[3] 是普通路径。
+    // 取到哪个用哪个（正则保证恰好有一个非空）。
+    const path = (m[2] ?? m[3] ?? '').trim();
     if (!isLocalPath(path)) continue;
     const start = m.index ?? 0;
     marks.push({

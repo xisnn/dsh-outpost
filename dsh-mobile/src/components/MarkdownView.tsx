@@ -156,6 +156,10 @@ function inlineText(
             {p.text}
           </Text>
         );
+      case 'image':
+        // 图片语法但路径不是本地文件（外链 / 解析不了）。
+        // 不显示感叹号，只显示 alt 文字，避免出现「!标题」这种残片。
+        return <Text key={i}>{p.text}</Text>;
       default:
         return <Text key={i}>{p.text}</Text>;
     }

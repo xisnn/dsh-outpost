@@ -19,7 +19,9 @@ export type Inline =
   | { kind: 'bold'; text: string }
   | { kind: 'italic'; text: string }
   | { kind: 'code'; text: string }
-  | { kind: 'link'; text: string; href: string };
+  | { kind: 'link'; text: string; href: string }
+  /** markdown 图片语法 `![alt](href)` 但路径不是本地文件（比如外链） */
+  | { kind: 'image'; text: string; href: string };
 
 /** 把 markdown 切成块 */
 export function parseMarkdown(src: string): Block[] {
@@ -183,12 +185,17 @@ export function parseInline(src: string): Inline[] {
       if (close > i && src[close + 1] === '(') {
         const end = src.indexOf(')', close + 2);
         if (end > close) {
+          // 先判断是不是图片语法（`!` 紧跟在 `[` 前面）。
+          // 必须在 flush 之前判断并把那个 `!` 从缓冲里剔掉，
+          // 否则 `!` 会单独变成一个文本片段，界面上就是「!标题」。
+          const isImage = i > 0 && src[i - 1] === '!';
+          if (isImage) text = text.slice(0, -1);
           flush();
           out.push({
-            kind: 'link',
+            kind: isImage ? 'image' : 'link',
             text: src.slice(i + 1, close),
             href: src.slice(close + 2, end),
-          });
+          } as Inline);
           i = end + 1;
           continue;
         }

@@ -47,5 +47,42 @@ check('相对路径正确', rel[0]?.path === 'cover_out\/封面.png', String(rel
 check('png 是图片', isImagePath('a\\b.png') === true);
 check('pdf 不是图片', isImagePath('a\\b.pdf') === false);
 
+// ── 尖括号包裹的路径（v0.8.1 回归）──────────────────────────────
+//
+// 踩过的坑：我们在 README 里给 AI 的示例是
+//   ![Description](<path/to/image.png>)
+// （带尖括号，因为路径可能含空格），模型照做时也带上了尖括号，
+// 而原来的正则只认不带尖括号的写法 → 整段退化成纯文本，
+// 手机上显示成「!标题」，图片根本不出来。
+
+const bracket = splitFileRefs('![山脚有间客栈](<D:\\img\\山脚客栈：雾岭茶香.png>)');
+const bracketFiles = bracket.filter((s) => s.kind === 'file');
+check('尖括号路径能识别', bracketFiles.length === 1, String(bracketFiles.length));
+check(
+  '尖括号里的路径被剥掉尖括号',
+  bracketFiles[0]?.path === 'D:\\img\\山脚客栈：雾岭茶香.png',
+  String(bracketFiles[0]?.path),
+);
+check('尖括号图片仍标记为 image', bracketFiles[0]?.image === true);
+check('尖括号图片保留 alt', bracketFiles[0]?.alt === '山脚有间客栈');
+
+const bracketSpace = splitFileRefs('![封面](<E:\\my files\\a b.png>)').filter(
+  (s) => s.kind === 'file',
+);
+check(
+  '尖括号能处理带空格的路径',
+  bracketSpace.length === 1 && bracketSpace[0]?.path === 'E:\\my files\\a b.png',
+  String(bracketSpace[0]?.path),
+);
+
+check(
+  '尖括号图片不留 markdown 残渣',
+  !bracket.some((s) => s.kind === 'text' && (s.text ?? '').includes('![')),
+);
+
+// 外链图片不该被当本地文件
+const httpImg = splitFileRefs('![alt](https://example.com/a.png)');
+check('http 图片不当本地文件', !httpImg.some((s) => s.kind === 'file'));
+
 console.log(`\n结果：${pass} 通过，${fail} 失败`);
 process.exit(fail === 0 ? 0 : 1);
