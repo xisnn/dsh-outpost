@@ -6,6 +6,7 @@
  */
 
 import type { DshConnection, StreamHandle } from '../transport';
+import { isTempWorkspace } from '../workspaceFilter';
 import type {
   EventRecord,
   FollowSnapshot,
@@ -194,6 +195,10 @@ export function groupByWorkspace(sessions: SessionSummary[]) {
     // 子 agent 会话不计入工作区主列表
     if (s.origin === 'subagent') continue;
     const key = normalizeCwd(s.cwd ?? '');
+    // 过滤 DSH 自己的临时工作区（Temp 下的 dsh-prop-xxx 之类）。
+    // 实测一台机器 173 个会话里有 46 个是这种，真实项目只剩 3 个，
+    // 不滤掉列表根本没法看。判定规则见 core/workspaceFilter.ts。
+    if (isTempWorkspace(key)) continue;
     const list = map.get(key) ?? [];
     list.push(s);
     map.set(key, list);
