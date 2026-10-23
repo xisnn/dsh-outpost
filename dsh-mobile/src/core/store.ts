@@ -18,6 +18,8 @@ import { DirectoryPickerApi } from '../core/rpc/directory';
 import type { WorkspaceCustom } from '../core/workspace-custom';
 import { foldEvents, toChatItems, isInjectedMessage, stripModeTag, type ChatItem, type Turn } from '../core/fold';
 import { notifyDone } from '../core/notify';
+import { buildCompatReport, classifyError } from '../core/protocol';
+import { isRetryable, RpcError } from '../core/rpc-error';
 import type { NoticeItem, NoticeKind } from '../components/NoticeHost';
 import {
   ApprovalGateway,
@@ -107,6 +109,8 @@ export class Store {
 
   connection: ConnectionState = 'idle';
   connectionError?: string;
+  /** 给用户看的友好提示（分类后的，含下一步建议） */
+  connectionHint?: string;
 
   /** 账户余额（null = 未加载） */
   balance: BalanceResult | null = null;
@@ -730,14 +734,78 @@ export class Store {
       await this.api.list();
       this.connection = 'connected';
       this.connectionError = undefined;
+      this.connectionHint = undefined;
       this.emit();
+      // 连上之后顺手探一下版本兼容性（只读，不产生副作用）。
+      // 失败不影响连接状态 —— 探测本身不该让 App 显示「连不上」。
+      void this.checkCompatibility().catch(() => undefined);
       return true;
     } catch (e) {
       this.connection = 'error';
       this.connectionError = e instanceof Error ? e.message : String(e);
+      // 原始 message 是给日志看的（比如 `session/list: gateway/not-found`），
+      // 用户需要的是「我该做什么」—— 分类后给出人话提示。
+      if (e instanceof RpcError) {
+        this.connectionHint = `${e.userTitle}\n${e.userHint}`;
+      } else {
+        const info = classifyError(e, 'session/list');
+        this.connectionHint = `${info.title}\n${info.hint}`;
+      }
       this.emit();
       return false;
     }
+  }
+
+  // ── 协议兼容性自检 ────────────────────────────────────────────
+  //
+  // 连上之后顺便探一下「我需要的能力在不在」。
+  //
+  // 为什么需要：如果 DSH 升级后删了 / 改了某个接口，用户不会立刻知道 ——
+  // 他要等到点进那个功能才看到报错，而且报错是 gateway/not-found。
+  // 主动探测一次，能在界面上提前给出「哪些功能在这版 DSH 上不可用」。
+
+  /** 兼容性报告（连上后自动填充；空表示还没探过或不兼容但没填） */
+  compatSummary = '';
+  /** 哪些必需接口不可用 */
+  compatMissing: string[] = [];
+  /** 是否已经探过 */
+  compatChecked = false;
+
+  /**
+   * 探测关键接口可用性。
+   *
+   * 用最轻的调用：`session/list` 已经调过了，剩下的用
+   * `workspace/*` 的只读版本（不产生副作用）。
+   *
+   * 只探「只读」接口 —— 探测时**绝不能**真的建会话或改状态。
+   */
+  async checkCompatibility(): Promise<void> {
+    if (this.compatChecked) return;
+    this.compatChecked = true;
+
+    const probes: Array<{ endpoint: string; run: () => Promise<unknown> }> = [
+      { endpoint: 'session/list', run: () => this.api.list() },
+      // 这几个只读接口能反映版本差异
+      { endpoint: 'session/modelCatalog', run: () => this.models.catalog() },
+      { endpoint: 'account/getState', run: () => this.account.getState() },
+    ];
+
+    const results: Record<string, boolean> = {};
+    for (const p of probes) {
+      try {
+        await p.run();
+        results[p.endpoint] = true;
+      } catch (e) {
+        results[p.endpoint] = false;
+        // 网络问题不算「接口缺失」—— 那是另一类问题，不能误报版本不兼容
+        if (!isRetryable(e)) continue;
+      }
+    }
+
+    const report = buildCompatReport(results);
+    this.compatMissing = report.missing;
+    this.compatSummary = report.summary;
+    this.emit();
   }
 
   // ── 工作区 ────────────────────────────────────────────────────────

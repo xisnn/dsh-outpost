@@ -25,6 +25,7 @@ import { radius, space, type, weight } from '../design/tokens';
 import { Dot, Pill } from '../components/ui';
 import { ConfirmSheet } from '../components/ConfirmSheet';
 import { RenameSheet } from '../components/RenameSheet';
+import { CompatBanner } from '../components/CompatBanner';
 import { filterSessions } from '../core/sessionSearch';
 
 export { filterSessions } from '../core/sessionSearch';
@@ -231,10 +232,15 @@ export function SessionsScreen({
         }
         ListHeaderComponent={
           query.trim() ? null : (
-            <View style={styles.pathBox}>
-              <Text style={styles.pathText} numberOfLines={2}>
-                {workspacePath || workspaceName}
-              </Text>
+            <View>
+              {/* DSH 版本不匹配时贴一条提示：哪些功能在当前 DSH 上不可用。
+                  比「点了才发现没反应」好得多 —— 用户能提前知道。 */}
+              <CompatBanner summary={store.compatSummary} missing={store.compatMissing} />
+              <View style={styles.pathBox}>
+                <Text style={styles.pathText} numberOfLines={2}>
+                  {workspacePath || workspaceName}
+                </Text>
+              </View>
             </View>
           )
         }

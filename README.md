@@ -312,7 +312,7 @@ https://xxx.trycloudflare ─┘
 ```bash
 cd dsh-mobile
 npm install
-npm test                  # 389 项静态检查 + 单测 + typecheck
+npm test                  # 409 项静态检查 + 单测 + typecheck
 npm run test:integration  # 55 项集成测试（本地起模拟 DSH，不需要真服务）
 npm run android           # 需要 Android SDK + JDK 21
 ```
@@ -321,7 +321,7 @@ npm run android           # 需要 Android SDK + JDK 21
 
 | 层 | 数量 | 依赖 | 测什么 |
 |---|---|---|---|
-| **静态检查 + 单测** | 389 | 无 | 纯函数行为、配置正确性、危险写法 |
+| **静态检查 + 单测** | 409 | 无 | 纯函数行为、配置正确性、危险写法 |
 | **协议集成** | 39 | 本地端口 | 手搓请求，验证协议形状 |
 | **产品集成** | 16 | 本地端口 | **import 真实产品代码**，验证它能不能正确对接 |
 | **端到端** | 手工 | 真实 DSH | 完整链路 |
@@ -335,7 +335,7 @@ npm run android           # 需要 Android SDK + JDK 21
 > 见 [docs/known-issues.md](docs/known-issues.md)。
 
 测试体系说明见 [dsh-mobile/tests/README.md](dsh-mobile/tests/README.md)，
-已知问题见 [docs/known-issues.md](docs/known-issues.md)。
+已知问题见 [docs/known-issues.md](docs/known-issues.md)。`n协议依赖与兼容性见 [docs/protocol-compat.md](docs/protocol-compat.md)。
 
 - 应用代码在 [`dsh-mobile/`](dsh-mobile/)，架构与实现细节见 [dsh-mobile/README.md](dsh-mobile/README.md)
 - DSH 内部协议（RPC 形状、投影字段、踩过的坑）见 [docs/protocol-notes.md](docs/protocol-notes.md)
