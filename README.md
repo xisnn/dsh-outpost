@@ -343,11 +343,19 @@ https://xxx.trycloudflare ─┘
 ## 开发
 
 ```bash
+# 手机端
 cd dsh-mobile
 npm install
 npm test                  # 420 项静态检查 + 单测 + typecheck
 npm run test:integration  # 55 项集成测试（本地起模拟 DSH，不需要真服务）
 npm run android           # 需要 Android SDK + JDK 21
+
+# 桌面端
+cd dsh-outpost-desktop
+npm install
+npm test                  # 45 项（启动健壮性、打包配置、安全边界）
+npm start                 # 开发模式直接跑
+npm run pack              # 打包成 zip
 ```
 
 ### 测试分四层
@@ -358,6 +366,9 @@ npm run android           # 需要 Android SDK + JDK 21
 | **协议集成** | 39 | 本地端口 | 手搓请求，验证协议形状 |
 | **产品集成** | 16 | 本地端口 | **import 真实产品代码**，验证它能不能正确对接 |
 | **端到端** | 手工 | 真实 DSH | 完整链路 |
+
+桌面端另有 **45 项**，重点守「启动健壮性」—— 每一轮「双击没反应」
+的修复都固化成了一条测试（崩溃日志、窗口显示、单实例、完整性修复）。
 
 集成测试用一个**模拟 DSH 服务端**（`tests/support/fake-dsh.mjs`）：
 真 HTTP + 手写 RFC 6455 WebSocket，验证配对、重连、审批、长会话分页。
@@ -402,13 +413,17 @@ npm run android           # 需要 Android SDK + JDK 21
 
 ## 版本
 
-当前 **v0.15.3**。完整变更见 [Releases](../../releases)。
+当前 **v0.15.8**。完整变更见 [Releases](../../releases)。
 
 最近的几个版本：
 
 | 版本 | 内容 |
 |---|---|
-| **v0.15.3** | 桌面助手重新打包、统一命名、SmartScreen 说明 |
+| **v0.15.8** | **修复桌面助手无法启动** —— 根因是打包目录继承了 Windows「低完整性」标记 |
+| v0.15.7 | 桌面助手 bat 脚本改纯 ASCII（修 GBK 乱码）+ 自动清除 `ELECTRON_RUN_AS_NODE` |
+| v0.15.6 | 桌面助手启动诊断：崩溃日志多路径兜底、诊断脚本 |
+| v0.15.5 | 桌面助手包体积减半（260 → 112 MB）+ 分卷下载 |
+| v0.15.3 | 桌面助手重新打包、统一命名、SmartScreen 说明 |
 | v0.15.2 | 修复 CI：Node 20 不支持直接 import `.ts` |
 | v0.15.1 | 修复 CI：Node 20 没有全局 `WebSocket` |
 | v0.15.0 | **协议兼容性**：依赖清单、错误分类、能力探测 |
