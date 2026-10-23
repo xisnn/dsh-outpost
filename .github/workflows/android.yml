@@ -76,9 +76,18 @@ jobs:
         working-directory: dsh-mobile
         run: npm ci
 
-      - name: Unit tests
+      - name: Unit tests (static checks + pure functions)
         working-directory: dsh-mobile
         run: npm test
+
+      # 集成测试：起一个本地模拟 DSH（HTTP + WebSocket），跑真实协议行为。
+      # 不需要真实 DSH 服务，也不需要网络，所以能进 CI。
+      #
+      # 覆盖：配对换 cookie、WS 建连与重连、审批帧收发、长会话分页。
+      # 这些是「读源码断言」测不出来的 —— 必须真的发请求、真的握手。
+      - name: Integration tests (fake DSH server)
+        working-directory: dsh-mobile
+        run: npm run test:integration
 
       # 用 tag 推导版本号，写进 package.json 和 Gradle，
       # 保证「安装包里的版本」和「应用内更新检查的基准」是同一个值。
