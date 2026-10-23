@@ -1,6 +1,6 @@
 {
   "name": "dsh-outpost-desktop",
-  "version": "0.15.7",
+  "version": "0.15.8",
   "description": "DSH Outpost 桌面托盘助手 —— 扫码连接手机、管理隧道",
   "main": "src/main/main.js",
   "private": true,
@@ -10,12 +10,13 @@
     "pack": "node pack.js",
     "build:dir": "electron-builder --win --dir",
     "build:nsis": "electron-builder --win",
-    "test": "tsx tests/main-logic-spec.mjs"
+    "test": "node tests/main-logic-spec.mjs",
+    "postinstall": "install-electron && powershell.exe -NoProfile -ExecutionPolicy Bypass -File repair-startup.ps1 -Path node_modules/electron/dist/electron.exe"
   },
   "author": "dsh-outpost",
   "license": "MIT",
   "devDependencies": {
-    "electron": "^33.2.0",
+    "electron": "43.7.9",
     "electron-builder": "^25.1.8"
   },
   "dependencies": {

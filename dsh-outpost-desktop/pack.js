@@ -60,6 +60,19 @@ if (!fs.existsSync(path.join(UNPACKED, 'DSH Outpost.exe'))) {
   process.exit(1);
 }
 
+// Normalize only the built executable before archiving it. A Low integrity
+// label inherited from the output folder prevents Electron from starting.
+try {
+  execFileSync('powershell.exe', [
+    '-NoProfile', '-ExecutionPolicy', 'Bypass',
+    '-File', path.join(ROOT, 'repair-startup.ps1'),
+    '-Path', path.join(UNPACKED, 'DSH Outpost.exe'),
+  ], { cwd: ROOT, stdio: 'inherit' });
+} catch (e) {
+  console.error('[pack] Executable startup repair failed:', e?.message || e);
+  process.exit(1);
+}
+
 // ── 2. 自己打 zip ────────────────────────────────────────────────
 //
 // 不用 Compress-Archive：它在某些 PowerShell 版本上对大目录会超时/丢文件。

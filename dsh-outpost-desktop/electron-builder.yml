@@ -21,6 +21,10 @@
     {
       "from": "diagnose.bat",
       "to": "DIAGNOSE.bat"
+    },
+    {
+      "from": "repair-startup.ps1",
+      "to": "REPAIR-STARTUP.ps1"
     }
   ],
   "extraResources": [
@@ -33,7 +37,9 @@
     "target": [
       {
         "target": "portable",
-        "arch": ["x64"]
+        "arch": [
+          "x64"
+        ]
       }
     ],
     "icon": "assets/icon.png",

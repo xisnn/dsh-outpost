@@ -58,6 +58,16 @@ if defined ELECTRON_RUN_AS_NODE (
 )
 set "ELECTRON_RUN_AS_NODE="
 
+if exist "%WORKDIR%\REPAIR-STARTUP.ps1" (
+    powershell.exe -NoProfile -ExecutionPolicy Bypass -File "%WORKDIR%\REPAIR-STARTUP.ps1" -Path "%EXE%"
+    if errorlevel 1 (
+        echo [X] Could not repair executable startup permissions.
+        echo     See the error above. The application was not started.
+        pause
+        exit /b 1
+    )
+)
+
 tasklist /FI "IMAGENAME eq DSH Outpost.exe" 2>nul | find /I "DSH Outpost.exe" >nul
 if not errorlevel 1 (
     echo [WARN] An instance is already running.
