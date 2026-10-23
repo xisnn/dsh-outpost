@@ -28,6 +28,107 @@ const fs = require('node:fs');
 const os = require('node:os');
 const { spawn } = require('node:child_process');
 
+// ═══ 最早期自检：必须在用 app 之前 ═══════════════════════════════════
+//
+// ## 这个检查解决什么
+//
+// 如果环境里有 `ELECTRON_RUN_AS_NODE=1`，Electron 会以「纯 Node 模式」
+// 启动：`require('electron')` 返回的不是 API 对象，而是 **exe 的路径字符串**。
+//
+// 于是下面这行会炸：
+//
+//     app.requestSingleInstanceLock()
+//     // TypeError: Cannot read properties of undefined (reading '...')
+//
+// 崩溃发生在**模块加载阶段**，早于任何 app.whenReady、早于任何日志代码。
+//
+// 用户看到的症状：
+//   · 双击 exe，一闪就没
+//   · 没有窗口
+//   · 没有托盘图标
+//   · **崩溃日志是空的**（因为写日志的代码还没执行到）
+//
+// 这个变量通常来自：
+//   · 某些 IDE / 终端（VS Code 的集成终端会设它）
+//   · 之前跑过 `electron --version` 之类命令
+//   · 其他人的脚本污染了系统环境
+//
+// ## 为什么要在这里硬处理
+//
+// 打包后的程序没有控制台，用户拿不到任何提示。与其让他对着
+// 「一闪就没」猜，不如直接把问题说清楚。
+if (typeof app === 'undefined' || app === null || typeof app !== 'object') {
+  // 注意：此时 dialog 也不可用（同样来自 electron 模块），所以只能：
+  //   1. 尽量写一份日志（用 node:fs，这个还能用）
+  //   2. 用 Windows 的 msg 命令弹个提示（如果有）
+  //
+  // ⚠️ 写日志要**多路径兜底**：状态目录可能因为权限写不进去
+  // （实测过 EPERM —— 某些环境下 %LOCALAPPDATA% 会被 ACL 限制）。
+  // 之前只写一个位置，失败后被 catch 吞掉，用户什么都看不到。
+  const logCandidates = [];
+  try {
+    const base = process.env.LOCALAPPDATA || os.homedir();
+    logCandidates.push(path.join(base, 'dsh-pocket', 'logs', 'desktop-crash.log'));
+  } catch {
+    /* ignore */
+  }
+  try {
+    logCandidates.push(path.join(os.tmpdir(), 'dsh-outpost-crash.log'));
+  } catch {
+    /* ignore */
+  }
+  try {
+    logCandidates.push(path.join(path.dirname(process.execPath), 'dsh-outpost-crash.log'));
+  } catch {
+    /* ignore */
+  }
+
+  const msgText =
+    `\n===== ${new Date().toISOString()} [启动失败：纯 Node 模式] =====\n` +
+    `ELECTRON_RUN_AS_NODE=${process.env.ELECTRON_RUN_AS_NODE ?? '(未设置)'}\n` +
+    `require('electron') 返回了 ${typeof app}，不是 API 对象。\n` +
+    `原因：环境变量 ELECTRON_RUN_AS_NODE 被设置了，Electron 以纯 Node 模式启动。\n` +
+    `解决：删掉这个环境变量，或者用「启动 DSH Outpost.bat」启动。\n`;
+
+  let logPath = '';
+  for (const candidate of logCandidates) {
+    try {
+      fs.mkdirSync(path.dirname(candidate), { recursive: true });
+      fs.appendFileSync(candidate, msgText, 'utf8');
+      logPath = candidate;
+      break;
+    } catch {
+      // 这个位置写不了，试下一个
+    }
+  }
+
+  // 用 msg.exe 弹窗（Windows 自带，不依赖 Electron）
+  try {
+    const { execFileSync } = require('node:child_process');
+    const lines = [
+      'DSH Outpost 无法启动。',
+      '',
+      '原因：环境变量 ELECTRON_RUN_AS_NODE 被设置了，',
+      '导致 Electron 以纯 Node 模式运行。',
+      '',
+      '解决方法（任选）：',
+      '1. 用目录里的「启动 DSH Outpost.bat」启动',
+      '2. 删掉系统环境变量 ELECTRON_RUN_AS_NODE，重新登录',
+    ];
+    if (logPath) lines.push('', `日志：${logPath}`);
+    execFileSync('msg', ['*', '/TIME:60', lines.join('\r\n')], {
+      stdio: 'ignore',
+      windowsHide: true,
+      timeout: 5000,
+    });
+  } catch {
+    /* 弹不出来也没关系，日志（如果能写）已经记录了 */
+  }
+
+  process.exit(1);
+}
+// ═══ 自检结束，下面可以安全使用 app ═════════════════════════════════
+
 // ── 路径探测 ──────────────────────────────────────────────────────
 
 /**
