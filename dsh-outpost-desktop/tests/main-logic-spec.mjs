@@ -235,6 +235,92 @@ check('渲染层三个文件齐全', () => {
   return missing.length === 0 ? true : `缺 ${missing.join(', ')}`;
 });
 
+// ── 启动健壮性（用户反馈「打开后一闪就没、托盘也没有」）──────────
+//
+// 这组测试守的是：程序启动失败时，用户至少能得到一条线索，
+// 而不是「什么都没有」。
+//
+// 打包后的 Electron 没有控制台，异常信息完全看不到 —— 所以
+// 任何启动路径上的失败都必须落盘。
+
+check('有崩溃日志机制', () => {
+  return MAIN.includes('writeCrashLog') ? true : '没有崩溃日志，启动失败时用户无从排查';
+});
+
+check('崩溃日志写到状态目录（不是临时目录）', () => {
+  const i = MAIN.indexOf('function writeCrashLog');
+  if (i < 0) return '找不到 writeCrashLog';
+  const body = MAIN.slice(i, i + 600);
+  if (!body.includes('STATE_DIR')) return '日志没写到状态目录，用户找不到';
+  if (!body.includes('desktop-crash.log')) return '日志文件名不明确';
+  return true;
+});
+
+check('捕获 uncaughtException 和 unhandledRejection', () => {
+  const hasUncaught = MAIN.includes("process.on('uncaughtException'");
+  const hasRejection = MAIN.includes("process.on('unhandledRejection'");
+  return hasUncaught && hasRejection ? true : '没有全局异常兜底';
+});
+
+check('createWindow 和 createTray 各自 try（一个失败不拖累另一个）', () => {
+  const i = MAIN.indexOf('app.whenReady()');
+  if (i < 0) return '找不到 whenReady';
+  const body = MAIN.slice(i, i + 2200);
+  const hasWindowTry = /try\s*\{\s*createWindow\(\)/.test(body);
+  const hasTrayTry = /try\s*\{\s*createTray\(\)/.test(body);
+  if (!hasWindowTry) return 'createWindow 没有单独 try，抛错会跳过托盘创建';
+  if (!hasTrayTry) return 'createTray 没有单独 try，抛错会让整个启动流程中断';
+  return true;
+});
+
+check('启动时主动显示窗口（双击 exe 必须有反应）', () => {
+  const i = MAIN.indexOf('app.whenReady()');
+  const body = MAIN.slice(i, i + 2600);
+  // 必须有 win.show() 或 showWindow()，否则用户双击后什么都看不到
+  const showsOnStart = /win\?\.show\(\)|win\.show\(\)|showWindow\(\)/.test(body);
+  return showsOnStart
+    ? true
+    : '启动时没显示窗口 —— 用户双击 exe 会以为「一闪就没了」';
+});
+
+check('托盘建不起来时至少显示窗口', () => {
+  const i = MAIN.indexOf('app.whenReady()');
+  const body = MAIN.slice(i, i + 2200);
+  const trayCatch = /createTray\(\)[\s\S]{0,400}catch[\s\S]{0,300}win\?\.show\(\)/.test(body);
+  return trayCatch ? true : '托盘失败时窗口也不显示，用户什么都看不到';
+});
+
+check('单实例拿不到锁时会记日志', () => {
+  const i = MAIN.indexOf('requestSingleInstanceLock');
+  if (i < 0) return '找不到单实例锁';
+  const body = MAIN.slice(i, i + 800);
+  // 拿不到锁直接 quit 而不记日志 → 用户看到「一闪就没」却不知道为什么
+  return body.includes('writeCrashLog') ? true : '拿不到锁时静默退出，无从排查';
+});
+
+check('writeCrashLog 定义在首次调用之前', () => {
+  const defIdx = MAIN.indexOf('function writeCrashLog');
+  const firstCallIdx = MAIN.indexOf('writeCrashLog(');
+  if (defIdx < 0) return '找不到定义';
+  // 第一次调用不能早于定义（否则 TDZ 报错）
+  return defIdx <= firstCallIdx ? true : 'writeCrashLog 用在了定义之前（会 TDZ 报错）';
+});
+
+check('渲染进程崩溃会被记录', () => {
+  const hasFailLoad = MAIN.includes('did-fail-load');
+  const hasGone = MAIN.includes('render-process-gone');
+  return hasFailLoad && hasGone ? true : '页面加载失败/渲染进程崩溃时没有记录，白屏无从排查';
+});
+
+check('窗口关闭是隐藏到托盘（不是退出）', () => {
+  const i = MAIN.indexOf("win.on('close'");
+  if (i < 0) return '找不到 close 处理';
+  const body = MAIN.slice(i, i + 300);
+  return /preventDefault\(\)/.test(body) && /hide\(\)/.test(body)
+    ? true
+    : '关闭窗口会直接退出，托盘程序不该这样';
+});
+
 console.log('');
 console.log(`结果：${pass} 通过，${fail} 失败`);
 process.exit(fail === 0 ? 0 : 1);

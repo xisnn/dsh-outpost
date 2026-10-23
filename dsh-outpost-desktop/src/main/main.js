@@ -92,15 +92,54 @@ const STATE_DIR =
 const SERVICE_PORT = Number(process.env.DSH_TUNNEL_PORT || 3199);
 const SERVICE_BASE = `http://127.0.0.1:${SERVICE_PORT}`;
 
+function writeCrashLog(kind, err) {
+  try {
+    const dir = path.join(STATE_DIR, 'logs');
+    if (!fs.existsSync(dir)) fs.mkdirSync(dir, { recursive: true });
+    const file = path.join(dir, 'desktop-crash.log');
+    const when = new Date().toISOString();
+    const detail =
+      err instanceof Error ? `${err.stack ?? err.message}` : String(err);
+    fs.appendFileSync(
+      file,
+      `\n===== ${when} [${kind}] =====\n${detail}\n`,
+      'utf8',
+    );
+    return file;
+  } catch {
+    return null;
+  }
+}
+
 // ── 单实例 ────────────────────────────────────────────────────────
 //
-// 托盘程序重复启动会出两个图标，很不专业。第二个实例直接唤起第一个。
-
+// 托盘程序重复启动会出两个图标。第二个实例应该唤起第一个，而不是
+// 自己再开一份。
+//
+// ⚠️ 这里踩过一个坑：如果直接
+//
+//     if (!gotLock) { app.quit(); return; }
+//
+// 而恰好有一个**残留进程**（上次崩溃没退干净、或托盘退出失败）还持有锁，
+// 那用户双击 exe 的效果就是「窗口一闪就没了，托盘也没有」——
+// 因为新进程立刻退出，而老进程可能是个没有界面的僵尸。
+//
+// 所以现在：
+//   1. 拿不到锁 → 通知老实例显示窗口（second-instance 事件）
+//   2. 同时**记一条日志**，方便排查「为什么启动后什么都没出现」
+//   3. 不直接 quit —— 让 Electron 自己处理完再退出
 const gotLock = app.requestSingleInstanceLock();
 if (!gotLock) {
+  writeCrashLog(
+    'single-instance',
+    '已有实例在运行，本进程将退出。' +
+      '如果看不到窗口或托盘，说明那个实例可能卡住了 —— ' +
+      '请在任务管理器里结束所有 "DSH Outpost" 进程后重试。',
+  );
   app.quit();
 } else {
   app.on('second-instance', () => {
+    // 第二次启动：把已有实例的窗口叫出来
     showWindow();
   });
 }
@@ -133,6 +172,15 @@ function createWindow() {
   });
 
   win.loadFile(path.join(__dirname, '..', 'renderer', 'index.html'));
+
+  // 页面加载失败也要能看到 —— 白屏比报错更让人困惑。
+  win.webContents.on('did-fail-load', (_e, code, desc, url) => {
+    writeCrashLog('did-fail-load', `${code} ${desc}\nurl=${url}`);
+  });
+
+  win.webContents.on('render-process-gone', (_e, details) => {
+    writeCrashLog('render-process-gone', JSON.stringify(details));
+  });
 
   // 点关闭 → 隐藏到托盘
   win.on('close', (e) => {
@@ -476,11 +524,85 @@ function notify(title, body) {
 
 // ── 生命周期 ──────────────────────────────────────────────────────
 
+
+/** 全局兜底：任何未捕获异常都记下来，并尽量弹个对话框 */
+process.on('uncaughtException', (err) => {
+  const file = writeCrashLog('uncaughtException', err);
+  try {
+    const { dialog } = require('electron');
+    dialog.showErrorBox(
+      'DSH Outpost 出错了',
+      `${err instanceof Error ? err.message : String(err)}\n\n` +
+        (file ? `详细信息已写入：\n${file}` : ''),
+    );
+  } catch {
+    /* 对话框都弹不出来就算了 */
+  }
+});
+
+process.on('unhandledRejection', (reason) => {
+  writeCrashLog('unhandledRejection', reason);
+});
+
 app.whenReady().then(async () => {
-  createWindow();
-  createTray();
+  // 每一步单独 try：托盘失败不该导致窗口也不显示，反之亦然。
+  // 之前的写法是整段一个 promise，任何一步抛错就全部跳过 ——
+  // 表现出来就是「什么都没出现」。
+  try {
+    createWindow();
+  } catch (e) {
+    writeCrashLog('createWindow', e);
+  }
+
+  try {
+    createTray();
+  } catch (e) {
+    writeCrashLog('createTray', e);
+    // 托盘建不起来时，至少把窗口显示出来，别让用户什么都看不到
+    try {
+      win?.show();
+    } catch {
+      /* ignore */
+    }
+  }
+
+  // 如果连托盘都没建成，又没有窗口可看，就真的什么都没了 ——
+  // 这种情况下弹个错误框，告诉用户去哪看日志。
+  if (!tray && !win) {
+    try {
+      const { dialog } = require('electron');
+      dialog.showErrorBox(
+        'DSH Outpost 启动失败',
+        `无法创建窗口和托盘。\n\n日志：${path.join(STATE_DIR, 'logs', 'desktop-crash.log')}`,
+      );
+    } catch {
+      /* ignore */
+    }
+  }
+
+  // ⚠️ 用户双击 exe 后必须看到东西，否则会以为「一闪就没了」。
+  //
+  // 之前 createWindow 用的是 show:false，又只在托盘点击时才 show，
+  // 于是双击 exe 的效果是：**什么都不出现**（托盘图标还容易被折叠）。
+  //
+  // 现在：启动就显示面板。用户点关闭/失焦才收进托盘。
+  try {
+    win?.show();
+  } catch (e) {
+    writeCrashLog('show-on-start', e);
+  }
+
   // 后台把服务拉起来，用户打开面板时就是热的状态
   void ensureService();
+}).catch((e) => {
+  // whenReady 本身失败（极罕见，但要有兜底）
+  const file = writeCrashLog('whenReady', e);
+  try {
+    const { dialog } = require('electron');
+    dialog.showErrorBox('DSH Outpost 启动失败', `${e?.message ?? e}\n\n${file ?? ''}`);
+  } catch {
+    /* ignore */
+  }
 });
 
 // 全部窗口关闭也不退出（托盘程序）
