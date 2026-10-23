@@ -1,6 +1,6 @@
 {
   "name": "dsh-outpost",
-  "version": "0.13.0",
+  "version": "0.14.0",
   "private": true,
   "description": "DSH 原生移动客户端：工作区 / 会话 / 聊天",
   "scripts": {
@@ -32,7 +32,9 @@
     "test:wsfilter": "tsx tests/workspace-filter-spec.mjs",
     "test:netsec": "tsx tests/net-security-spec.mjs",
     "test:butler": "tsx tests/butler-rules-spec.mjs",
-    "test:integration": "node tests/integration-transport.mjs && node tests/integration-gateway.mjs && node tests/integration-long-session.mjs",
+    "test:integration": "node tests/integration-transport.mjs && node tests/integration-gateway.mjs && node tests/integration-long-session.mjs && npm run test:integration:product",
+    "test:integration:product": "node tests/integration-product.mjs",
+    "test:integration:protocol": "node tests/integration-transport.mjs && node tests/integration-gateway.mjs && node tests/integration-long-session.mjs",
     "test:integration:transport": "node tests/integration-transport.mjs",
     "test:integration:gateway": "node tests/integration-gateway.mjs",
     "test:integration:long": "node tests/integration-long-session.mjs"

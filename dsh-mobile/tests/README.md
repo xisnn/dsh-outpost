@@ -1,12 +1,13 @@
 # 测试体系
 
-这个项目有三层测试，职责不同，跑的方式也不同。
+这个项目有**四层**测试，职责不同，跑的方式也不同。
 
 | 层 | 目录/文件 | 依赖 | 跑多久 | 测什么 |
 |---|---|---|---|---|
 | **静态检查** | 各 `*-spec.mjs` 里的 `readFileSync` 断言 | 无 | < 1 秒 | 代码里有没有某句话、配置对不对 |
 | **单元测试** | `fold-spec` / `semver` / `fileref` / `butler-rules` 等 | 无 | < 2 秒 | 纯函数的行为 |
-| **集成测试** | `integration-*.mjs` + `support/fake-dsh.mjs` | 本地起 HTTP+WS | 5-15 秒 | 真实网络协议行为 |
+| **协议集成** | `integration-transport` / `-gateway` / `-long-session` | 本地起 HTTP+WS | 5-10 秒 | 手搓请求，验证协议形状 |
+| **产品集成** | `integration-product.mjs` | 本地起 HTTP+WS | 8-15 秒 | **import 真实产品代码**，验证它能不能正确对接 |
 | **端到端** | `e2e.mjs` | **真实 DSH 服务** | 手工跑 | 完整链路 |
 
 ---
@@ -28,100 +29,123 @@
 
 ---
 
-## 集成测试：为什么需要模拟服务端
+## 协议集成 vs 产品集成（重要区别）
 
-现有测试的两个极端：
+这两个容易混，但价值完全不同。
 
-- 单元测试：快，但不碰网络
-- `e2e.mjs`：碰真网络，但**必须连真 DSH**，CI 里跑不了
+### 协议集成（`integration-transport` / `-gateway` / `-long-session`）
 
-中间缺一层：**有真实网络行为，但不需要外部服务**。
+手搓 `fetch` / `WebSocket`，验证**服务端行为**：
 
-`tests/support/fake-dsh.mjs` 填的就是这个空：
-
-```
-  你的代码                模拟 DSH
-  ─────────              ──────────
-  fetch  ────────────→   http.createServer
-  WebSocket ─────────→   手写 RFC 6455 握手
-                          （真的解析帧、真的回子协议）
+```js
+const res = await fetch(`${srv.baseUrl}/mgw/pair`, ...);
+assert(res.status === 201);   // 服务端返回对了
 ```
 
-它模仿的协议：
+测的是「协议长什么样」，**不碰产品代码**。
 
-| 端点 | 用途 |
-|---|---|
-| `POST /api/<ns>/<method>` | unary RPC |
-| `GET /?token=xxx` | 换 cookie（303） |
-| `WS /api/remote.mux` | 流式通道 |
-| `POST /mgw/pair` | 网关配对 |
-| `WS /ws/mobile` | 审批网关 |
+### 产品集成（`integration-product.mjs`）
 
-**不模仿**业务逻辑（事件折叠、模型调用）—— 那是 `e2e.mjs` 的事。
+import 真实的 `DshConnection` / `ApprovalGateway`，让它们跑在模拟服务端上：
+
+```js
+import { ApprovalGateway } from '../src/core/approvalGateway.ts';
+const gw = new ApprovalGateway(srv.baseUrl, {...});
+await gw.connect();
+assert(statuses.includes('online'));   // 我的代码能不能连上
+```
+
+测的是「**我的代码能不能正确对接**」。
+
+**差别很实在**：
+
+| 问题 | 协议测试 | 产品测试 |
+|---|---|---|
+| 服务端返回 401 | ✅ 能验证 | ✅ 能验证 |
+| 我的代码收到 401 后会清理 token 吗 | ❌ 测不到 | ✅ 能验证 |
+
+**这个文件抓到了两个真实缺陷**（见 [docs/known-issues.md](../../docs/known-issues.md)），
+都是读源码看不出来的。
 
 ---
 
-## 三个集成测试文件
+## 怎么让产品代码跑在 Node 里
+
+`core/` 下的代码大部分是纯逻辑，但有几处 RN 依赖需要处理。
+`integration-product.mjs` 里做了三件事：
+
+### 1. AsyncStorage → 内存 stub
+
+用 Node 的 **ESM loader hook**（`register()`）把模块重定向：
+
+```js
+// tests/support/rn-module-hook.mjs
+const MAPPING = {
+  '@react-native-async-storage/async-storage': './_async-storage-shim.cjs',
+  '@react-native-cookies/cookies': './_cookie-manager-shim.cjs',
+};
+```
+
+> ⚠️ **不能用 `Module._resolveFilename`** —— 那个只拦 `require()`，
+> 拦不到 `await import('...')`。产品代码里 `readCookieFromJar` 用的正是动态 import。
+
+### 2. fetch → 带 cookie 语义的版本
+
+Node 的 fetch **不处理 Set-Cookie**，RN 里由原生实现负责。
+`tests/support/cookie-fetch.mjs` 补上：
+
+- 收到 `Set-Cookie` → 写进 jar
+- 发请求 → 从 jar 取 cookie 放 `Cookie` 头
+- **手动接管 303 重定向**（因为产品代码注释里说 RN 不支持 `redirect: 'manual'`，
+  但 Node 支持，且 follow 会吞掉中间那次 Set-Cookie）
+
+### 3. WebSocket → 支持自定义 header
+
+`ApprovalGateway` 用 RN 的扩展：`new WebSocket(url, protocols, { headers })`。
+Node 的全局 WebSocket **静默忽略**第三个参数。
+
+`tests/support/ws-with-headers.mjs` 用 `ws` 库实现同样签名，
+并适配 DOM 风格事件（`ws.onopen = ...` 而不是 `.on('open')`）。
+
+---
+
+## 建测试基础设施时踩的坑
+
+这些坑各花了不少时间，都写进注释了：
+
+| 坑 | 表现 | 教训 |
+|---|---|---|
+| **两份 AsyncStorage** | ESM stub 和 CJS shim 各有 Map，`__reset()` 清不到产品代码读的那份 | 只能有一份存储 → 挂到 `globalThis` |
+| **WS 握手不回子协议** | 客户端报 `Server sent no subprotocol` 并 1006 | 服务端必须回 `Sec-WebSocket-Protocol` |
+| **裸 socket 写 JSON** | 客户端收不到 | 必须编码成 WebSocket 帧 |
+| **字段名猜错** | 服务端发 `deviceToken`，客户端读 `frame.token` | 读产品源码确认字段名，不要猜 |
+| **方法名猜错** | 写了 `gw.close()`，实际是 `gw.disconnect()` | 同上 |
+| **Node WebSocket 不传 header** | 网关握手 400 | 用 `ws` 库 |
+| **`Module._resolveFilename` 拦不到动态 import** | stub 不生效 | 用 ESM loader hook |
+
+---
+
+## 四个集成测试文件
 
 ### `integration-transport.mjs`（15 项）
 
-测传输层和 RPC：
-
-- 配对：换 cookie、错误 token 被拒、cookie 能访问 RPC
-- 鉴权：没 cookie 的 RPC 返回 401（不静默成功）
-- RPC 形状：`{type,rpcId,method,payload.args}`
-- WS：建连、无 cookie 被拒、收帧、断开感知、**重连成功**
-- 分页边界：`throughSeq` 超游标报错、`address` 形状必须对
-- 并发：10 个 RPC 同时发不串号
+协议层：配对换 cookie、鉴权 401、RPC 形状、WS 建连/断开/重连、分页边界、并发不串号。
 
 ### `integration-gateway.mjs`（14 项）
 
-测审批网关 —— **这块坑最多**，之前踩过四个连环 bug：
-
-- 配对：`/mgw/pair` 返回 code + endpoints
-- 连接：子协议 + `X-DSH-Device-ID` 头才能连上
-- **缺 header 必须被拒**（曾经以为能走查询串，结果服务端只读 header）
-- **配对码一次性**（用第二次被拒）
-- 审批帧：收 `approval-requested`、回 `approval-response` 服务端能收到
-- `outcome` 只接受 `allowed-once` / `rejected`（协议里没有「始终允许」）
-- `approval-resolved` 推送
-- **replay 帧**（重连时补发未决审批，否则用户审批永远卡着）
-- **自愈链路**：失效 token 必须连不上 → 清掉后重新配对能连上
+协议层：网关配对、`X-DSH-Device-ID` 必需、配对码一次性、
+审批帧收发、`outcome` 枚举、replay 帧、设备列表。
 
 ### `integration-long-session.mjs`（10 项）
 
-测长会话（「空调话」bug 的重灾区）：
+协议层：90 条记录分页不丢不重、`throughSeq` 边界、`address` 形状、
+空会话、50KB 长文本、中文/emoji 往返、并发分页。
 
-- 90 条记录分页拉完，**不丢不重**、顺序连续
-- `throughSeq` 等于游标 OK、超过报错（不静默返回空）
-- `address` 必须是 `{kind,sessionId}`
-- 空会话、单条记录 `hasMore=false`
-- 50KB 长文本不截断
-- 中文/emoji/引号往返一致
-- 并发拉 5 页不串
+### `integration-product.mjs`（16 项）
 
----
-
-## 两个关键教训
-
-### 1. Node 内置 WebSocket 不支持自定义 header
-
-```js
-// 这样写，headers 会被静默忽略：
-new WebSocket(url, protocols, { headers: { 'X-DSH-Device-ID': 'x' } })
-```
-
-所以网关测试用 `ws` 库。这点本身也是提醒：**RN 的 WebSocket 同样不能设 header**，
-产品代码是靠「构造函数第三个参数」绕过去的。
-
-### 2. 手写 WS 服务端容易漏两件事
-
-- **握手响应必须回 `Sec-WebSocket-Protocol`**，否则客户端报
-  `Server sent no subprotocol` 并 1006 断开
-- **发数据必须编码成 WebSocket 帧**，裸 `socket.write(json)`
-  客户端收不到
-
-这两个坑各踩了一次，现在都有注释。
+**产品代码层**：`parsePairingText` + `DshConnection` 全链路配对、
+地址安全校验生效、RPC 错误透传、`ApprovalGateway` 连接/收审批/回审批、
+长会话分页走真实 `DshConnection`。
 
 ---
 
@@ -130,9 +154,11 @@ new WebSocket(url, protocols, { headers: { 'X-DSH-Device-ID': 'x' } })
 ```bash
 cd dsh-mobile
 
-npm test                 # 静态检查 + 单元测试（约 40 秒，CI 跑这个）
-npm run test:integration # 集成测试（约 15 秒，需要本地端口）
-npm run test:e2e         # 端到端（需要真 DSH，见下）
+npm test                      # 静态检查 + 单测（约 40 秒，CI 跑这个）
+npm run test:integration      # 全部集成测试（约 25 秒，需要本地端口）
+npm run test:integration:protocol   # 只跑协议层
+npm run test:integration:product    # 只跑产品层
+npm run test:e2e              # 端到端（需要真 DSH，见下）
 ```
 
 集成测试只需要本地端口，**不需要 DSH**，可以进 CI。
@@ -156,5 +182,7 @@ node tests/e2e.mjs
 |---|---|
 | 纯函数算得对不对 | 单元测试（直接 import） |
 | 代码里有没有某句话 | 静态检查（但尽量少写这类） |
-| 请求发出去对不对、收到什么 | 集成测试（fake-dsh） |
+| 请求发出去对不对、收到什么 | 协议集成（手搓 fetch/WS） |
+| **我的代码能不能正确对接** | **产品集成（import 产品代码）** |
 | 整个 App 在真机上能不能用 | 真机回归清单（`docs/device-checklist.md`） |
+
