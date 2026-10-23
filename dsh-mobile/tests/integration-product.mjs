@@ -194,8 +194,9 @@ const { DshConnection } = await imp(
 
 // ⚠️ ApprovalGateway 用全局 WebSocket 的「第三参数传 headers」扩展，
 // Node 的全局 WebSocket 会静默忽略它。必须在 connect() 之前换成支持 header 的实现。
-const wsMod = await imp(path.join(__dirname, 'support', 'ws-with-headers.mjs'));
-wsMod.installHeaderWebSocket();
+// 用统一的兼容层（Node 20 没有全局 WebSocket，CI 会挂）
+const wsMod = await imp(path.join(__dirname, 'support', 'ws-compat.mjs'));
+wsMod.ensureWebSocket();
 
 // ⚠️ requestPairingCode() 里用的是**裸 fetch**（没有 fetchImpl 注入点），
 // 靠 `credentials:'include'` 让原生层带上 cookie。Node 的 fetch 不会。

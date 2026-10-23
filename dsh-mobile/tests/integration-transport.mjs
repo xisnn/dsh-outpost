@@ -18,7 +18,12 @@
  *   5. 长会话分页（throughSeq 边界）
  */
 
+// Node 20 没有全局 WebSocket（21+ 才有）——本地 Node 24 跑得过、CI 挂掉。
+// 用兼容层保证一致，详见 support/ws-compat.mjs。
+import { ensureWebSocket } from './support/ws-compat.mjs';
 import { startFakeDsh } from './support/fake-dsh.mjs';
+
+ensureWebSocket();
 
 let pass = 0;
 let fail = 0;
