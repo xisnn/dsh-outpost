@@ -540,7 +540,7 @@ export function ProfileScreen({ active = true }: { active?: boolean }) {
         title="需要开启安装权限"
         message={
           '系统要求手动允许「安装未知应用」才能完成更新。\n\n' +
-          '点下面的按钮会打开设置页，找到「DSH Pocket」并打开开关，' +
+          '点下面的按钮会打开设置页，找到「DSH Outpost」并打开开关，' +
           '然后回到 App 重新点「检查更新」。'
         }
         confirmText="去设置"

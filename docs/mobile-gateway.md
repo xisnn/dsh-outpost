@@ -36,7 +36,7 @@ npx dsh plugin add dsh-plugin-mobile-gateway
   config:
     gatewayEnabled: true      # 开启网关（默认关）
     gatewayMode: persistent   # 常驻，不自动关
-    gatewayName: DSH Pocket
+    gatewayName: DSH Outpost
     requireAuth: true         # 手机仍需配对码（安全边界不变）
     adminLoopbackOnly: false  # 允许从局域网访问管理接口
     lanEnabled: true

@@ -5,7 +5,7 @@
 import { isNewer } from '../../src/core/semver.ts';
 
 const current = process.argv[2] ?? '0.0.0';
-const API = 'https://api.github.com/repos/xisnn/dsh-pocket/releases/latest';
+const API = 'https://api.github.com/repos/xisnn/dsh-outpost/releases/latest';
 
 const res = await fetch(API, { headers: { Accept: 'application/vnd.github+json' } });
 console.log('HTTP', res.status);

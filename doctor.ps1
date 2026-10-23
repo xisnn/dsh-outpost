@@ -22,7 +22,7 @@ function Line($ok, $label, $detail) {
 
 Write-Host ''
 Write-Host ('=' * 62) -ForegroundColor DarkCyan
-Write-Host '  DSH Pocket 环境自检' -ForegroundColor Cyan
+Write-Host '  DSH Outpost 环境自检' -ForegroundColor Cyan
 Write-Host ('=' * 62) -ForegroundColor DarkCyan
 Write-Host ''
 

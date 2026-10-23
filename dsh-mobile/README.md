@@ -1,6 +1,6 @@
 # dsh-mobile
 
-DSH Pocket 的 React Native App。
+DSH Outpost 的 React Native App。
 
 ## 技术选型
 

@@ -140,13 +140,13 @@ jobs:
         run: |
           VERSION="${{ steps.ver.outputs.tag }}"
           mkdir -p out
-          cp dsh-mobile/android/app/build/outputs/apk/release/app-release.apk "out/dsh-pocket-${VERSION}.apk"
+          cp dsh-mobile/android/app/build/outputs/apk/release/app-release.apk "out/dsh-outpost-${VERSION}.apk"
           ls -lh out/
 
       - name: Upload artifact
         uses: actions/upload-artifact@v4
         with:
-          name: dsh-pocket-apk
+          name: dsh-outpost-apk
           path: out/*.apk
           retention-days: 30
 
@@ -159,11 +159,11 @@ jobs:
           body: |
             ## 安装
 
-            1. 下载下面的 `dsh-pocket-*.apk`
+            1. 下载下面的 `dsh-outpost-*.apk`
             2. 手机上允许「安装未知来源应用」后安装
             3. 电脑上运行 `start-dsh-web.ps1` 启动 DSH 服务
             4. 打开 App 扫码配对
 
-            详细步骤见 [README](https://github.com/xisnn/dsh-pocket#5-分钟上手)。
+            详细步骤见 [README](https://github.com/xisnn/dsh-outpost#5-分钟上手)。
 
             > 本 APK 由 GitHub Actions 自动构建。若未配置签名密钥，使用 debug 签名，仅适合个人侧载使用。

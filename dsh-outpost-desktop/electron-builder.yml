@@ -1,7 +1,7 @@
 {
   "$schema": "https://raw.githubusercontent.com/electron-userland/electron-builder/master/packages/app-builder-lib/scheme.json",
   "appId": "com.dshpocket.desktop",
-  "productName": "DSH Pocket",
+  "productName": "DSH Outpost",
   "directories": {
     "output": "release",
     "buildResources": "assets"

@@ -55,8 +55,8 @@ try {
   process.exit(1);
 }
 
-if (!fs.existsSync(path.join(UNPACKED, 'DSH Pocket.exe'))) {
-  console.error('[pack] 没生成 DSH Pocket.exe');
+if (!fs.existsSync(path.join(UNPACKED, 'DSH Outpost.exe'))) {
+  console.error('[pack] 没生成 DSH Outpost.exe');
   process.exit(1);
 }
 
@@ -208,4 +208,4 @@ const mb = (fs.statSync(zipPath).size / 1024 / 1024).toFixed(1);
 log(`✓ ${zipName}（${mb} MB）`);
 log(`位置：${zipPath}`);
 log('');
-log('解压即用，双击「DSH Pocket.exe」运行。');
+log('解压即用，双击「DSH Outpost.exe」运行。');

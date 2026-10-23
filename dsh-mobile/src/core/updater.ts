@@ -14,7 +14,7 @@ import ReactNativeBlobUtil from 'react-native-blob-util';
 import { isNewer } from './semver';
 
 const OWNER = 'xisnn';
-const REPO = 'dsh-pocket';
+const REPO = 'dsh-outpost';
 const API = `https://api.github.com/repos/${OWNER}/${REPO}/releases/latest`;
 
 export interface ReleaseInfo {
@@ -101,7 +101,7 @@ export async function downloadAndInstall(
   onProgress?: (p: DownloadProgress) => void,
 ): Promise<void> {
   const dir = ReactNativeBlobUtil.fs.dirs.CacheDir;
-  const path = `${dir}/dsh-pocket-${release.version}.apk`;
+  const path = `${dir}/dsh-outpost-${release.version}.apk`;
 
   // 缓存能不能用，必须校验大小。
   //
@@ -219,7 +219,7 @@ export async function cleanupApks(): Promise<void> {
     const list = await ReactNativeBlobUtil.fs.ls(dir);
     await Promise.all(
       list
-        .filter((n) => /^dsh-pocket-.*\.apk$/i.test(n))
+        .filter((n) => /^dsh-outpost-.*\.apk$/i.test(n))
         .map((n) => ReactNativeBlobUtil.fs.unlink(`${dir}/${n}`).catch(() => undefined)),
     );
   } catch {

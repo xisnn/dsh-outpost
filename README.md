@@ -1,9 +1,13 @@
-# DSH Pocket
+# DSH Outpost
 
-**DeepSeek Harness 的非官方 Android 客户端 —— 把你电脑上的 AI 团队装进口袋。**
+**DeepSeek Harness 的非官方客户端 —— 把电脑上的 AI 团队装进口袋。**
 
-原生 App（不是网页套壳），连你自己电脑上跑的 DSH 服务：看会话、发消息带附件、切模型，
-还能在手机上**回答审批**、**收系统通知**。
+两个部分：
+
+| | 说明 |
+|---|---|
+| **手机 App**（Android） | 原生 RN 应用，不是网页套壳。看会话、发消息带附件、切模型，还能**回答审批**、**收系统通知** |
+| **桌面助手**（Windows） | 托盘程序。扫码连接手机、管理隧道、IP 变了自动修复。**替代原来的网页插件** |
 
 核心玩法是**「管家模式」**：你只跟管家说话，它拆任务、派队员去干，
 你可以在手机上看着每个队员在干什么。
@@ -303,7 +307,7 @@ https://xxx.trycloudflare ─┘
 ```bash
 cd dsh-mobile
 npm install
-npm test              # 285 项单测 + typecheck
+npm test              # 318 项单测 + typecheck
 npm run android       # 需要 Android SDK + JDK 21
 ```
 
@@ -318,38 +322,40 @@ npm run android       # 需要 Android SDK + JDK 21
 
 ```
 .
-├── dsh-mobile/           # React Native App（TypeScript）
+├── dsh-mobile/              # 手机 App（React Native + TypeScript）
 │   ├── src/
-│   │   ├── core/         # 协议层：transport / rpc / fold / store（不依赖 UI）
-│   │   ├── nav/          # 手写导航栈 + 边缘手势
-│   │   ├── screens/      # 页面
-│   │   ├── components/   # 组件
-│   │   └── design/       # 主题 token
-│   └── tests/            # Node 单测（285 项）
-├── dsh-plugin-connect/   # 桌面端插件：侧边栏「手机连接」+ 二维码
-├── docs/                 # 协议笔记、真机验证清单、截图
-├── start-dsh-web.ps1     # Windows 一键启动脚本
-├── start-tunnel.ps1      # Cloudflare 隧道
-└── setup-gateway.ps1     # 安装移动网关（手机端审批）
+│   │   ├── core/            # 协议层：transport / rpc / fold / store（不依赖 UI）
+│   │   ├── nav/             # 手写导航栈 + 边缘手势
+│   │   ├── screens/         # 页面
+│   │   ├── components/      # 组件
+│   │   └── design/          # 主题 token
+│   └── tests/               # Node 单测（318 项）
+├── dsh-outpost-desktop/     # Windows 桌面助手（Electron 托盘程序）
+├── dsh-plugin-connect/      # 隧道服务 + 旧版网页插件
+├── docs/                    # 协议笔记、真机验证清单、截图
+├── start-dsh-web.ps1        # Windows 一键启动脚本
+├── start-tunnel.ps1         # Cloudflare 隧道
+└── setup-gateway.ps1        # 安装移动网关（手机端审批）
 ```
 
 ---
 
 ## 版本
 
-当前 **v0.8.0**。完整变更见 [Releases](../../releases)。
+当前 **v0.9.1**。完整变更见 [Releases](../../releases)。
 
 最近的几个版本：
 
 | 版本 | 内容 |
 |---|---|
-| **v0.8.0** | 会话搜索、重命名、长会话虚拟化（100 轮以上的会话不再卡顿） |
+| **v0.9.1** | Windows 桌面助手打包通了（绕开 electron-builder 的在线工具下载） |
+| v0.9.0 | **Windows 桌面助手**：托盘常驻，扫码连接手机、管理隧道，替代网页插件 |
+| v0.8.2 | 过滤 DSH 的临时工作区（49 个目录 → 3 个，列表终于能看） |
+| v0.8.1 | 修复尖括号路径的图片不显示（会显示成「!标题」） |
+| v0.8.0 | 会话搜索、重命名、长会话虚拟化（100 轮以上的会话不再卡顿） |
 | v0.7.0 | 图片全屏查看 + Word/Excel/Markdown 内置查看；聊天里的 markdown 终于真渲染了 |
 | v0.6.3 | 手机端审批可用了（修了 WS 请求头、端点选择、凭据自愈三个问题）+ 手势真正生效 |
 | v0.6.2 | 图片终于能显示（`overflow:'hidden'` 在 Fabric 下会把 Image 裁成 0） |
-| v0.6.1 | 系统通知（通知栏可见，后台也能收） |
-| v0.6.0 | 边缘手势返回、应用内通知横幅 |
-| v0.5.4 | 会话加载失败不再只显示「空调话」，会把错误说出来 |
 
 ---
 
