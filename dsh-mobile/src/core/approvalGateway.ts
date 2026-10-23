@@ -102,6 +102,14 @@ export class ApprovalGateway {
   private closed = false;
   private retry = 0;
   private retryTimer?: ReturnType<typeof setTimeout>;
+  /**
+   * 用「长期 token」连接时连续失败的次数。
+   *
+   * 握手阶段的 401 在 ws 层只表现为 close 1006，reason 是空串，
+   * 没法靠 reason 判断 token 是否失效。所以改成计数：
+   * 有 token 却连续失败 2 次，就当作 token 过期，清掉重新配对。
+   */
+  private tokenFailures = 0;
   /** 等特定帧的调用者（文件下载用） */
   private frameWaiters = new Map<
     string,
@@ -256,6 +264,8 @@ export class ApprovalGateway {
 
       ws.onopen = () => {
         this.retry = 0;
+        // 连上了说明凭据是好的，清掉失败计数
+        this.tokenFailures = 0;
         this.events.onStatus?.('online');
       };
 
@@ -283,6 +293,12 @@ export class ApprovalGateway {
           code ? `连接被关闭 ${code}${why ? ` ${why}` : ''}` : '连接已断开',
         );
 
+        // 这次是用长期 token 连的（不是配对码）→ 计入失败次数。
+        // 握手 401 在 ws 层只是 1006 + 空 reason，只能靠计数兜底。
+        if (this.token && !pairingCode) {
+          this.tokenFailures += 1;
+        }
+
         // ⚠️ 自愈：凭据失效时必须清掉本地 token 并重新配对。
         //
         // 踩坑：网关的配对是一次性的（服务端 claimPairing 里
@@ -291,16 +307,29 @@ export class ApprovalGateway {
         // 如果本地存着一个已经失效的 token，connect() 会因为
         // 「有 token 就不配对」而一直拿它重试，永远 401 —— 用户看到
         // 的就是审批永远只能「到电脑上确认」。
-        const unauthorized = /401|unauthorized|invalid|expired/i.test(why);
+        //
+        // 补充：握手阶段的 401 在 ws 层只表现为 close 1006，
+        // `reason` 是**空串**，所以纯靠正则匹配靠不住。
+        // 多加一条：手里有 token 却连续失败 2 次，就当作 token 失效。
+        const unauthorized =
+          /401|unauthorized|invalid|expired/i.test(why) || this.tokenFailures >= 2;
         if (unauthorized) {
           this.token = '';
+          this.tokenFailures = 0;
           void AsyncStorage.removeItem(DEVICE_TOKEN_KEY).catch(() => undefined);
           // 不传旧配对码：让下次 connect() 重新申请一个新的
           this.scheduleRetry();
           return;
         }
 
-        this.scheduleRetry(pairingCode);
+        // ⚠️ 重连时**绝不能复用配对码**。
+        //
+        // 配对码是一次性的（服务端配对成功立刻 delete），拿旧码重连
+        // 必然 401 —— 这正是「断线后再也连不回来」的根因。
+        //
+        // 正确做法：不传参数，让 connect() 自己决定 ——
+        // 有 token 就用 `dsh-token.` 子协议，没 token 才重新申请配对码。
+        this.scheduleRetry();
       };
     } catch (e) {
       this.events.onStatus?.('offline', e instanceof Error ? e.message : '连接出错');
