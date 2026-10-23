@@ -198,7 +198,54 @@ await check('CI 的 node-version 和 engines 不矛盾', () => {
   return true;
 });
 
-// ── 4. 集成测试能在这个 Node 版本上真跑 ──────────────────────
+// ── 4. 启动方式必须匹配文件的 import 类型 ──────────────────────
+//
+// 踩过的坑：integration-product.mjs 里 `import` 了 .ts 源文件，
+// 但 package.json 里写的是 `node tests/integration-product.mjs`。
+//
+//   Node 24 → 原生支持 .ts（类型剥离），跑得过
+//   Node 20 → ERR_UNKNOWN_FILE_EXTENSION: Unknown file extension ".ts"
+//
+// 又是「本地过、CI 挂」。这个检查直接读 package.json 的脚本，
+// 确认「import 了 .ts 的测试」必须用 tsx 启动。
+
+await check('import .ts 的测试必须用 tsx 启动', () => {
+  const pkg = JSON.parse(readFileSync('package.json', 'utf8'));
+  const scripts = pkg.scripts ?? {};
+  const offenders = [];
+
+  for (const [name, cmd] of Object.entries(scripts)) {
+    if (typeof cmd !== 'string') continue;
+    // 找出这条命令里通过 node 直接跑的测试文件
+    for (const m of cmd.matchAll(/node\s+(?:--require\s+\S+\s+)?(tests\/[\w.-]+\.mjs)/g)) {
+      const file = m[1];
+      let src;
+      try {
+        src = readFileSync(file, 'utf8');
+      } catch {
+        continue;
+      }
+      // 这个文件有没有 import ../src/**/*.ts
+      const importsTs = /from\s+['"][^'"]*\/src\/[^'"]*\.ts['"]/.test(src);
+      if (importsTs) {
+        offenders.push(`${name}: ${file}（用了 node，但 import 了 .ts）`);
+      }
+    }
+  }
+
+  return offenders.length === 0
+    ? true
+    : `这些脚本在 Node 20 上会挂（改用 tsx）：\n  ` + offenders.join('\n  ');
+});
+
+await check('TEST_TS_IMPORT 守卫：本文件检测逻辑本身有效', () => {
+  // 自检：确认上面的正则真能识别出 import .ts 的写法
+  const sample = `import x from '../src/core/transport/index.ts';`;
+  const re = /from\s+['"][^'"]*\/src\/[^'"]*\.ts['"]/;
+  return re.test(sample) ? true : '检测逻辑失效了（正则匹配不到 import .ts）';
+});
+
+// ── 5. 集成测试能在这个 Node 版本上真跑 ──────────────────────
 
 await check('本进程的 Node 能跑集成测试（冒烟）', async () => {
   // 模拟集成测试的启动流程：先装兼容层，再检查关键 API

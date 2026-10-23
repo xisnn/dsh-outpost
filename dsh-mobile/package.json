@@ -1,6 +1,6 @@
 {
   "name": "dsh-outpost",
-  "version": "0.15.1",
+  "version": "0.15.2",
   "private": true,
   "description": "DSH 原生移动客户端：工作区 / 会话 / 聊天",
   "scripts": {
@@ -34,9 +34,9 @@
     "test:butler": "tsx tests/butler-rules-spec.mjs",
     "test:compat": "tsx tests/protocol-compat-spec.mjs",
     "test:runtime": "tsx tests/runtime-compat-spec.mjs",
-    "test:node20": "node --require ./tests/support/node20-sim.cjs tests/integration-transport.mjs && node --require ./tests/support/node20-sim.cjs tests/integration-gateway.mjs && node --require ./tests/support/node20-sim.cjs tests/integration-long-session.mjs && node --require ./tests/support/node20-sim.cjs tests/integration-product.mjs && node --require ./tests/support/node20-sim.cjs tests/runtime-compat-spec.mjs",
-    "test:integration": "node tests/integration-transport.mjs && node tests/integration-gateway.mjs && node tests/integration-long-session.mjs && npm run test:integration:product",
-    "test:integration:product": "node tests/integration-product.mjs",
+    "test:node20": "node --require ./tests/support/node20-sim.cjs tests/integration-transport.mjs && node --require ./tests/support/node20-sim.cjs tests/integration-gateway.mjs && node --require ./tests/support/node20-sim.cjs tests/integration-long-session.mjs && tsx --require ./tests/support/node20-sim.cjs tests/integration-product.mjs && tsx --require ./tests/support/node20-sim.cjs tests/runtime-compat-spec.mjs",
+    "test:integration": "node tests/integration-transport.mjs && node tests/integration-gateway.mjs && node tests/integration-long-session.mjs && tsx tests/integration-product.mjs",
+    "test:integration:product": "tsx tests/integration-product.mjs",
     "test:integration:protocol": "node tests/integration-transport.mjs && node tests/integration-gateway.mjs && node tests/integration-long-session.mjs",
     "test:integration:transport": "node tests/integration-transport.mjs",
     "test:integration:gateway": "node tests/integration-gateway.mjs",

@@ -335,7 +335,7 @@ npm run android           # 需要 Android SDK + JDK 21
 > 见 [docs/known-issues.md](docs/known-issues.md)。
 
 测试体系说明见 [dsh-mobile/tests/README.md](dsh-mobile/tests/README.md)，
-已知问题见 [docs/known-issues.md](docs/known-issues.md)。`n协议依赖与兼容性见 [docs/protocol-compat.md](docs/protocol-compat.md)。
+已知问题见 [docs/known-issues.md](docs/known-issues.md)。`n协议依赖与兼容性见 [docs/protocol-compat.md](docs/protocol-compat.md)。`n运行环境（Node 版本）兼容性见 [docs/runtime-compat.md](docs/runtime-compat.md)。
 
 - 应用代码在 [`dsh-mobile/`](dsh-mobile/)，架构与实现细节见 [dsh-mobile/README.md](dsh-mobile/README.md)
 - DSH 内部协议（RPC 形状、投影字段、踩过的坑）见 [docs/protocol-notes.md](docs/protocol-notes.md)
