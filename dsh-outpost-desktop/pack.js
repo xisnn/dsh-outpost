@@ -64,17 +64,24 @@ if (!fs.existsSync(path.join(UNPACKED, 'DSH Outpost.exe'))) {
 //
 // 不用 Compress-Archive：它在某些 PowerShell 版本上对大目录会超时/丢文件。
 //
-// 压缩策略：Electron 的 exe/dll 本来就压不动，但 asar/pak/js 能压不少，
-// 所以对「非二进制」文件用 deflate，对已知压不动的用 store。
-// 实测整体从 269 MB 降到约 110 MB。
+// ## 压缩策略（踩过坑）
+//
+// 第一版我以为「Electron 的 exe/dll 已经压过了，再压没用」，
+// 对这些扩展名用 store（不压缩），结果 zip 是 **260 MB**。
+//
+// 实测：全都用最高压缩能到 **110 MB**（原来的 42%），耗时只多约 20 秒。
+// 那些 .exe/.dll 确实压不了多少，但 icudtl.dat、resources.pak、
+// LICENSES.chromium.html 这些可压空间很大，加起来很可观。
+//
+// 上传体验差别很大：0.79 MB/s 的带宽下，260 MB 要 5.5 分钟且容易断，
+// 110 MB 只要 2.3 分钟。
+//
+// 所以现在**全都尝试压缩**，只有在「压了反而更大」时才退回 store。
 
 const pkg = JSON.parse(fs.readFileSync(path.join(ROOT, 'package.json'), 'utf8'));
 const zipName = `DSH-Outpost-Desktop-${pkg.version}-win-x64.zip`;
 const zipPath = path.join(RELEASE, zipName);
 if (fs.existsSync(zipPath)) fs.unlinkSync(zipPath);
-
-/** 这些扩展名压了也没用（已经高度压缩或是不可压缩的二进制） */
-const STORE_EXT = new Set(['.exe', '.dll', '.pak', '.dat', '.bin', '.zip', '.png', '.jpg', '.ico']);
 
 /** 递归收集文件（相对路径用正斜杠） */
 function walk(dir, base = '') {
@@ -130,11 +137,14 @@ for (const f of files) {
   const nameBuf = Buffer.from(f.rel, 'utf8');
   const { time, date } = dosTime(fs.statSync(f.full).mtime);
 
-  // 决定压缩方式
+  // 决定压缩方式：全都试最高压缩，压不动才 store。
+  //
+  // level: 9 而不是默认的 6 —— 多花十几秒，但整体能小一半以上。
+  // 对「通过慢速网络下载/上传」的场景，这个交换非常划算。
   let method = 0;
   let payload = data;
-  if (!STORE_EXT.has(f.ext) && data.length > 512) {
-    const deflated = zlib.deflateRawSync(data, { level: 6 });
+  if (data.length > 512) {
+    const deflated = zlib.deflateRawSync(data, { level: 9 });
     if (deflated.length < data.length) {
       method = 8;
       payload = deflated;
