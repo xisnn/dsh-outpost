@@ -28,9 +28,9 @@
     ],
     "icon": "assets/icon.png",
     "signAndEditExecutable": false,
-    "artifactName": "DSHPocket-Desktop-${version}.${ext}"
+    "artifactName": "DSH-Outpost-Desktop-${version}-win-x64.${ext}"
   },
   "portable": {
-    "artifactName": "DSHPocket-Desktop-${version}-portable.${ext}"
+    "artifactName": "DSH-Outpost-Desktop-${version}-portable.${ext}"
   }
 }

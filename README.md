@@ -193,13 +193,37 @@ Tailscale 要在手机上装 App，Cloudflare 隧道不用——就是一个普�
 > 通过隧道访问时 Host 是 `xxx.trycloudflare.com`，不在信任列表里就会 **403 forbidden**。
 > 它只做精确匹配、不支持通配符，所以必须拿到域名之后再重启服务。
 
-### 插件：桌面端一键连接
+### 桌面助手（Windows）—— 推荐
+
+**[`dsh-outpost-desktop`](dsh-outpost-desktop/)** 是一个托盘程序，把「手机连接」从网页侧边栏里独立出来：
+
+- 托盘常驻，**点一下图标就出面板**（不用开浏览器找侧边栏）
+- 局域网 / 隧道两个二维码并排，扫哪个都行
+- 启动 / 停止隧道，不用记 PowerShell 命令
+- **IP 变了会弹黄条，点「一键修复」自动重启 DSH 和隧道**
+- 设备列表（哪些手机配过对、最后活跃时间）
+- 开机自启（静默，不弹窗）
+
+```
+启动方式：解压 zip → 双击 DSH Outpost.exe
+或者：  cd dsh-outpost-desktop && npm install && npm start
+```
+
+> ⚠️ **Windows 可能弹 SmartScreen「已保护你的电脑」** —— 这是因为 exe 没有
+> 代码签名（签名证书要钱，个人项目没买）。点「更多信息 → 仍要运行」即可。
+>
+> 不想每次都点的话：右键 exe → 属性 → 常规 → 勾选「解除锁定」。
+
+### 旧方案：网页插件
 
 装了 [`dsh-plugin-connect`](dsh-plugin-connect/) 之后，DSH 网页侧边栏底部会出现「📱 手机连接」：
 
 - 显示局域网 / Cloudflare 两个地址，各带二维码
 - 点「启动隧道」直接起 cloudflared（需要先跑一次 `start-tunnel-service.ps1`）
-- **IP 变了会显眼提示并给「一键修复」**——家用 WiFi 是 DHCP，地址会漂，漂了 DSH 就绑不上（`EADDRNOTAVAIL`），手机连不上而用户只看到「连不上」
+- IP 变了会显眼提示并给「一键修复」
+
+**桌面助手和它功能重合**，二选一即可。桌面助手更好用（不用开浏览器），
+插件保留是为了兼容已经装了的用户。
 
 ```
 http://192.168.x.x:3095  ─┐

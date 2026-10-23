@@ -18,7 +18,7 @@
  * 用 electron-builder 的 `--dir` 模式（只复制文件、不下载任何工具），
  * 这一步实测稳定成功；然后自己用 Node 的 zlib 打 zip。
  *
- * 产物：release/DSHPocket-Desktop-<version>-win-x64.zip
+ * 产物：release/DSH-Outpost-Desktop-<version>-win-x64.zip
  *
  * 解压即用，不需要安装。想要安装包（NSIS）就在有网有桌面的机器上
  * 跑 `npm run build:nsis`。
@@ -69,7 +69,7 @@ if (!fs.existsSync(path.join(UNPACKED, 'DSH Outpost.exe'))) {
 // 实测整体从 269 MB 降到约 110 MB。
 
 const pkg = JSON.parse(fs.readFileSync(path.join(ROOT, 'package.json'), 'utf8'));
-const zipName = `DSHPocket-Desktop-${pkg.version}-win-x64.zip`;
+const zipName = `DSH-Outpost-Desktop-${pkg.version}-win-x64.zip`;
 const zipPath = path.join(RELEASE, zipName);
 if (fs.existsSync(zipPath)) fs.unlinkSync(zipPath);
 
