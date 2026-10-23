@@ -1,6 +1,6 @@
 {
   "name": "dsh-outpost",
-  "version": "0.12.0",
+  "version": "0.13.0",
   "private": true,
   "description": "DSH 原生移动客户端：工作区 / 会话 / 聊天",
   "scripts": {
@@ -11,7 +11,7 @@
     "test:fold": "tsx tests/fold-spec.mjs",
     "test:cwd": "node tests/cwd-spec.mjs",
     "test:pairing": "tsx tests/pairing-spec.mjs",
-    "test:e2e": "tsx tests/e2e.mjs",
+    "test:e2e": "node tests/e2e.mjs",
     "test": "npm run test:fold && npm run test:cwd && npm run test:pairing && npm run test:semver && npm run test:teammate && npm run test:fileref && npm run test:archive && npm run test:approval && npm run test:deliverable && npm run test:notify && npm run test:gateway && npm run test:image && npm run test:bugfix && npm run test:chaterror && npm run test:gesture && npm run test:imgrender && npm run test:gwconnect && npm run test:docview && npm run test:searchrename && npm run test:wsfilter && npm run test:netsec && npm run test:butler && npm run typecheck",
     "test:semver": "tsx tests/updater-spec.mjs",
     "test:teammate": "tsx tests/teammate-spec.mjs",
@@ -31,7 +31,11 @@
     "test:searchrename": "tsx tests/search-rename-spec.mjs",
     "test:wsfilter": "tsx tests/workspace-filter-spec.mjs",
     "test:netsec": "tsx tests/net-security-spec.mjs",
-    "test:butler": "tsx tests/butler-rules-spec.mjs"
+    "test:butler": "tsx tests/butler-rules-spec.mjs",
+    "test:integration": "node tests/integration-transport.mjs && node tests/integration-gateway.mjs && node tests/integration-long-session.mjs",
+    "test:integration:transport": "node tests/integration-transport.mjs",
+    "test:integration:gateway": "node tests/integration-gateway.mjs",
+    "test:integration:long": "node tests/integration-long-session.mjs"
   },
   "dependencies": {
     "@react-native-async-storage/async-storage": "^2.1.0",
@@ -59,7 +63,8 @@
     "@react-native/typescript-config": "0.81.4",
     "@types/react": "^19.1.0",
     "tsx": "^4.23.15",
-    "typescript": "^5.8.3"
+    "typescript": "^5.8.3",
+    "ws": "^8.22.0"
   },
   "engines": {
     "node": ">=20"
