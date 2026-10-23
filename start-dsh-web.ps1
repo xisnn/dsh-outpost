@@ -261,8 +261,45 @@ Write-Host ''
 Write-Host "启动 dsh web（权限模式：$PermissionMode）..." -ForegroundColor Cyan
 $env:DSH_PERMISSION_MODE = $PermissionMode
 
-$logFile = Join-Path $env:TEMP ("dsh-web-" + $Port + ".log")
+# 状态目录：日志、pairing.json、tunnel.json 都放这里。
+# 这里含 token，权限要比 %TEMP% 严 —— 见下面的 ACL 收紧。
+# （和 start-tunnel.ps1 / tunnel-service.mjs 保持一致）
+$stateDir = if ($env:DSH_STATE_DIR) {
+  $env:DSH_STATE_DIR
+} else {
+  Join-Path $env:LOCALAPPDATA 'dsh-pocket'
+}
+
+# ⚠️ 这个日志里**含明文 token**（dsh 启动时会把配对 URL 打出来）。
+#
+# 原来放 %TEMP% 下，继承的 ACL 是 Modify —— 本机其他用户能读能改，
+# 等于把 DSH 的钥匙放在公共目录。实测确认过 `%TEMP%\dsh-web-3095.log`
+# 里有明文 token。
+#
+# 改成：状态目录下的 logs/，并收紧到只有当前用户可读。
+$logDir = Join-Path $stateDir 'logs'
+if (-not (Test-Path $logDir)) { New-Item -ItemType Directory -Path $logDir -Force | Out-Null }
+$logFile = Join-Path $logDir ("dsh-web-" + $Port + ".log")
 if (Test-Path $logFile) { Remove-Item $logFile -Force }
+
+# 预建文件并收紧权限（Start-Process 重定向时会沿用已有文件的 ACL）
+try {
+  New-Item -ItemType File -Path $logFile -Force | Out-Null
+  New-Item -ItemType File -Path "$logFile.err" -Force | Out-Null
+  $me = [System.Security.Principal.WindowsIdentity]::GetCurrent().Name
+  foreach ($f in @($logFile, "$logFile.err")) {
+    $acl = New-Object System.Security.AccessControl.FileSecurity
+    $acl.SetAccessRuleProtection($true, $false)
+    foreach ($id in @($me, 'NT AUTHORITY\SYSTEM', 'BUILTIN\Administrators')) {
+      $acl.AddAccessRule(
+        (New-Object System.Security.AccessControl.FileSystemAccessRule($id, 'FullControl', 'Allow'))
+      )
+    }
+    Set-Acl -Path $f -AclObject $acl
+  }
+} catch {
+  Write-Host "  [提示] 日志文件权限收紧失败，该文件含 token，建议手动检查。" -ForegroundColor DarkYellow
+}
 
 $dshArgs = @('--profile', 'web', '--no-open', '--host', $bindIp, '--port', "$Port")
 
@@ -305,12 +342,7 @@ if (-not $url) {
 # 插件用 /api/file 读它 —— 这样二维码里才能带上 token，
 # 手机扫码才会被识别为「DSH 配对链接」。
 try {
-  # 状态目录可配（和 start-tunnel.ps1 / tunnel-service.mjs 保持一致）
-  $stateDir = if ($env:DSH_STATE_DIR) {
-    $env:DSH_STATE_DIR
-  } else {
-    Join-Path $env:LOCALAPPDATA 'dsh-pocket'
-  }
+  # $stateDir 已在上面（日志那一段）定义过，这里直接用
   $pairFile = Join-Path $stateDir 'pairing.json'
   $pairDir = Split-Path $pairFile -Parent
   if (-not (Test-Path $pairDir)) { New-Item -ItemType Directory -Path $pairDir -Force | Out-Null }
@@ -323,6 +355,30 @@ try {
     writtenAt = (Get-Date).ToString('yyyy-MM-dd HH:mm:ss')
   }
   $pair | ConvertTo-Json -Depth 3 | Set-Content $pairFile -Encoding UTF8
+
+  # 收紧权限：pairing.json 里有明文 token，等于这台 DSH 的钥匙。
+  #
+  # 默认继承的 ACL 会让本机其他用户（以及某些沙箱账号）能读它 ——
+  # 实测发现 `XIS\CodexSandboxUsers` 有 ReadAndExecute。
+  # 这里改成只有「当前用户 + SYSTEM + Administrators」可访问。
+  #
+  # 失败不影响主流程：某些文件系统（FAT32、网络盘）不支持 ACL。
+  try {
+    $me = [System.Security.Principal.WindowsIdentity]::GetCurrent().Name
+    $acl = New-Object System.Security.AccessControl.FileSecurity
+    $acl.SetAccessRuleProtection($true, $false)  # 断开继承，清空已有规则
+    foreach ($id in @($me, 'NT AUTHORITY\SYSTEM', 'BUILTIN\Administrators')) {
+      $acl.AddAccessRule(
+        (New-Object System.Security.AccessControl.FileSystemAccessRule(
+          $id, 'FullControl', 'Allow'
+        ))
+      )
+    }
+    Set-Acl -Path $pairFile -AclObject $acl
+  } catch {
+    Write-Host "  [提示] pairing.json 权限收紧失败（$($_.Exception.Message)）" -ForegroundColor DarkYellow
+    Write-Host "         这个文件含明文 token，建议手动检查它的访问权限。" -ForegroundColor DarkYellow
+  }
 } catch {
   # 写不进去不影响主流程
 }

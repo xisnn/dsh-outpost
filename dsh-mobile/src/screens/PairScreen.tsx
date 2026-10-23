@@ -28,6 +28,7 @@ import { ScanSheet } from '../components/ScanSheet';
 import { PairingHelpSheet } from '../components/PairingHelpSheet';
 
 import { parsePairingText } from '../core/pairing';
+import { checkBaseUrlSecurity } from '../core/net-security';
 
 
 export function PairScreen() {
@@ -96,6 +97,13 @@ export function PairScreen() {
       if (!/^https?:\/\//.test(trimmedUrl)) {
         throw new Error('地址要以 http:// 或 https:// 开头');
       }
+
+      // 地址安全校验：明文 HTTP 只能连私有地址。
+      // 放在这里是为了给出更友好的提示 —— loginWithToken 里也会校验，
+      // 但那时报错已经埋在「连接失败」里，用户不容易看懂。
+      const insecure = checkBaseUrlSecurity(trimmedUrl);
+      if (insecure) throw new Error(insecure);
+
       const extracted = parsed?.token ?? raw;
 
       // 容错：token 只用 URL-safe base64 字符（A-Z a-z 0-9 - _）。

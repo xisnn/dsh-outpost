@@ -23,6 +23,8 @@
 
 import AsyncStorage from '@react-native-async-storage/async-storage';
 
+import { redactUrl } from './net-security';
+
 /** 网关默认端口（插件配置 lanPort） */
 const GATEWAY_PORT = 3081;
 
@@ -272,7 +274,10 @@ export class ApprovalGateway {
         //   400 = 缺 X-DSH-Device-ID 头（RN 没发出去）
         //   401 = 配对码无效/已用/过期，或设备 token 已失效
         const code = ev?.code ?? 0;
-        const why = String(ev?.reason ?? '');
+        // 服务端的 close reason 会拼进用户可见的提示里。
+        // 理论上它只写「invalid or expired pairing code」这类文本，
+        // 但万一哪天带上了凭据，就会直接显示在界面上 —— 先脱敏再拼。
+        const why = redactUrl(String(ev?.reason ?? ''));
         this.events.onStatus?.(
           'offline',
           code ? `连接被关闭 ${code}${why ? ` ${why}` : ''}` : '连接已断开',

@@ -252,12 +252,17 @@ https://xxx.trycloudflare ─┘
 - **token 就是这台服务的钥匙**，拿到它就能操作你电脑上的 DSH。只发给自己的手机。
 - 服务绑定 `0.0.0.0` 或局域网 IP 时，**同一 WiFi 下的其他人也可能访问到**。
   在不信任的网络里，建议用 Tailscale（端到端加密）而不是直接开局域网。
+- **局域网是明文 HTTP**。家里/办公室的可信 WiFi 没问题，
+  **公共 WiFi 下不要用局域网模式** —— 同网段的人能抓到 token。
 - 启动脚本的 `-PermissionMode` 默认是 `workspace-write`。
   `danger-full-access` 会关闭审批，**不建议在开放网络上使用**。
 - **手机端审批等于把「授权」的按钮搬到手机上**。设备被他人拿到就能批准操作，
   建议给手机设锁屏密码。
-- App 走的是明文 HTTP（Tailscale 内部已是 WireGuard 加密）。
-  如果你用自己的公网，请务必套一层 HTTPS。
+- App 会**拒绝用明文 HTTP 连接公网地址**（只放行私有网段和 localhost）。
+  公网访问请用 https（Cloudflare 隧道）或 Tailscale。
+
+> 完整的威胁模型、明文 HTTP 的取舍、token 保护措施见
+> [docs/security.md](docs/security.md)。
 
 ---
 
@@ -307,7 +312,7 @@ https://xxx.trycloudflare ─┘
 ```bash
 cd dsh-mobile
 npm install
-npm test              # 318 项单测 + typecheck
+npm test              # 356 项单测 + typecheck
 npm run android       # 需要 Android SDK + JDK 21
 ```
 
@@ -329,10 +334,10 @@ npm run android       # 需要 Android SDK + JDK 21
 │   │   ├── screens/         # 页面
 │   │   ├── components/      # 组件
 │   │   └── design/          # 主题 token
-│   └── tests/               # Node 单测（318 项）
+│   └── tests/               # Node 单测（356 项）
 ├── dsh-outpost-desktop/     # Windows 桌面助手（Electron 托盘程序）
 ├── dsh-plugin-connect/      # 隧道服务 + 旧版网页插件
-├── docs/                    # 协议笔记、真机验证清单、截图
+├── docs/                    # 协议笔记、安全模型、真机验证清单、截图
 ├── start-dsh-web.ps1        # Windows 一键启动脚本
 ├── start-tunnel.ps1         # Cloudflare 隧道
 └── setup-gateway.ps1        # 安装移动网关（手机端审批）

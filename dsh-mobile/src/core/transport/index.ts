@@ -7,6 +7,8 @@
  * 协议实测见 docs/protocol-notes.md。
  */
 
+import { checkBaseUrlSecurity, redactUrl } from '../net-security';
+
 export interface TransportOptions {
   /** 服务地址，如 http://192.168.1.10:3095（局域网 / Tailscale / 自建公网都只是一个 URL） */
   baseUrl: string;
@@ -86,6 +88,12 @@ export class DshConnection {
    * 2. 用 CookieManager 把保存的 cookie 读回来，交给调用方持久化
    */
   async loginWithToken(token: string): Promise<string> {
+    // 明文 HTTP 只允许发往私有地址。公网域名必须 https ——
+    // 否则 token 会明文经过公网。校验放在最前面，不合格的地址
+    // 连请求都不发。
+    const insecure = checkBaseUrlSecurity(this.baseUrl);
+    if (insecure) throw new Error(insecure);
+
     const url = `${this.baseUrl}/?token=${encodeURIComponent(token)}`;
     let res: Response;
     try {
@@ -95,8 +103,13 @@ export class DshConnection {
         headers: { Accept: 'text/html' },
       });
     } catch (e) {
+      // 错误信息里带地址有助于排查，但必须脱敏 ——
+      // baseUrl 理论上不含 token（配对解析时已剥离），
+      // 这里再兜一层，防止将来有人改了解析逻辑把 token 带进来。
       const msg = e instanceof Error ? `${e.name}: ${e.message}` : String(e);
-      throw new Error(`连接失败（fetch 阶段）：${msg}。地址=${this.baseUrl}`);
+      throw new Error(
+        `连接失败（fetch 阶段）：${msg}。地址=${redactUrl(this.baseUrl)}`,
+      );
     }
 
     // 303 被自动跟随，最终是 200；状态码不再可靠，直接读 cookie 容器
