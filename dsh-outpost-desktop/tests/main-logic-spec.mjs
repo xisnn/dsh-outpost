@@ -291,7 +291,7 @@ check('托盘建不起来时至少显示窗口', () => {
 });
 
 check('单实例拿不到锁时会记日志', () => {
-  const i = MAIN.indexOf('requestSingleInstanceLock');
+  const i = MAIN.indexOf('const gotLock = app.requestSingleInstanceLock()');
   if (i < 0) return '找不到单实例锁';
   const body = MAIN.slice(i, i + 800);
   // 拿不到锁直接 quit 而不记日志 → 用户看到「一闪就没」却不知道为什么
