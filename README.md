@@ -313,26 +313,29 @@ https://xxx.trycloudflare ─┘
 cd dsh-mobile
 npm install
 npm test                  # 389 项静态检查 + 单测 + typecheck
-npm run test:integration  # 39 项集成测试（本地起模拟 DSH，不需要真服务）
+npm run test:integration  # 55 项集成测试（本地起模拟 DSH，不需要真服务）
 npm run android           # 需要 Android SDK + JDK 21
 ```
 
-### 测试分三层
+### 测试分四层
 
 | 层 | 数量 | 依赖 | 测什么 |
 |---|---|---|---|
 | **静态检查 + 单测** | 389 | 无 | 纯函数行为、配置正确性、危险写法 |
-| **集成测试** | 39 | 本地端口 | **真实网络协议**：HTTP 请求、WS 握手、审批评、分页 |
+| **协议集成** | 39 | 本地端口 | 手搓请求，验证协议形状 |
+| **产品集成** | 16 | 本地端口 | **import 真实产品代码**，验证它能不能正确对接 |
 | **端到端** | 手工 | 真实 DSH | 完整链路 |
 
 集成测试用一个**模拟 DSH 服务端**（`tests/support/fake-dsh.mjs`）：
 真 HTTP + 手写 RFC 6455 WebSocket，验证配对、重连、审批、长会话分页。
 
-> 为什么需要这层：静态检查只能验证「代码里写了某句话」，
-> 验证不了「请求真的发对了」。比如 WS 握手带没带 `X-DSH-Device-ID`，
-> 代码里写了但库可能忽略它 —— 只有真连一次才知道。
+> **为什么分「协议」和「产品」两层**：协议测试只能验证「服务端返回 401」，
+> 产品测试才能验证「我的代码收到 401 后有没有清 token 重连」。
+> 后者才是用户真正遇到的 —— 它抓到了两个真实缺陷，
+> 见 [docs/known-issues.md](docs/known-issues.md)。
 
-测试体系说明见 [dsh-mobile/tests/README.md](dsh-mobile/tests/README.md)。
+测试体系说明见 [dsh-mobile/tests/README.md](dsh-mobile/tests/README.md)，
+已知问题见 [docs/known-issues.md](docs/known-issues.md)。
 
 - 应用代码在 [`dsh-mobile/`](dsh-mobile/)，架构与实现细节见 [dsh-mobile/README.md](dsh-mobile/README.md)
 - DSH 内部协议（RPC 形状、投影字段、踩过的坑）见 [docs/protocol-notes.md](docs/protocol-notes.md)

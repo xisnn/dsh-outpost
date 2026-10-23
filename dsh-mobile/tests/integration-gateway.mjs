@@ -393,7 +393,7 @@ await check('断线：服务端断开后客户端收到 close', async () => {
 await check('自愈：用已失效的 device token 重连会被拒', async () => {
   const srv = await startFakeDsh();
   try {
-    // 模拟「本地存了个失效 token」：用 dsh-auth.<错的> 去连
+    // 模拟「本地存了个失效 token」：用 dsh-token.<错的> 去连
     const { ws, opened } = openGateway(srv, {
       token: 'stale-token-that-is-invalid',
       deviceId: 'stale-device',

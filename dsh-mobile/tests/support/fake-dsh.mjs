@@ -214,6 +214,8 @@ function makeWsServer() {
  */
 export async function startFakeDsh(opts = {}) {
   const token = opts.token ?? 'TESTTOKEN' + crypto.randomBytes(12).toString('hex');
+  /** 配对成功后发给客户端的长期 token（重连时用 dsh-token.<它>） */
+  const DEVICE_TOKEN = 'device-token-' + crypto.randomBytes(12).toString('hex');
   const cookieName = 'dsh-auth-test';
   const cookieValue = 'v1.' + crypto.randomBytes(24).toString('base64url');
   const cookie = `${cookieName}=${cookieValue}`;
@@ -224,6 +226,8 @@ export async function startFakeDsh(opts = {}) {
   const calls = [];
   /** 网关连上的设备 */
   const gatewayDevices = new Set();
+  /** /mgw/pair 被调了几次（测试诊断用） */
+  let pairCalls = 0;
   const gatewayPairings = new Map(); // pairingCode → { deviceId, used }
   let gatewayConnected = false;
 
@@ -256,6 +260,7 @@ export async function startFakeDsh(opts = {}) {
         res.end(JSON.stringify({ ok: false, error: 'unauthorized' }));
         return;
       }
+      pairCalls += 1;
       const pairingCode = crypto.randomBytes(16).toString('base64url');
       gatewayPairings.set(pairingCode, { deviceId: null, used: false });
       const authority = req.headers.host;
@@ -266,6 +271,10 @@ export async function startFakeDsh(opts = {}) {
           publicUrl: `ws://${authority}/ws/mobile`,
           gatewayId: 'fake-gateway',
           gatewayName: 'Fake',
+          // 真实网关会在 endpoints 里列多个候选（3081 网关 + 3095 web server）。
+          // 产品代码 pickUrl() 会优先挑「和 baseUrl 完全同源」的那条，
+          // 所以这里把同源地址放第一位是关键 —— 放错了会导致
+          // 断线重连时连到错误的端口（实测踩过）。
           endpoints: [
             `ws://${authority}/ws/mobile`,
             `ws://127.0.0.1:3081/ws/mobile`,
@@ -274,6 +283,21 @@ export async function startFakeDsh(opts = {}) {
       };
       res.writeHead(201, { 'content-type': 'application/json' });
       res.end(JSON.stringify(body));
+      return;
+    }
+
+    // ── GET /api/remote.mux（非 upgrade）───────────────────────
+    //
+    // `loginWithToken` 用默认的 redirect:'follow'，会把 303 跟到
+    // `./api/remote.mux`。真实 DSH 在这个路径上对普通 GET 返回一个
+    // 200 的空壳（真正的用途是 WebSocket upgrade）。
+    //
+    // 如果这里返回 404，登录就会报 "token exchange failed: HTTP 404" ——
+    // 集成测试第一版就是栽在这，看着像「产品代码有 bug」，
+    // 其实是我的模拟服务端不完整。
+    if (req.method === 'GET' && url.pathname === '/api/remote.mux') {
+      res.writeHead(200, { 'content-type': 'text/html; charset=utf-8' });
+      res.end('<!doctype html><title>fake dsh</title>ok');
       return;
     }
 
@@ -388,7 +412,7 @@ export async function startFakeDsh(opts = {}) {
         .split(',')
         .map((s) => s.trim());
       const pairProto = protocols.find((p) => p.startsWith('dsh-pair.'));
-      const authProto = protocols.find((p) => p.startsWith('dsh-auth.'));
+      const authProto = protocols.find((p) => p.startsWith('dsh-token.'));
 
       if (pairProto) {
         const code = pairProto.slice('dsh-pair.'.length);
@@ -404,8 +428,8 @@ export async function startFakeDsh(opts = {}) {
         rec.deviceId = String(deviceId);
         gatewayDevices.add(String(deviceId));
       } else if (authProto) {
-        const tok = authProto.slice('dsh-auth.'.length);
-        if (tok !== 'valid-device-token') {
+        const tok = authProto.slice('dsh-token.'.length);
+        if (tok !== DEVICE_TOKEN) {
           socket.write(
             'HTTP/1.1 401 Unauthorized\r\nConnection: close\r\nContent-Length: 0\r\n\r\n',
           );
@@ -424,10 +448,15 @@ export async function startFakeDsh(opts = {}) {
       // 不回的话 ws 客户端会报 "Server sent no subprotocol" 并断开。
       const s = gatewayWs.accept(req, socket, 'dsh-mobile-v1');
       // 配对上就发 paired 帧（真实服务端行为）
+      //
+      // ⚠️ 字段名必须是 `token` 不是 `deviceToken` ——
+      // ApprovalGateway 读的是 `frame.token`（见 handleFrame 的 paired 分支），
+      // 存下来用于后续重连。第一版写成 deviceToken，导致重连一直失败，
+      // 表现出来就是「断线后永远连不回来」。
       setTimeout(() => {
         s.send({
           kind: 'paired',
-          deviceToken: 'valid-device-token',
+          token: DEVICE_TOKEN,
           deviceId: String(deviceId),
         });
       }, 5);
@@ -450,6 +479,9 @@ export async function startFakeDsh(opts = {}) {
     cookie,
     calls,
     gatewayDevices,
+    get pairCalls() {
+      return pairCalls;
+    },
     get gatewayConnected() {
       return gatewayConnected;
     },
