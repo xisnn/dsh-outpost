@@ -195,8 +195,34 @@ check('声明了 qrcode 依赖', () =>
   pkg.dependencies?.qrcode ? true : '没有 qrcode 依赖',
 );
 check('有打包脚本', () =>
-  pkg.scripts?.build?.includes('electron-builder') ? true : '没有打包脚本',
+  pkg.scripts?.pack?.includes('pack.js') ? true : '没有打包脚本',
 );
+check('打包脚本不用在线工具（跳过 app-builder 下载）', () => {
+  const pack = readFileSync('pack.js', 'utf8');
+  // 必须用 --dir（只复制本地文件），不能直接 --win（会下载 NSIS/winCodeSign）
+  return pack.includes("'--dir'") && pack.includes('electronDist')
+    ? true
+    : '打包会去下载工具，在受限环境会失败';
+});
+check('打包脚本清掉 ELECTRON_RUN_AS_NODE', () => {
+  const pack = readFileSync('pack.js', 'utf8');
+  return pack.includes('ELECTRON_RUN_AS_NODE') ? true : '没清环境变量，子进程会崩';
+});
+check('打包脚本直接调 electron-builder CLI（不走 npx）', () => {
+  const pack = readFileSync('pack.js', 'utf8');
+  // 走 npx 时子进程输出会被吞，出错看不到原因
+  return pack.includes('electron-builder/out/cli/cli.js') ? true : '用 npx 会吞掉错误输出';
+});
+check('打包带 extraResources（隧道服务进包）', () => {
+  const yml = readFileSync('electron-builder.yml', 'utf8');
+  return yml.includes('tunnel-service.mjs') && yml.includes('extraResources')
+    ? true
+    : '打包后没有 tunnel-service，装到别的机器上完全不可用';
+});
+check('打包配置了 electronDist（复用本地 Electron）', () => {
+  const yml = readFileSync('electron-builder.yml', 'utf8');
+  return yml.includes('electronDist') ? true : '会去在线下载 Electron，容易失败';
+});
 
 // ── 实际文件存在性 ──────────────────────────────────────────────
 check('托盘图标存在', () =>
