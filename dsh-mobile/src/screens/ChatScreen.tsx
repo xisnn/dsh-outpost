@@ -50,7 +50,7 @@ import { ModelSwitcher } from '../components/ModelSwitcher';
 import { pickAttachments, formatBytes, type PickMode } from '../core/picker';
 import { guessImageMime, readFileBase64 } from '../core/rpc/upload';
 import type { OutgoingAttachment } from '../core/store';
-import { withModeTag } from '../core/butler';
+import { modeSwitchMessage } from '../core/butler';
 import type { Block, ChatItem } from '../core/fold';
 import type { SessionAddress } from '../core/types';
 
@@ -139,15 +139,33 @@ export function ChatScreen({
   }, [butler]);
 
   /**
-   * 切换闲聊/计划：**只改本地状态**，不发任何消息。
+   * 切换闲聊/计划。
    *
-   * 模式通过每条用户消息尾部的 〔模式:x〕 标记带给管家（fold 显示时会剥掉），
-   * 所以切换模式不会产生额外对话轮次，聊天记录保持干净。
+   * 策略：**只在真正切换时补一条系统消息**，日常消息不带任何标记。
+   *
+   * 早先的做法是给每条用户消息尾部拼 `〔模式:闲聊〕`。问题是：
+   *   · 100 轮对话就是 100 个标记，全都进上下文、进 token 计费
+   *   · 模型每次都要重读一遍「现在是闲聊」，纯冗余
+   *
+   * 现在切换时发一条 `〔模式切换〕xxx`（fold 会滤掉，用户看不到），
+   * 之后的消息就是纯用户输入。
    */
-  const switchButlerMode = useCallback((mode: ButlerMode) => {
-    setButlerMode(mode);
-    void AsyncStorage.setItem(BUTLER_PLAN_KEY, mode);
-  }, []);
+  const switchButlerMode = useCallback(
+    (mode: ButlerMode) => {
+      setButlerMode((prev) => {
+        if (prev === mode) return prev;
+        // 只在真的变了的时候发指令
+        void store
+          .send(sessionId, modeSwitchMessage(mode), [], 'queue')
+          .catch(() => {
+            // 发不出去不影响本地状态：靠下一条消息时的模式标记兜底
+          });
+        return mode;
+      });
+      void AsyncStorage.setItem(BUTLER_PLAN_KEY, mode);
+    },
+    [sessionId, store],
+  );
 
   // 团队状态靠投影轮询刷新：team/* 事件不在会话日志里，拿不到增量
   useEffect(() => {
@@ -272,9 +290,9 @@ export function ChatScreen({
     setDrafts([]);
     try {
       const attachments = await resolveDrafts(pending);
-      // 管家页把当前模式随消息带过去（fold 显示时会剥掉标记）
-      const payload = butler ? withModeTag(text, butlerMode) : text;
-      await store.send(sessionId, payload, attachments, 'queue');
+      // 不再给每条消息拼 〔模式:xxx〕 —— 模式切换时已经单独发过指令了。
+      // 每条都带标记会白烧 token（100 轮 = 100 个标记全进上下文）。
+      await store.send(sessionId, text, attachments, 'queue');
       setNearBottom(true);
     } catch (e) {
       // 失败把草稿放回去，别让用户白选一遍

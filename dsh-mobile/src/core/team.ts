@@ -60,3 +60,73 @@ export function teamSummary(states: MemberState[]) {
     done: states.filter((s) => s.status === 'done').length,
   };
 }
+
+// ── 队员复用兜底 ────────────────────────────────────────────────────
+//
+// Prompt 里要求「同一岗位只保留一个队员」，但这靠模型自觉 ——
+// 它偶尔会建出 coder-1、coder-2、coder2 之类。一旦发生：
+//   · token 白烧（每个新队员都要重新读项目）
+//   · 团队栏变长，用户分不清谁是谁
+//
+// 这里在客户端做一层检测，发现重复就提示用户（不自动处理 ——
+// 删队员是不可逆操作，交给用户决定）。
+
+/** 固定四个岗位。名字里的数字/后缀会被剥掉后再比对 */
+export const FIXED_ROLES = ['coder', 'scout', 'designer', 'writer'] as const;
+export type FixedRole = (typeof FIXED_ROLES)[number];
+
+/**
+ * 从队员名字里抽出「岗位」。
+ *
+ * `coder` / `coder-1` / `Coder_2` / `coder2` / `coder (2)` 都归一成 `coder`。
+ * 不是固定岗位的（比如用户自己起的名字）返回 null。
+ */
+export function roleOf(name: string): FixedRole | null {
+  const base = String(name ?? '')
+    .toLowerCase()
+    .replace(/[\s_\-()（）#]+/g, '') // 去掉分隔符
+    .replace(/\d+$/, '') // 去掉结尾数字
+    .trim();
+  for (const role of FIXED_ROLES) {
+    if (base === role || base.startsWith(role)) return role;
+  }
+  return null;
+}
+
+export interface DuplicateRole {
+  role: FixedRole;
+  /** 这个岗位下的所有队员名（按出现顺序） */
+  names: string[];
+}
+
+/**
+ * 找出重复的岗位。
+ *
+ * 返回空数组表示健康。有重复时，UI 可以提示用户清理。
+ */
+export function findDuplicateRoles(team?: AgentTeam): DuplicateRole[] {
+  if (!team) return [];
+  const byRole = new Map<FixedRole, string[]>();
+  for (const m of team.members ?? []) {
+    if (m.role !== 'teammate') continue;
+    const role = roleOf(m.name);
+    if (!role) continue;
+    const list = byRole.get(role) ?? [];
+    list.push(m.name);
+    byRole.set(role, list);
+  }
+  const out: DuplicateRole[] = [];
+  for (const [role, names] of byRole) {
+    if (names.length > 1) out.push({ role, names });
+  }
+  return out;
+}
+
+/**
+ * 给用户看的重复提示（没有重复时返回 null）。
+ */
+export function duplicateRoleHint(dups: DuplicateRole[]): string | null {
+  if (dups.length === 0) return null;
+  const parts = dups.map((d) => `${d.role}（${d.names.join('、')}）`);
+  return `检测到重复岗位：${parts.join('；')}。建议只保留一个 —— 重复队员会重复读项目，费 token。`;
+}
