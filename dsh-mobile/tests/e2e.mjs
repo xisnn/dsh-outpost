@@ -48,9 +48,14 @@ async function call(cookie, endpoint, args) {
   return r.value;
 }
 
-// ── 极简 WS（Node 24 全局有 WebSocket） ────────────────────────────
+// ── 极简 WS ──────────────────────────────────────────────────────
+//
+// ⚠️ 不要直接 `new WebSocket(...)`：Node 20 **没有**全局 WebSocket
+// （21+ 才有）。这里通过兼容层保证任何支持的 Node 版本都能跑。
 async function openFollow(cookie, sessionId) {
   const wsUrl = `ws://${HOST}:${PORT}/api/remote.mux`;
+  const { ensureWebSocket } = await import('./support/ws-compat.mjs');
+  ensureWebSocket();
   const ws = new WebSocket(wsUrl, { headers: { Cookie: cookie } });
 
   await new Promise((res, rej) => {

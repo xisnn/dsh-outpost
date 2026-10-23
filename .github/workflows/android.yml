@@ -89,6 +89,18 @@ jobs:
         working-directory: dsh-mobile
         run: npm run test:integration
 
+      # 用「模拟 Node 20」再跑一遍集成测试。
+      #
+      # 为什么：CI 的 Node 20 **没有全局 WebSocket**（21+ 才有），
+      # 而本地开发常用 Node 24。曾经因此出现过「本地全过、CI 5 项全红」，
+      # 报 `WebSocket is not defined`，排查了很久。
+      #
+      # 这一步通过删掉 globalThis.WebSocket 复现 Node 20 环境，
+      # 保证测试在任何支持的 Node 版本上都真能跑。
+      - name: Integration tests under Node 20 semantics
+        working-directory: dsh-mobile
+        run: npm run test:node20
+
       # 用 tag 推导版本号，写进 package.json 和 Gradle，
       # 保证「安装包里的版本」和「应用内更新检查的基准」是同一个值。
       - name: Derive version from tag
