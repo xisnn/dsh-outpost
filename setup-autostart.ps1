@@ -58,7 +58,7 @@ function Write-Err2($m) { Write-Host "  [X] $m" -ForegroundColor Red }
 
 Write-Host ''
 Write-Host ('=' * 62) -ForegroundColor DarkCyan
-Write-Host '  DSH Pocket 开机自启' -ForegroundColor Cyan
+Write-Host '  DSH Outpost 开机自启' -ForegroundColor Cyan
 Write-Host ('=' * 62) -ForegroundColor DarkCyan
 Write-Host ''
 

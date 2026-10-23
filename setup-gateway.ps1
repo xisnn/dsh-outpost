@@ -101,14 +101,14 @@ if ($content -match '(?m)^- id:\s*mobile-gateway') {
 } else {
     $block = @"
 
-# 手机网关：让 DSH Pocket 能通过 WebSocket 接审批和实时事件。
+# 手机网关：让 DSH Outpost 能通过 WebSocket 接审批和实时事件。
 # 由 setup-gateway.ps1 写入。
 - id: mobile-gateway
   name: '$PluginName'
   config:
     gatewayEnabled: true
     gatewayMode: persistent
-    gatewayName: DSH Pocket
+    gatewayName: DSH Outpost
     requireAuth: true
     adminLoopbackOnly: false
     lanEnabled: true

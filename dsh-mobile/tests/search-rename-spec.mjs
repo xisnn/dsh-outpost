@@ -49,7 +49,7 @@ check('按标题匹配', () => {
 });
 
 check('大小写不敏感', () => {
-  const list = [s('DSH Pocket'), s('其他')];
+  const list = [s('DSH Outpost'), s('其他')];
   return (
     filterSessions(list, 'dsh').length === 1 && filterSessions(list, 'DSH').length === 1
   );

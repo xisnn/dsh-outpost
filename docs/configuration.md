@@ -82,8 +82,8 @@ $env:DSH_TUNNEL_PORT = 3299
 
 ```powershell
 # clone 到任意位置
-git clone https://github.com/xisnn/dsh-pocket.git D:\tools\dsh-pocket
-cd D:\tools\dsh-pocket
+git clone https://github.com/xisnn/dsh-outpost.git D:\tools\dsh-outpost
+cd D:\tools\dsh-outpost
 
 # 直接跑就行，路径会从脚本位置推导
 .\start-dsh-web.ps1 -Bind lan
@@ -95,7 +95,7 @@ cd D:\tools\dsh-pocket
 
 ```powershell
 # 看服务实际用的路径
-node -e "console.log(process.env.LOCALAPPDATA + '\\dsh-pocket')"
+node -e "console.log(process.env.LOCALAPPDATA + '\\dsh-outpost')"
 
 # 看服务状态（含诊断字段）
 curl http://127.0.0.1:3199/tunnel/status

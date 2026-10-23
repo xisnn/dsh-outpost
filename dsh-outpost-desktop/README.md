@@ -1,4 +1,4 @@
-# DSH Pocket 桌面助手
+# DSH Outpost 桌面助手
 
 Windows 托盘程序，替代原来的 DSH 网页插件「手机连接」按钮。
 
@@ -61,7 +61,7 @@ crashpad_client_win.cc   → not connected
 
 连官方 Electron 的最基础命令都跑不起来，**确认是环境限制不是代码问题**。
 
-需要你在有桌面的 Windows 上解压 zip、双击 `DSH Pocket.exe` 确认界面。
+需要你在有桌面的 Windows 上解压 zip、双击 `DSH Outpost.exe` 确认界面。
 
 ---
 
@@ -88,7 +88,7 @@ npm run pack        # 推荐：出可直接分发的 zip
 
 产物：`release/DSHPocket-Desktop-0.1.0-win-x64.zip`（260 MB）
 
-解压即用，双击 `DSH Pocket.exe` 运行，不需要安装。
+解压即用，双击 `DSH Outpost.exe` 运行，不需要安装。
 
 ### 为什么不用 `npm run build:nsis`
 
@@ -110,7 +110,7 @@ npm run pack        # 推荐：出可直接分发的 zip
 
 ### 关于体积
 
-260 MB 主要是 Electron 本体（`DSH Pocket.exe` 180 MB + dll/pak 约 80 MB）。
+260 MB 主要是 Electron 本体（`DSH Outpost.exe` 180 MB + dll/pak 约 80 MB）。
 
 Electron 的 exe/dll 已经高度压缩过，再压只能省 9 MB（269 → 260），
 所以 `pack.js` 对二进制用 store、对 asar/js 用 deflate。
@@ -120,7 +120,7 @@ Electron 的 exe/dll 已经高度压缩过，再压只能省 9 MB（269 → 260�
 ## 架构
 
 ```
-dsh-pocket-desktop/
+dsh-outpost-desktop/
 ├── src/
 │   ├── main/
 │   │   ├── main.js       # 主进程：托盘、窗口、IPC、隧道服务管理

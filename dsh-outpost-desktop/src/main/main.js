@@ -1,5 +1,5 @@
 /**
- * DSH Pocket 桌面托盘助手 —— 主进程。
+ * DSH Outpost 桌面托盘助手 —— 主进程。
  *
  * ## 它解决什么问题
  *
@@ -49,7 +49,7 @@ function findTunnelService() {
   const candidates = [
     // 打包后（extraResources 拷过来的）
     process.resourcesPath ? path.join(process.resourcesPath, 'tunnel-service.mjs') : '',
-    // 开发时：从 dsh-pocket-desktop/src/main 往上找仓库根
+    // 开发时：从 dsh-outpost-desktop/src/main 往上找仓库根
     path.join(__dirname, '..', '..', '..', 'dsh-plugin-connect', 'tunnel-service.mjs'),
     path.join(__dirname, '..', '..', 'dsh-plugin-connect', 'tunnel-service.mjs'),
     // 环境变量兜底
@@ -123,7 +123,7 @@ function createWindow() {
     frame: false,
     transparent: false,
     backgroundColor: '#faf9f7',
-    title: 'DSH Pocket',
+    title: 'DSH Outpost',
     webPreferences: {
       preload: path.join(__dirname, 'preload.js'),
       contextIsolation: true,
@@ -185,7 +185,7 @@ function createTray() {
     image = nativeImage.createEmpty();
   }
   tray = new Tray(image);
-  tray.setToolTip('DSH Pocket');
+  tray.setToolTip('DSH Outpost');
 
   const menu = Menu.buildFromTemplate([
     { label: '打开面板', click: showWindow },

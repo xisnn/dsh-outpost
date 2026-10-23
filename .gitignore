@@ -81,14 +81,14 @@ tunnel.json
 pairing.json
 
 
-# 提交信息临时文件
+# 锟结交锟斤拷息锟斤拷时锟侥硷拷
 _msg.txt
 _commitmsg.txt
 
-# 根目录误建的 package.json（真配置在 dsh-mobile/）
+# 锟斤拷目录锟襟建碉拷 package.json锟斤拷锟斤拷锟斤拷锟斤拷锟斤拷 dsh-mobile/锟斤拷
 /package.json
 
-# 临时验证脚本与数据（模拟器调试用）
+# 锟斤拷时锟斤拷证锟脚憋拷锟斤拷锟斤拷锟捷ｏ拷模锟斤拷锟斤拷锟斤拷锟斤拷锟矫ｏ拷
 _w/
 _w2/
 _wstest/
@@ -100,9 +100,9 @@ _qrcheck/
 _qc/
 _q2/
 
-# 桌面助手构建产物
-dsh-pocket-desktop/release/
-dsh-pocket-desktop/node_modules/
-dsh-pocket-desktop/_build.bat
-dsh-pocket-desktop/_e.log
-dsh-pocket-desktop/_e.err
+# 锟斤拷锟斤拷锟斤拷锟街癸拷锟斤拷锟斤拷锟斤拷
+dsh-outpost-desktop/release/
+dsh-outpost-desktop/node_modules/
+dsh-outpost-desktop/_build.bat
+dsh-outpost-desktop/_e.log
+dsh-outpost-desktop/_e.err

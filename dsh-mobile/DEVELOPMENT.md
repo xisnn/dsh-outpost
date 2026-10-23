@@ -1,4 +1,4 @@
-# DSH Pocket · 开发记录
+# DSH Outpost · 开发记录
 
 > 这是**开发日志**，不是上手文档。安装和使用请看 [根目录 README](../README.md)。
 >
@@ -1035,7 +1035,7 @@ android:networkSecurityConfig="@xml/network_security_config"
 
 ```
 Failed to find configured root that contains
-/file:/data/user/0/com.dshpocket/cache/dsh-pocket-0.2.2.apk
+/file:/data/user/0/com.dshpocket/cache/dsh-outpost-0.2.2.apk
 ```
 
 注意路径里的 `/file:/data/...` —— `file:` 被当成了路径的一部分。

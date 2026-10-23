@@ -1,7 +1,7 @@
 {
-  "name": "dsh-pocket-desktop",
-  "version": "0.1.0",
-  "description": "DSH Pocket 桌面托盘助手 —— 扫码连接手机、管理隧道",
+  "name": "dsh-outpost-desktop",
+  "version": "0.10.0",
+  "description": "DSH Outpost 桌面托盘助手 —— 扫码连接手机、管理隧道",
   "main": "src/main/main.js",
   "private": true,
   "scripts": {
@@ -12,7 +12,7 @@
     "build:nsis": "electron-builder --win",
     "test": "tsx tests/main-logic-spec.mjs"
   },
-  "author": "dsh-pocket",
+  "author": "dsh-outpost",
   "license": "MIT",
   "devDependencies": {
     "electron": "^33.2.0",

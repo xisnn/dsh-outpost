@@ -3,7 +3,7 @@
   "version": "1.0.0",
   "private": true,
   "type": "module",
-  "description": "显示手机连接地址和二维码，方便 DSH Pocket 配对",
+  "description": "显示手机连接地址和二维码，方便 DSH Outpost 配对",
   "exports": {
     ".": "./index.js",
     "./client": "./client.js",

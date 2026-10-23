@@ -73,7 +73,7 @@ async function ensureDeviceId(): Promise<string> {
   } catch {
     /* 读不到就重新生成 */
   }
-  const id = `dsh-pocket-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 10)}`;
+  const id = `dsh-outpost-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 10)}`;
   try {
     await AsyncStorage.setItem(DEVICE_ID_KEY, id);
   } catch {

@@ -511,7 +511,7 @@ Write-Host ''
 Write-Host '  手机配对地址（带 token，扫码或粘贴都行）：' -ForegroundColor White
 Write-Host "  $pairUrl" -ForegroundColor Yellow
 Write-Host ''
-Write-Host '  在 DSH Pocket 里粘贴上面这个地址即可配对。' -ForegroundColor Gray
+Write-Host '  在 DSH Outpost 里粘贴上面这个地址即可配对。' -ForegroundColor Gray
 Write-Host '  也可以打开 DSH 网页 → 侧边栏「手机连接」扫二维码。' -ForegroundColor Gray
 Write-Host ''
 Write-Host '  注意：快速隧道每次重启域名都会变，手机需要重新配对。' -ForegroundColor DarkYellow
