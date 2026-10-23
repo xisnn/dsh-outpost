@@ -6,6 +6,8 @@
     "output": "release",
     "buildResources": "assets"
   },
+  "electronDist": "node_modules/electron/dist",
+  "compression": "normal",
   "files": [
     "src/**/*",
     "assets/tray.png",
@@ -20,23 +22,13 @@
   "win": {
     "target": [
       {
-        "target": "nsis",
-        "arch": ["x64"]
-      },
-      {
         "target": "portable",
         "arch": ["x64"]
       }
     ],
-    "icon": "assets/tray.png",
-    "artifactName": "DSHPocket-Desktop-${version}-${arch}.${ext}"
-  },
-  "nsis": {
-    "oneClick": false,
-    "allowToChangeInstallationDirectory": true,
-    "createDesktopShortcut": true,
-    "createStartMenuShortcut": true,
-    "shortcutName": "DSH Pocket"
+    "icon": "assets/icon.png",
+    "signAndEditExecutable": false,
+    "artifactName": "DSHPocket-Desktop-${version}.${ext}"
   },
   "portable": {
     "artifactName": "DSHPocket-Desktop-${version}-portable.${ext}"

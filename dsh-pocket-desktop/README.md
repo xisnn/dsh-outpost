@@ -33,12 +33,45 @@ Windows 托盘程序，替代原来的 DSH 网页插件「手机连接」按钮�
 
 ---
 
+## 验证状态
+
+### ✅ 已验证（本机实测）
+
+| 项 | 结果 |
+|---|---|
+| `npm install` | 405 个包，成功 |
+| 语法检查 | 3 个 JS 文件全部通过 |
+| 逻辑测试 | 30 项全过 |
+| **打包** | `npm run pack` 成功，产物 260 MB |
+| **包结构** | 解压后 269 MB，关键文件齐全 |
+| **asar 内容** | 5 个源文件 + qrcode 依赖，288 个文件 |
+| **隧道服务** | `resources/tunnel-service.mjs` 正确拷入 |
+| **托盘图标** | asar 内 `assets/tray.png` 存在，路径解析正确 |
+| **tunnel-service 接口** | 实测 `GET /tunnel/status` 返回 200，数据完整 |
+
+### ⚠️ 未验证
+
+**GUI 实际渲染** —— 当前开发会话无法启动任何 Electron 进程：
+
+```
+electron.exe --version   → 退出码 -2147483645 (0x80000003)
+官方 hello world         → 同样崩溃
+crashpad_client_win.cc   → not connected
+```
+
+连官方 Electron 的最基础命令都跑不起来，**确认是环境限制不是代码问题**。
+
+需要你在有桌面的 Windows 上解压 zip、双击 `DSH Pocket.exe` 确认界面。
+
+---
+
 ## 开发
 
 ```bash
 npm install
 npm start          # 开发模式
 npm run dev        # 开发模式 + DevTools
+npm test           # 逻辑测试（30 项）
 ```
 
 > **注意**：如果终端里有 `ELECTRON_RUN_AS_NODE=1`，Electron 会以纯 Node 模式启动，
@@ -50,19 +83,37 @@ npm run dev        # 开发模式 + DevTools
 ## 打包
 
 ```bash
-npm run build       # 出 NSIS 安装包 + 免安装版
-npm run build:dir   # 只出目录（调试用）
+npm run pack        # 推荐：出可直接分发的 zip
 ```
 
-产物在 `release/`：
+产物：`release/DSHPocket-Desktop-0.1.0-win-x64.zip`（260 MB）
 
-| 文件 | 说明 |
+解压即用，双击 `DSH Pocket.exe` 运行，不需要安装。
+
+### 为什么不用 `npm run build:nsis`
+
+试过了，在受限环境里必然失败，卡点依次是：
+
+| 阶段 | 报错 |
 |---|---|
-| `DSHPocket-Desktop-0.1.0-x64.exe` | 安装包（可选安装目录） |
-| `DSHPocket-Desktop-0.1.0-portable.exe` | 免安装，双击即用 |
+| 下载 Electron | `Open ...electron\Cache\850102735.zip.part: Access is denied.` |
+| 下载 winCodeSign | `mkdir ...electron-builder\Cache\winCodeSign: Access is denied.` |
+| 下载 NSIS | `mkdir ...electron-builder\Cache\nsis: Access is denied.` |
 
-打包时会把 `../dsh-plugin-connect/tunnel-service.mjs` 一起拷进 `resources/`，
-所以装到任何一台机器上都自带隧道服务，不依赖仓库结构。
+根因是 `app-builder.exe` 会**分 8 段并发下载**并在 `%LOCALAPPDATA%` 下并发建目录，
+这个环境不允许。
+
+`pack.js` 绕开了全部下载：用 `electron-builder --dir`（只复制本地文件，
+零网络请求）生成目录，然后自己用 Node 的 zlib 打 zip。
+
+**想要 NSIS 安装包**：在普通 Windows 机器上跑 `npm run build:nsis` 即可。
+
+### 关于体积
+
+260 MB 主要是 Electron 本体（`DSH Pocket.exe` 180 MB + dll/pak 约 80 MB）。
+
+Electron 的 exe/dll 已经高度压缩过，再压只能省 9 MB（269 → 260），
+所以 `pack.js` 对二进制用 store、对 asar/js 用 deflate。
 
 ---
 

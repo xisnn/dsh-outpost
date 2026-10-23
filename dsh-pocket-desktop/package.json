@@ -7,8 +7,10 @@
   "scripts": {
     "start": "electron .",
     "dev": "electron . --dev",
-    "build": "electron-builder --win",
-    "build:dir": "electron-builder --win --dir"
+    "pack": "node pack.js",
+    "build:dir": "electron-builder --win --dir",
+    "build:nsis": "electron-builder --win",
+    "test": "tsx tests/main-logic-spec.mjs"
   },
   "author": "dsh-pocket",
   "license": "MIT",
