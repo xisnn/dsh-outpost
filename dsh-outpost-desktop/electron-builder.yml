@@ -15,12 +15,12 @@
   ],
   "extraFiles": [
     {
-      "from": "启动 DSH Outpost.bat",
-      "to": "启动 DSH Outpost.bat"
+      "from": "START.bat",
+      "to": "START.bat"
     },
     {
       "from": "diagnose.bat",
-      "to": "diagnose.bat"
+      "to": "DIAGNOSE.bat"
     }
   ],
   "extraResources": [
