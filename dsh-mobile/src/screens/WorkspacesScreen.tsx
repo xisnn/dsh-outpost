@@ -27,6 +27,7 @@ import type { Workspace } from '../core/types';
 import { Avatar, Dot, Tile } from '../components/ui';
 import { WorkspaceSheet } from '../components/WorkspaceSheet';
 import { NewWorkspaceSheet } from '../components/NewWorkspaceSheet';
+import { CompatBanner } from '../components/CompatBanner';
 
 function formatAgo(ts: number): string {
   if (!ts) return '';
@@ -183,6 +184,23 @@ export function WorkspacesScreen() {
   return (
     <View style={styles.root}>
       {header}
+      {/* 连接失败时给出可操作的提示。
+          之前错误只存在 store 里没人显示 —— 用户网络断了只看到空列表，
+          完全不知道为什么。connectionHint 是分类过的中文提示。 */}
+      {store.connection === 'error' && store.connectionHint ? (
+        <View style={styles.netBar}>
+          <Text style={styles.netIcon}>⚠</Text>
+          <View style={styles.netBody}>
+            <Text style={styles.netTitle} numberOfLines={2}>
+              {store.connectionHint.split('\n')[0]}
+            </Text>
+            <Text style={styles.netHint} numberOfLines={3}>
+              {store.connectionHint.split('\n').slice(1).join(' ')}
+            </Text>
+          </View>
+        </View>
+      ) : null}
+      <CompatBanner summary={store.compatSummary} missing={store.compatMissing} />
       <FlatList
         contentContainerStyle={styles.content}
         data={store.workspaces}
@@ -291,6 +309,35 @@ function makeStyles(tv: ReturnType<typeof useTheme>) {
   const C = tv.colors;
   return StyleSheet.create({
     root: { flex: 1, backgroundColor: C.bg },
+
+    // 连接错误提示条（和下面已有的 errorTitle/errorBody 区分开，
+    // 那两个是「会话列表加载失败」用的，这里是「连不上服务」用的）
+    netBar: {
+      flexDirection: 'row',
+      alignItems: 'flex-start',
+      gap: 6,
+      marginHorizontal: layout.screenPadding,
+      marginTop: space.xs,
+      paddingVertical: 7,
+      paddingHorizontal: 9,
+      borderRadius: 8,
+      backgroundColor: C.dangerWash,
+      borderWidth: StyleSheet.hairlineWidth,
+      borderColor: C.danger,
+    },
+    netIcon: { color: C.danger, fontSize: type.xs, lineHeight: type.xs * 1.5 },
+    netBody: { flex: 1, gap: 2 },
+    netTitle: {
+      color: C.danger,
+      fontSize: type.micro,
+      lineHeight: type.xs * 1.5,
+      fontWeight: weight.medium,
+    },
+    netHint: {
+      color: C.textTertiary,
+      fontSize: type.micro,
+      lineHeight: type.xs * 1.4,
+    },
 
     header: {
       paddingHorizontal: layout.screenPadding,

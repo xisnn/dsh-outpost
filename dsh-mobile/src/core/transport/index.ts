@@ -8,6 +8,68 @@
  */
 
 import { checkBaseUrlSecurity, redactUrl } from '../net-security';
+import { RpcError, type RpcErrorKind } from '../rpc-error';
+
+/**
+ * 造一个带分类和用户提示的 RPC 错误。
+ *
+ * 分类规则不放在这里，而是根据 kind + raw 现算 —— 保持 transport
+ * 只管「哪一层失败」，具体话术交给 rpc-error。
+ */
+function makeRpcError(
+  endpoint: string,
+  kind: RpcErrorKind,
+  raw: string,
+  cause?: unknown,
+): RpcError {
+  const lower = raw.toLowerCase();
+
+  // 接口不存在 = 版本不匹配，这是最重要的一类
+  const missing = /not-?found|unknown\s+method|no\s+such|unimplemented/i.test(lower);
+  const auth = kind === 'http' && /40[13]/.test(raw);
+  const authText = /unauthor|forbidden|invalid.*(token|cookie)/i.test(lower);
+  const serverErr = kind === 'http' && /5\d\d/.test(raw);
+
+  let userTitle: string;
+  let userHint: string;
+  let retryable: boolean;
+
+  if (missing) {
+    userTitle = '这个 DSH 版本不支持该功能';
+    userHint =
+      '电脑上的 DSH 可能比你装的 App 老，或者接口改过名。\n' +
+      '建议把 DSH 更新到最新版，再试一次。';
+    retryable = false;
+  } else if (auth || authText) {
+    userTitle = '登录状态失效了';
+    userHint =
+      'DSH 服务可能重启过（token 每次启动都会变）。\n' +
+      '回配对页用新的 token 重新连一次就好。';
+    retryable = false;
+  } else if (kind === 'network') {
+    userTitle = '连不上电脑上的 DSH';
+    userHint =
+      '检查：① 电脑上 DSH 还在跑吗；② 手机和电脑在同一网络吗；\n' +
+      '③ 换过 WiFi 的话，电脑地址可能变了，需要重新扫码。';
+    retryable = true;
+  } else if (kind === 'malformed') {
+    userTitle = 'DSH 返回的数据格式变了';
+    userHint =
+      'App 按旧格式解析不了。建议把 App 更新到最新版。\n' +
+      '如果已经是最新版，说明上游改得比较快。';
+    retryable = true;
+  } else if (serverErr) {
+    userTitle = 'DSH 那边出错了';
+    userHint = '这是电脑端的问题，不是手机的。\n建议看看 DSH 日志，或者重启一下 DSH。';
+    retryable = true;
+  } else {
+    userTitle = '操作失败了';
+    userHint = '详情里是原始错误信息。';
+    retryable = false;
+  }
+
+  return new RpcError({ endpoint, kind, raw, userTitle, userHint, retryable, cause });
+}
 
 export interface TransportOptions {
   /** 服务地址，如 http://192.168.1.10:3095（局域网 / Tailscale / 自建公网都只是一个 URL） */
@@ -191,17 +253,34 @@ export class DshConnection {
     } catch (e) {
       const err = e as { name?: string; message?: string };
       if (__DEV__) console.log('[transport] fetch failed', url, err?.name, err?.message);
-      throw e;
+      // 网络层的错误统一包一层可操作提示 —— 用户看到
+      // 「Network request failed」是不知道该怎么做的。
+      throw makeRpcError(endpoint, 'network', `${err?.name ?? ''}: ${err?.message ?? ''}`.trim(), e);
     }
     if (!res.ok) {
-      throw new Error(`${endpoint} transport failure: HTTP ${res.status}`);
+      // HTTP 状态码本身也带信息：401 = 鉴权失效，5xx = 服务端内部错
+      throw makeRpcError(endpoint, 'http', `HTTP ${res.status}`);
     }
-    const parsed = (await res.json()) as { result?: RpcResult<T> };
+    // 解析失败不能把原始异常抛给上层 —— 用户会看到
+    // "Unexpected token < in JSON" 这种完全看不懂的东西。
+    let parsed: { result?: RpcResult<T> } | undefined;
+    try {
+      parsed = (await res.json()) as { result?: RpcResult<T> };
+    } catch {
+      parsed = undefined;
+    }
     const result = parsed?.result;
-    if (!result) throw new Error(`${endpoint}: malformed response`);
+    if (!result) {
+      // 能拿到 200 但结构不对 —— 典型的「上游改了返回格式」
+      throw makeRpcError(endpoint, 'malformed', 'malformed response（没有 result 字段）');
+    }
     if (result.ok === false) {
       const err = result.error;
-      throw new Error(`${endpoint}: ${err?.code ?? 'unknown'} ${err?.message ?? ''}`.trim());
+      throw makeRpcError(
+        endpoint,
+        'rpc',
+        `${err?.code ?? 'unknown'} ${err?.message ?? ''}`.trim(),
+      );
     }
     return result.value as T;
   }
