@@ -1,18 +1,60 @@
 <?xml version="1.0" encoding="utf-8"?>
 <!--
-  DSH 的 Web 服务默认走明文 HTTP：
-    · Tailscale 内部已经有 WireGuard 加密
-    · 局域网模式就是普通 http
-  所以必须允许 cleartext，否则 Android 9+ 会让请求静默失败
-  （表现为 TypeError: Network request failed，非常难排查）。
-
-  注意：不要用 manifestPlaceholders 控制这个值 —— release 构建的
-  manifest 合并流程会把它覆盖掉，导致 debug 能用、release 用不了。
+  网络安全配置。
+  
+  ## 为什么必须允许明文
+  
+  DSH 的 Web 服务默认是**明文 HTTP**：
+    · 局域网模式：http://192.168.x.x:3095
+    · Tailscale 模式：http://100.x.x.x:3095（内部已有 WireGuard 加密）
+    · Cloudflare 隧道：https://xxx.trycloudflare.com（本身 HTTPS）
+  
+  前两种必须放行 cleartext，否则 Android 9+ 会静默失败
+  （表现为 `TypeError: Network request failed`，极难排查）。
+  
+  ## 为什么不能只白名单私有网段
+  
+  `network-security-config` **不支持 CIDR 网段**，也不支持 IP 通配。
+  私有网段有 192.168/16、10/8、172.16/12、100.64/10 好几段，
+  逐个列 IP 不可能（用户的路由器给什么 IP 都有可能）。
+  
+  所以这个文件只能「允许明文」，真正的安全边界放在**应用层**：
+  
+    · baseUrl 由用户配对时确定，之后不会自己变
+    · 只有用户主动填的地址会收到请求
+    · 公网访问推荐用 Cloudflare 隧道（https）或 Tailscale（加密）
+  
+  见 `src/core/net-security.ts` —— 那里做了「明文只允许发往私有地址」的
+  运行时校验，是本配置的补充。
+  
+  ## 关于 manifest 里的 usesCleartextTraffic
+  
+  已移除。它和 networkSecurityConfig 同时存在时语义会打架，
+  以本文件为唯一准绳。
 -->
 <network-security-config>
+
+    <!--
+      允许明文 —— 局域网 / Tailscale 都依赖它。
+      安全边界由应用层的运行时校验保证（见 net-security.ts）。
+    -->
     <base-config cleartextTrafficPermitted="true">
         <trust-anchors>
             <certificates src="system" />
         </trust-anchors>
     </base-config>
+
+    <!--
+      debug 构建额外信任用户安装的证书。
+      
+      用途：抓包调试（Charles / mitmproxy）。**只在 debug 生效**，
+      release 构建不会信任用户证书，避免中间人风险。
+    -->
+    <debug-overrides>
+        <trust-anchors>
+            <certificates src="system" />
+            <certificates src="user" />
+        </trust-anchors>
+    </debug-overrides>
+
 </network-security-config>
