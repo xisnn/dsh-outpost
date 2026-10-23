@@ -142,9 +142,18 @@ powershell -NoProfile -ExecutionPolicy Bypass -File .\start-dsh-web.ps1
 > macOS / Linux 用户：直接用 `dsh --profile web --host <你的IP> --port 3095`，
 > 然后把终端打印的 URL 拿到手机上。一键脚本目前只有 Windows 版。
 
-### 3. 手机上装 APK
+### 3. 装客户端
 
-从 [Releases](../../releases) 下载最新的 `app-release.apk`，允许「安装未知来源应用」后装上。
+从 [Releases](../../releases) 下载最新版：
+
+| 平台 | 文件 | 说明 |
+|---|---|---|
+| **Android** | `dsh-outpost-v*.apk` | 允许「安装未知来源应用」后装上 |
+| **Windows** | `DSH-Outpost-Desktop-*-win-x64.zip` | 解压即用，双击 `DSH Outpost.exe` |
+
+> ⚠️ Windows 首次运行可能弹 SmartScreen「已保护你的电脑」——
+> 这是因为 exe 没有代码签名。点「更多信息 → 仍要运行」即可。
+> 详见 [桌面助手 README](dsh-outpost-desktop/README.md#-第一次运行会被-windows-拦)。
 
 ### 4. 配对
 
@@ -336,7 +345,7 @@ https://xxx.trycloudflare ─┘
 ```bash
 cd dsh-mobile
 npm install
-npm test                  # 409 项静态检查 + 单测 + typecheck
+npm test                  # 420 项静态检查 + 单测 + typecheck
 npm run test:integration  # 55 项集成测试（本地起模拟 DSH，不需要真服务）
 npm run android           # 需要 Android SDK + JDK 21
 ```
@@ -345,7 +354,7 @@ npm run android           # 需要 Android SDK + JDK 21
 
 | 层 | 数量 | 依赖 | 测什么 |
 |---|---|---|---|
-| **静态检查 + 单测** | 409 | 无 | 纯函数行为、配置正确性、危险写法 |
+| **静态检查 + 单测** | 420 | 无 | 纯函数行为、配置正确性、危险写法 |
 | **协议集成** | 39 | 本地端口 | 手搓请求，验证协议形状 |
 | **产品集成** | 16 | 本地端口 | **import 真实产品代码**，验证它能不能正确对接 |
 | **端到端** | 手工 | 真实 DSH | 完整链路 |
@@ -358,8 +367,12 @@ npm run android           # 需要 Android SDK + JDK 21
 > 后者才是用户真正遇到的 —— 它抓到了两个真实缺陷，
 > 见 [docs/known-issues.md](docs/known-issues.md)。
 
-测试体系说明见 [dsh-mobile/tests/README.md](dsh-mobile/tests/README.md)，
-已知问题见 [docs/known-issues.md](docs/known-issues.md)。`n协议依赖与兼容性见 [docs/protocol-compat.md](docs/protocol-compat.md)。`n运行环境（Node 版本）兼容性见 [docs/runtime-compat.md](docs/runtime-compat.md)。
+相关文档：
+
+- 测试体系说明 —— [dsh-mobile/tests/README.md](dsh-mobile/tests/README.md)
+- 已知问题 —— [docs/known-issues.md](docs/known-issues.md)
+- 协议依赖与兼容性 —— [docs/protocol-compat.md](docs/protocol-compat.md)
+- 运行环境（Node 版本）兼容性 —— [docs/runtime-compat.md](docs/runtime-compat.md)
 
 - 应用代码在 [`dsh-mobile/`](dsh-mobile/)，架构与实现细节见 [dsh-mobile/README.md](dsh-mobile/README.md)
 - DSH 内部协议（RPC 形状、投影字段、踩过的坑）见 [docs/protocol-notes.md](docs/protocol-notes.md)
@@ -376,7 +389,7 @@ npm run android           # 需要 Android SDK + JDK 21
 │   │   ├── screens/         # 页面
 │   │   ├── components/      # 组件
 │   │   └── design/          # 主题 token
-│   └── tests/               # Node 单测（389 项）
+│   └── tests/               # Node 单测（420 项）
 ├── dsh-outpost-desktop/     # Windows 桌面助手（Electron 托盘程序）
 ├── dsh-plugin-connect/      # 隧道服务 + 旧版网页插件
 ├── docs/                    # 协议笔记、安全模型、真机验证清单、截图
@@ -389,14 +402,23 @@ npm run android           # 需要 Android SDK + JDK 21
 
 ## 版本
 
-当前 **v0.9.1**。完整变更见 [Releases](../../releases)。
+当前 **v0.15.3**。完整变更见 [Releases](../../releases)。
 
 最近的几个版本：
 
 | 版本 | 内容 |
 |---|---|
-| **v0.9.1** | Windows 桌面助手打包通了（绕开 electron-builder 的在线工具下载） |
-| v0.9.0 | **Windows 桌面助手**：托盘常驻，扫码连接手机、管理隧道，替代网页插件 |
+| **v0.15.3** | 桌面助手重新打包、统一命名、SmartScreen 说明 |
+| v0.15.2 | 修复 CI：Node 20 不支持直接 import `.ts` |
+| v0.15.1 | 修复 CI：Node 20 没有全局 `WebSocket` |
+| v0.15.0 | **协议兼容性**：依赖清单、错误分类、能力探测 |
+| v0.14.0 | 产品级集成测试（驱动真实代码，发现两个网关缺陷） |
+| v0.13.0 | 三层测试体系 + 39 项真实协议集成测试 |
+| v0.12.0 | 修复管家模式指令冲突，统一分工规则，加重复杂项检测 |
+| v0.11.0 | **安全审计**：地址校验、token 脱敏、日志与凭据权限加固 |
+| v0.10.0 | 项目重命名 dsh-pocket → dsh-outpost |
+| v0.9.1 | Windows 桌面助手打包通了 |
+| v0.9.0 | **Windows 桌面助手**：托盘常驻，扫码连接手机、管理隧道 |
 | v0.8.2 | 过滤 DSH 的临时工作区（49 个目录 → 3 个，列表终于能看） |
 | v0.8.1 | 修复尖括号路径的图片不显示（会显示成「!标题」） |
 | v0.8.0 | 会话搜索、重命名、长会话虚拟化（100 轮以上的会话不再卡顿） |

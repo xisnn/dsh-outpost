@@ -1,6 +1,6 @@
 {
   "name": "dsh-outpost-desktop",
-  "version": "0.15.2",
+  "version": "0.15.3",
   "description": "DSH Outpost 桌面托盘助手 —— 扫码连接手机、管理隧道",
   "main": "src/main/main.js",
   "private": true,
