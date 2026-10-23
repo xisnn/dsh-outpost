@@ -312,7 +312,7 @@ https://xxx.trycloudflare ─┘
 ```bash
 cd dsh-mobile
 npm install
-npm test              # 356 项单测 + typecheck
+npm test              # 389 项单测 + typecheck
 npm run android       # 需要 Android SDK + JDK 21
 ```
 
@@ -334,7 +334,7 @@ npm run android       # 需要 Android SDK + JDK 21
 │   │   ├── screens/         # 页面
 │   │   ├── components/      # 组件
 │   │   └── design/          # 主题 token
-│   └── tests/               # Node 单测（356 项）
+│   └── tests/               # Node 单测（389 项）
 ├── dsh-outpost-desktop/     # Windows 桌面助手（Electron 托盘程序）
 ├── dsh-plugin-connect/      # 隧道服务 + 旧版网页插件
 ├── docs/                    # 协议笔记、安全模型、真机验证清单、截图

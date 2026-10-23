@@ -8,7 +8,13 @@ import React, { useMemo } from 'react';
 import { Pressable, ScrollView, StyleSheet, Text, View } from 'react-native';
 
 import { useTheme } from '../design/theme';
-import { memberStates, teamSummary, type MemberState } from '../core/team';
+import {
+  memberStates,
+  teamSummary,
+  findDuplicateRoles,
+  duplicateRoleHint,
+  type MemberState,
+} from '../core/team';
 import type { AgentTeam } from '../core/types';
 
 function statusColor(
@@ -31,12 +37,24 @@ export function TeamStrip({ team, onOpen }: { team?: AgentTeam; onOpen: () => vo
   const tv = useTheme();
   const styles = useMemo(() => makeStyles(tv), [tv]);
   const states = memberStates(team);
+  // 兜底：检测有没有重复岗位（coder / coder-1 / coder2 这种）。
+  // Prompt 里要求「同岗位只留一个」，但那靠模型自觉 —— 这里做客户端检测，
+  // 发现就提示用户。不自动删（删队员不可逆，让用户决定）。
+  const dupHint = useMemo(() => duplicateRoleHint(findDuplicateRoles(team)), [team]);
   if (states.length === 0) return null;
 
   const { working, done } = teamSummary(states);
 
   return (
     <View style={styles.wrap}>
+      {dupHint ? (
+        <View style={styles.dupBar}>
+          <Text style={styles.dupIcon}>⚠</Text>
+          <Text style={styles.dupText} numberOfLines={2}>
+            {dupHint}
+          </Text>
+        </View>
+      ) : null}
       <Pressable
         onPress={onOpen}
         style={({ pressed }: { pressed: boolean }) => [
@@ -95,6 +113,25 @@ function makeStyles(tv: ReturnType<typeof useTheme>) {
       backgroundColor: C.bg,
     },
     inner: { flexDirection: 'row', alignItems: 'center' },
+
+    // 重复岗位提示条
+    dupBar: {
+      flexDirection: 'row',
+      alignItems: 'flex-start',
+      gap: 5,
+      paddingVertical: 4,
+      paddingHorizontal: 8,
+      marginBottom: 3,
+      borderRadius: tv.radius.sm,
+      backgroundColor: C.warningWash,
+    },
+    dupIcon: { color: C.warning, fontSize: tv.type.micro, lineHeight: tv.type.xs * 1.4 },
+    dupText: {
+      flex: 1,
+      color: C.warning,
+      fontSize: tv.type.micro,
+      lineHeight: tv.type.xs * 1.4,
+    },
     scroll: { flexGrow: 0, flexShrink: 1 },
     row: { alignItems: 'flex-end', paddingVertical: 4 },
     item: { width: 52, alignItems: 'center' },
