@@ -5,7 +5,13 @@
 
 ---
 
-## 1. 审批网关断线后无法重连（较严重）
+## 1. ~~审批网关断线后无法重连~~ ✅ 已在 v0.15.9 修复
+
+> **修复**：`onclose` 里改成 `this.scheduleRetry()`（不传配对码），
+> 让 `connect()` 自己决定——有 token 就用 `dsh-token.` 子协议，
+> 没 token 才重新申请配对码。
+>
+> 回归测试：`tests/integration-gateway-reconnect.mjs` 6 项。
 
 **现象**：审批通道第一次能连上，断线后**永远重连不回来**。
 
@@ -46,7 +52,14 @@ private scheduleRetry(pairingCode?: string): void {
 
 ---
 
-## 2. 失效 token 的自愈可能触发不了
+## 2. ~~失效 token 的自愈可能触发不了~~ ✅ 已在 v0.15.9 修复
+
+> **修复**：不再只依赖 `reason` 正则。新增 `tokenFailures` 计数——
+> 只要手里有长期 token 却连续失败 2 次，就判定 token 失效，
+> 清掉它并重新配对。
+>
+> 回归测试：`tests/integration-gateway-reconnect.mjs` 里
+> 「失效 token 连续失败后会被清掉」「清掉后能重新配对连上」。
 
 **现象**：本地存着一个已失效的 device token 时，
 `onclose` 里检测 `reason` 是否包含 401 来决定「清 token 重连」。
