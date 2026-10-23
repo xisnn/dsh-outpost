@@ -83,12 +83,18 @@ if (typeof app === 'undefined' || app === null || typeof app !== 'object') {
     /* ignore */
   }
 
+  // ⚠️ 日志内容用**纯英文**。
+  //
+  // 原因：日志经常被用户用记事本/控制台打开，而这些地方对 UTF-8
+  // 中文的显示取决于系统代码页 —— 中文 Windows 下很容易变乱码，
+  // 反而让人看不懂。英文在哪都不会乱。
   const msgText =
-    `\n===== ${new Date().toISOString()} [启动失败：纯 Node 模式] =====\n` +
-    `ELECTRON_RUN_AS_NODE=${process.env.ELECTRON_RUN_AS_NODE ?? '(未设置)'}\n` +
-    `require('electron') 返回了 ${typeof app}，不是 API 对象。\n` +
-    `原因：环境变量 ELECTRON_RUN_AS_NODE 被设置了，Electron 以纯 Node 模式启动。\n` +
-    `解决：删掉这个环境变量，或者用「启动 DSH Outpost.bat」启动。\n`;
+    `\n===== ${new Date().toISOString()} [startup failed: pure Node mode] =====\n` +
+    `ELECTRON_RUN_AS_NODE=${process.env.ELECTRON_RUN_AS_NODE ?? '(not set)'}\n` +
+    `require('electron') returned ${typeof app}, not the API object.\n` +
+    `Cause: ELECTRON_RUN_AS_NODE is set, so Electron runs as plain Node.\n` +
+    `Fix: remove that environment variable, then start again.\n` +
+    `     Or just use START.bat in the same folder - it clears it for you.\n`;
 
   let logPath = '';
   for (const candidate of logCandidates) {
@@ -102,20 +108,52 @@ if (typeof app === 'undefined' || app === null || typeof app !== 'object') {
     }
   }
 
+  // ═══ 自动重启：让用户什么都不用懂 ═══════════════════════════════
+  //
+  // 检测到「纯 Node 模式」时，与其弹窗让用户去设环境变量，
+  // 不如直接**用干净环境把自己重启一次**。
+  //
+  // 做法：spawn 一个新的自己（删掉 ELECTRON_RUN_AS_NODE），然后退出。
+  // 用户看到的效果是：双击 → 稍等一下 → 窗口出现。
+  //
+  // 用一个标记变量防止无限循环（万一重启后还是纯 Node 模式）。
+  if (process.env.DSH_OUTPOST_RELAUNCHED !== '1') {
+    try {
+      const { spawn } = require('node:child_process');
+      const env = { ...process.env, DSH_OUTPOST_RELAUNCHED: '1' };
+      delete env.ELECTRON_RUN_AS_NODE;
+
+      const child = spawn(process.execPath, process.argv.slice(1), {
+        cwd: process.cwd(),
+        env,
+        detached: true,
+        stdio: 'ignore',
+        windowsHide: false,
+      });
+      child.unref();
+      // 起来了就静默退出，用户不会看到任何报错
+      process.exit(0);
+    } catch {
+      /* 重启失败，走下面的提示流程 */
+    }
+  }
+
   // 用 msg.exe 弹窗（Windows 自带，不依赖 Electron）
+  //
+  // 内容用英文：msg 的显示字体对中文支持不一定好，英文更保险。
   try {
     const { execFileSync } = require('node:child_process');
     const lines = [
-      'DSH Outpost 无法启动。',
+      'DSH Outpost could not start.',
       '',
-      '原因：环境变量 ELECTRON_RUN_AS_NODE 被设置了，',
-      '导致 Electron 以纯 Node 模式运行。',
+      'Cause: the environment variable ELECTRON_RUN_AS_NODE is set,',
+      'which forces Electron to run as plain Node instead of a GUI app.',
       '',
-      '解决方法（任选）：',
-      '1. 用目录里的「启动 DSH Outpost.bat」启动',
-      '2. 删掉系统环境变量 ELECTRON_RUN_AS_NODE，重新登录',
+      'Fixes (either one):',
+      '1. Run START.bat from the same folder - it clears the variable',
+      '2. Delete ELECTRON_RUN_AS_NODE from system environment variables',
     ];
-    if (logPath) lines.push('', `日志：${logPath}`);
+    if (logPath) lines.push('', `Log: ${logPath}`);
     execFileSync('msg', ['*', '/TIME:60', lines.join('\r\n')], {
       stdio: 'ignore',
       windowsHide: true,
