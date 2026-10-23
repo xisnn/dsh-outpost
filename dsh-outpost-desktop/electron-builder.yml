@@ -13,6 +13,16 @@
     "assets/tray.png",
     "package.json"
   ],
+  "extraFiles": [
+    {
+      "from": "启动 DSH Outpost.bat",
+      "to": "启动 DSH Outpost.bat"
+    },
+    {
+      "from": "diagnose.bat",
+      "to": "diagnose.bat"
+    }
+  ],
   "extraResources": [
     {
       "from": "../dsh-plugin-connect/tunnel-service.mjs",
