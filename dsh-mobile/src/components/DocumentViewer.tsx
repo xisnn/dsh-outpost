@@ -65,9 +65,19 @@ export function DocumentViewer({
 
   const kind = file ? docKindOf(file.name) : 'unsupported';
   const fsPath = file?.uri.replace(/^file:\/\//, '') ?? '';
+  const fileName = file?.name ?? '';
 
+  // ⚠️ 下面这个 effect 的依赖里**不能直接放 `file` 对象**。
+  //
+  // 父组件只要重渲染一次（哪怕内容完全没变），`file={{...}}`
+  // 也是新引用 → effect 重跑 → 重新读文件、重新解析 docx →
+  // 界面在 loading 和内容之间反复切换。
+  // 用户看到的就是「打开 word 后每隔几秒重新加载一次，阅读时一直闪」。
+  //
+  // 所以只依赖标量值：fsPath（字符串）和 kind（字符串字面量）。
+  // 父组件那边也用 useMemo 稳定了引用，这里是第二道保险。
   useEffect(() => {
-    if (!visible || !file) return;
+    if (!visible || !fsPath) return;
     let alive = true;
     setState({ phase: 'loading' });
     setSheetIndex(0);
@@ -136,7 +146,8 @@ export function DocumentViewer({
     return () => {
       alive = false;
     };
-  }, [visible, file, kind, fsPath]);
+    // 只依赖标量，不依赖 file 对象引用（见上面的注释）
+  }, [visible, fsPath, kind]);
 
   if (!visible || !file) return null;
 

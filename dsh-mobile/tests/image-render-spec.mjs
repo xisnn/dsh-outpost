@@ -69,7 +69,9 @@ check('分割出图片引用', () =>
 
 // ── FileCard 下载顺序 ─────────────────────────────────────────────
 check('FileCard 优先走网关', () =>
-  /store\.gatewayChannel[\s\S]{0,400}downloadWorkspaceFile/.test(card)
+  // 变量名从 store.gatewayChannel 提到了局部 gatewayChannel
+  // （避免 effect 依赖整个 store 导致重复下载），语义没变。
+  /(?:store\.)?gatewayChannel[\s\S]{0,400}downloadWorkspaceFile/.test(card)
     ? true
     : '没有先试网关',
 );
@@ -79,6 +81,29 @@ check('网关失败退回 /api/file', () =>
 check('FileCard 接受 sessionId', () =>
   card.includes('sessionId?: string') ? true : '缺少参数',
 );
+
+// ── 闪屏回归（用户报「打开 word 后一直重新加载」）───────────────
+check('FileCard 不在 effect 依赖里放整个 store', () => {
+  // store 每次 emit 都换引用，放进依赖会让 effect 反复重跑
+  // → 图片反复下载、文档反复解析 → 闪屏
+  const m = card.match(/\},\s*\[([^\]]+)\]\);/);
+  if (!m) return '找不到依赖数组';
+  return m[1].includes('store') ? `依赖数组里有 store：${m[1]}` : true;
+});
+
+check('FileCard 用 useMemo 稳定传给 DocumentViewer 的 file', () => {
+  // 内联对象字面量每次都换引用，DocumentViewer 的 effect 就会重跑
+  if (/file=\{\{/.test(card)) return '还在用内联对象字面量 file={{...}}';
+  return /const docFile = useMemo/.test(card) ? true : '没有 useMemo 包装 docFile';
+});
+
+const docViewerSrc = readFileSync('src/components/DocumentViewer.tsx', 'utf8');
+check('DocumentViewer 的 effect 不依赖 file 对象', () => {
+  const m = docViewerSrc.match(/\},\s*\[([^\]]+)\]\);/);
+  if (!m) return '找不到依赖数组';
+  const deps = m[1];
+  return /\bfile\b/.test(deps) ? `依赖里有 file 对象：${deps}` : true;
+});
 
 // ── 下载协议 ──────────────────────────────────────────────────────
 check('发 file-download-open', () =>
