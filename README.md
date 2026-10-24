@@ -414,7 +414,7 @@ npm run pack              # 打包成 zip
 
 ## 版本
 
-当前 **v0.16.0**。完整变更见 [Releases](../../releases)。
+当前 **v0.16.1**。完整变更见 [Releases](../../releases)。
 
 最近的几个版本：
 
