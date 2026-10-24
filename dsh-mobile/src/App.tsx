@@ -12,7 +12,7 @@
  *         Chat
  */
 import React, { useCallback, useEffect, useMemo, useState } from 'react';
-import { ActivityIndicator, StatusBar, StyleSheet, View } from 'react-native';
+import { ActivityIndicator, Alert, StatusBar, StyleSheet, View } from 'react-native';
 import { SafeAreaProvider } from 'react-native-safe-area-context';
 import AsyncStorage from '@react-native-async-storage/async-storage';
 
@@ -25,6 +25,7 @@ import {
   loadCredential,
   saveCredential,
 } from './core/secureStore';
+import { revokeOwnDevice } from './core/deviceAuth';
 import { WORKSPACE_CUSTOM_KEY, type WorkspaceCustom } from './core/workspace-custom';
 import { ThemeProvider, useTheme } from './design/theme';
 import { palettes, type ThemeMode } from './design/tokens';
@@ -88,6 +89,22 @@ export interface AppContextValue {
   /** 退出后仍保留的上一次配对，可一键恢复，避免误触后要重新找 token */
   hasLastPairing: boolean;
   resumePairing: () => Promise<boolean>;
+}
+
+/**
+ * 服务端撤销失败时的提示。
+ *
+ * 用系统的 Alert 而不是应用内通知：这是「安全操作只做了一半」，
+ * 必须让用户看到并且知道要手动处理。
+ */
+function notifyRevokeFailed(): void {
+  Alert.alert(
+    '本机凭据已清除',
+    '但没能通知电脑撤销这台设备的授权（网络不通）。\n\n' +
+      '如果手机丢了或怀疑凭据泄露，请在电脑上打开 DSH 的「设备管理」，' +
+      '手动移除这台设备。',
+    [{ text: '知道了' }],
+  );
 }
 
 export const AppContext = React.createContext<AppContextValue | null>(null);
@@ -262,6 +279,28 @@ export default function App() {
    * 这些会指向不存在的资源，表现为「打开就报错」或「串到别人的会话」。
    */
   const clearAuthorization = useCallback(async () => {
+    // ⚠️ 顺序很重要：**先撤销服务端，再清本地**。
+    //
+    // 反过来的话，本地 deviceId / cookie 已经被删，就没法再证明
+    // 「我是这台设备」去调撤销接口 —— 服务端会永远留一条可用记录。
+    // 手机丢了场景下，那条记录就是后门。
+    //
+    // 撤销失败不阻塞本地清理：网络不通时用户仍然应该能清掉本机凭据，
+    // 只是服务端那条记录还在（会在界面上提示）。
+    let revokeFailed = false;
+    try {
+      const [cookie, deviceId] = await Promise.all([
+        loadCredential(CredentialKey.cookie),
+        loadCredential(CredentialKey.gatewayDeviceId),
+      ]);
+      if (cookie && deviceId && baseUrl) {
+        const outcome = await revokeOwnDevice(baseUrl, cookie, deviceId);
+        revokeFailed = outcome === 'failed';
+      }
+    } catch {
+      revokeFailed = true;
+    }
+
     await clearAllCredentials();
 
     // 派生状态一并清掉（这些不是秘密，但会污染下次配对）
@@ -280,7 +319,13 @@ export default function App() {
     setAuthed(false);
     setHasLastPairing(false);
     setButlerSessionId(null);
-  }, []);
+
+    // 服务端撤销失败要告诉用户 —— 否则他以为「彻底清了」，
+    // 实际上电脑上还留着一条可用授权。
+    if (revokeFailed) {
+      notifyRevokeFailed();
+    }
+  }, [baseUrl]);
 
   /** 用上次的 cookie 直接恢复登录（验证通过才恢复） */
   const resumePairing = useCallback(async (): Promise<boolean> => {
