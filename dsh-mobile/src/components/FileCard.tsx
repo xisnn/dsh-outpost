@@ -48,6 +48,17 @@ export function FileCard({
   const styles = useMemo(() => makeStyles(tv), [tv]);
   const { store, butlerWorkspace } = useApp();
 
+  // 把 effect 真正依赖的东西提出来。
+  //
+  // 直接在依赖数组里写 `store` 是错的 —— store 每次 emit（消息、
+  // 状态、团队变化）都换引用，effect 会重跑，图片又下载一遍。
+  // 这三个是值/稳定引用：
+  //   fileBaseUrl / fileCookie  字符串和 undefined，天然稳定
+  //   gatewayChannel            store 里的稳定字段
+  const fileBaseUrl = store.fileBaseUrl;
+  const fileCookie = store.fileCookie;
+  const gatewayChannel = store.gatewayChannel;
+
   // 管家偶尔发相对路径（cover_out/a.png），用当前项目路径拼成绝对路径。
   // 否则 /api/file 会 404。
   const absPath = useMemo(() => {
@@ -63,8 +74,34 @@ export function FileCard({
   const [viewerOpen, setViewerOpen] = useState(false);
   /** 文档内置查看器 */
   const [docOpen, setDocOpen] = useState(false);
+  /** 点击时当场拿到的文件信息（避免依赖 setLocal 的异步生效） */
+  const [docFileOverride, setDocFileOverride] = useState<{
+    uri: string;
+    name: string;
+  } | null>(null);
 
   const name = path.split(/[\\/]/).pop() ?? path;
+
+  /**
+   * 传给 DocumentViewer 的 file 对象。
+   *
+   * ⚠️ 必须 useMemo，不能用内联对象字面量。
+   *
+   * DocumentViewer 的 useEffect 依赖 `file` 这个对象本身。
+   * 如果每次渲染都新建 `{ uri, name }`，引用每次都变 →
+   * effect 每次都重跑 → 重新读文件、重新解析 docx →
+   * 界面在 loading 和内容之间反复切换，**看起来就是一直闪屏**。
+   *
+   * 用户报的「打开 word 后每过几秒重新加载一次、阅读时一直闪」
+   * 就是这个原因。
+   *
+   * 优先用 docFileOverride（点击时当场拿到的），
+   * 因为 local 是 setState 异步更新的，可能还没生效。
+   */
+  const docFile = useMemo(
+    () => docFileOverride ?? (local ? { uri: local.uri, name: local.name } : null),
+    [docFileOverride, local],
+  );
 
   // 图片显示宽度：屏幕宽减去左右内边距（见 fileBlockWrap 的 screenPadding*2）。
   // 用固定像素而不用 '100%' —— 见下面 <Image> 上的踩坑注释。
@@ -84,7 +121,7 @@ export function FileCard({
     let alive = true;
     void (async () => {
       // 1. 网关（只对工作区内相对路径有效；绝对路径会被拒）
-      const gw = store.gatewayChannel;
+      const gw = gatewayChannel;
       if (gw && sessionId && !/^[A-Za-z]:[\\/]/.test(path) && !/^\\\\/.test(path)) {
         try {
           const f = await downloadWorkspaceFile(gw, sessionId, path, undefined);
@@ -102,11 +139,7 @@ export function FileCard({
       }
       // 2. /api/file → 下载到本地缓存
       try {
-        const f = await fetchRemoteFile(
-          store.fileBaseUrl,
-          store.fileCookie,
-          absPath,
-        );
+        const f = await fetchRemoteFile(fileBaseUrl, fileCookie, absPath);
         if (!alive) return;
         setLocal(f);
         // 3. 关键：再读成 base64 data URI 作为兜底显示源。
@@ -136,7 +169,14 @@ export function FileCard({
     return () => {
       alive = false;
     };
-  }, [image, absPath, path, sessionId, store]);
+    // ⚠️ 依赖里**不能放 store**。
+    //
+    // store 是个大对象，任何一次 emit（消息进来、状态刷新、
+    // 团队变化……）都会让组件重渲染。放进来意味着每次都要
+    // 重新走一遍「下载 → 转 base64」，图片闪、流量白费。
+    //
+    // 真正需要的只有 baseUrl 和 cookie —— 用它们的值做依赖。
+  }, [image, absPath, path, sessionId, fileBaseUrl, fileCookie, gatewayChannel]);
 
   /** 用户点卡片：图片进全屏查看器，文档进内置查看器，其余交给系统 */
   const onPress = async () => {
@@ -145,21 +185,21 @@ export function FileCard({
     try {
       const f =
         local ??
-        (await fetchRemoteFile(store.fileBaseUrl, store.fileCookie, absPath));
+        (await fetchRemoteFile(fileBaseUrl, fileCookie, absPath));
       setLocal(f);
 
-      // 图片：全屏查看器（原来走 actionViewIntent 会弹「用什么应用打开」，
-      // 看图是最常见的操作，每次让用户选一遍应用完全不符合手机习惯）
+      // ⚠️ 不要依赖 `docFile`（它来自 local，setLocal 是异步的）。
+      // 这里已经拿到了 f，直接用它开查看器，避免「先 null 再有值」
+      // 导致 DocumentViewer 重新挂载 + 重新解析（又是一次闪）。
       if (image) {
         setViewerOpen(true);
         return;
       }
-      // 文档：能在 App 内看的就内置看
       if (canPreviewInside(f.name)) {
+        setDocFileOverride({ uri: f.uri, name: f.name });
         setDocOpen(true);
         return;
       }
-      // 其余（pdf / doc / ppt / zip…）交给系统
       await openLocalFile(f);
     } catch (e) {
       setFailed(e instanceof Error ? e.message : '打开失败');
@@ -252,7 +292,7 @@ export function FileCard({
       {local ? (
         <DocumentViewer
           visible={docOpen}
-          file={{ uri: local.uri, name: local.name }}
+          file={docFile}
           onClose={() => setDocOpen(false)}
         />
       ) : null}

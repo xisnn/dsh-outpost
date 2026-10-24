@@ -46,8 +46,27 @@ export async function fetchRemoteFile(
   const fsPath = `${dir}/${name}`;
   const url = `${baseUrl}/api/file?${new URLSearchParams({ path: remotePath }).toString()}`;
 
-  const exists = await ReactNativeBlobUtil.fs.exists(fsPath);
-  if (!exists) {
+  // 缓存校验：存在**且非空**才算命中。
+  //
+  // ⚠️ 之前只判断 `exists()`，踩过坑：上一次下载失败留下的
+  // 半截文件（或者 0 字节文件）会被当成「已缓存」，
+  // 于是后面永远读到一个坏文件 —— 表现就是「文件一直打不开」，
+  // 而且怎么重试都没用（因为根本不会再下载）。
+  let usable = false;
+  if (await ReactNativeBlobUtil.fs.exists(fsPath)) {
+    try {
+      const st = await ReactNativeBlobUtil.fs.stat(fsPath);
+      usable = Number(st.size) > 0;
+    } catch {
+      usable = false;
+    }
+    if (!usable) {
+      // 坏缓存，删掉重下
+      await ReactNativeBlobUtil.fs.unlink(fsPath).catch(() => undefined);
+    }
+  }
+
+  if (!usable) {
     const headers: Record<string, string> = {};
     if (cookie) headers.Cookie = cookie;
     // 必须 fileCache: true。设成 false 时 blob-util 只把响应留在内存，
@@ -62,7 +81,13 @@ export async function fetchRemoteFile(
     if (status !== 200) {
       // 失败清掉半截文件，避免下次误判为「已缓存」
       await ReactNativeBlobUtil.fs.unlink(fsPath).catch(() => undefined);
-      throw new Error(status === 404 ? '文件不存在' : `读取失败（${status}）`);
+      throw new Error(
+        status === 403
+          ? '没有权限读这个文件（Host 校验失败，检查 DSH 的 --trusted-host）'
+          : status === 404
+            ? '文件不存在'
+            : `读取失败（${status}）`,
+      );
     }
     // 再校验：文件得真的落盘且非空
     if (!(await ReactNativeBlobUtil.fs.exists(fsPath))) {
