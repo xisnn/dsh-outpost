@@ -36,6 +36,7 @@ import { PairScreen } from './screens/PairScreen';
 import { HomeScreen } from './screens/HomeScreen';
 import { SessionsScreen } from './screens/SessionsScreen';
 import { ChatScreen } from './screens/ChatScreen';
+import { DevicesScreen } from './screens/DevicesScreen';
 import { WorkspacesScreen } from './screens/WorkspacesScreen';
 import { TaskBoardScreen } from './screens/TaskBoardScreen';
 
@@ -615,6 +616,8 @@ function renderScreen(screen: Screen) {
       );
     case 'Workspaces':
       return <WorkspacesScreen />;
+    case 'Devices':
+      return <DevicesScreen />;
     case 'TaskBoard':
       return <TaskBoardScreen sessionId={String(screen.params?.sessionId ?? '')} />;
     case 'Subagent':

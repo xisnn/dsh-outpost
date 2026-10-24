@@ -467,6 +467,22 @@ export function ProfileScreen({ active = true }: { active?: boolean }) {
               {store.gatewayHint ? ` · ${store.gatewayHint}` : ''}
             </Text>
           </View>
+
+          {/* 设备管理：看哪些手机配过对、撤销不认识的。
+              手机能批准电脑执行命令，所以「谁有权限」这件事
+              必须能看到、能收回。 */}
+          <Pressable
+            onPress={() => nav.push('Devices')}
+            style={({ pressed }: { pressed: boolean }) => [
+              styles.infoRow,
+              pressed && { opacity: tv.motion.pressOpacity },
+            ]}
+          >
+            <Text style={styles.infoKey}>设备管理</Text>
+            <Text style={[styles.infoVal, { color: tv.colors.accent }]}>
+              查看已配对设备 ›
+            </Text>
+          </Pressable>
         </View>
 
         {/* ── 关于 ─────────────────────────────────────── */}

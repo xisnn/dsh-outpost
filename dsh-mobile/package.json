@@ -1,6 +1,6 @@
 {
   "name": "dsh-outpost",
-  "version": "0.16.1",
+  "version": "0.16.2",
   "private": true,
   "description": "DSH 原生移动客户端：工作区 / 会话 / 聊天",
   "scripts": {
@@ -12,7 +12,7 @@
     "test:cwd": "node tests/cwd-spec.mjs",
     "test:pairing": "tsx tests/pairing-spec.mjs",
     "test:e2e": "node tests/e2e.mjs",
-    "test": "npm run test:fold && npm run test:cwd && npm run test:pairing && npm run test:semver && npm run test:teammate && npm run test:fileref && npm run test:archive && npm run test:approval && npm run test:deliverable && npm run test:notify && npm run test:gateway && npm run test:image && npm run test:bugfix && npm run test:chaterror && npm run test:gesture && npm run test:imgrender && npm run test:gwconnect && npm run test:docview && npm run test:searchrename && npm run test:wsfilter && npm run test:netsec && npm run test:butler && npm run test:compat && npm run test:creds && npm run test:revoke && npm run test:runtime && npm run typecheck",
+    "test": "npm run test:fold && npm run test:cwd && npm run test:pairing && npm run test:semver && npm run test:teammate && npm run test:fileref && npm run test:archive && npm run test:approval && npm run test:deliverable && npm run test:notify && npm run test:gateway && npm run test:image && npm run test:bugfix && npm run test:chaterror && npm run test:gesture && npm run test:imgrender && npm run test:gwconnect && npm run test:docview && npm run test:searchrename && npm run test:wsfilter && npm run test:netsec && npm run test:butler && npm run test:compat && npm run test:creds && npm run test:revoke && npm run test:devices && npm run test:runtime && npm run typecheck",
     "test:semver": "tsx tests/updater-spec.mjs",
     "test:teammate": "tsx tests/teammate-spec.mjs",
     "test:fileref": "tsx tests/fileref-spec.mjs",
@@ -35,6 +35,7 @@
     "test:compat": "tsx tests/protocol-compat-spec.mjs",
     "test:creds": "tsx tests/credential-security-spec.mjs",
     "test:revoke": "tsx tests/device-revoke-spec.mjs",
+    "test:devices": "tsx tests/device-manager-spec.mjs",
     "test:runtime": "tsx tests/runtime-compat-spec.mjs",
     "test:node20": "node --require ./tests/support/node20-sim.cjs tests/integration-transport.mjs && node --require ./tests/support/node20-sim.cjs tests/integration-gateway.mjs && node --require ./tests/support/node20-sim.cjs tests/integration-long-session.mjs && tsx --require ./tests/support/node20-sim.cjs tests/integration-product.mjs && tsx --require ./tests/support/node20-sim.cjs tests/runtime-compat-spec.mjs",
     "test:integration": "node tests/integration-transport.mjs && node tests/integration-gateway.mjs && node tests/integration-long-session.mjs && tsx tests/integration-product.mjs && tsx tests/integration-gateway-reconnect.mjs",

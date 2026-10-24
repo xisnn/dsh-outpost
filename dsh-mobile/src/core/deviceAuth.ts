@@ -40,6 +40,8 @@ export interface PairedDevice {
   lastSeenAt?: number | null;
   online?: boolean;
   connections?: number;
+  /** 客户端自己生成的稳定标识（用来认出「这台手机」） */
+  clientDeviceId?: string;
 }
 
 /** 撤销结果 */
@@ -85,34 +87,17 @@ export async function listPairedDevices(
 }
 
 /**
- * 撤销本机在服务端的设备授权。
+ * 发撤销请求（内部共用）。
  *
- * 语义：让这台设备的长期 token 在服务端失效。
- * 之后即使本地残留了 token 也连不上（服务端 401）。
- *
- * @param deviceId 本机的 device id（存在 Keystore 的 gatewayDeviceId）
+ * @param targetId **服务端**的 device id（UUID），不是客户端标识
  */
-export async function revokeOwnDevice(
+async function postRevoke(
   baseUrl: string,
   cookie: string | undefined,
-  deviceId: string,
+  targetId: string,
 ): Promise<RevokeOutcome> {
   const base = baseUrl.replace(/\/+$/, '');
-  if (!deviceId) return 'failed';
-
-  // 先在服务端列表里找到「自己」那条。
-  //
-  // 为什么要找：服务端的 device.id 是它自己生成的 UUID，而客户端存的
-  // deviceId 是 `dsh-outpost-xxx` 这种客户端标识（走 clientDeviceId 字段）。
-  // 直接用客户端 id 拼 URL 会 404。
-  const devices = await listPairedDevices(baseUrl, cookie);
-  const mine = devices.find(
-    (d) => d.id === deviceId || (d as { clientDeviceId?: string }).clientDeviceId === deviceId,
-  );
-
-  // 找不到也不一定是坏事：可能之前已经撤销过，或者服务端换了注册表。
-  // 但对调用方来说「已经没有可撤销的了」和「撤销成功」效果一样。
-  const targetId = mine?.id ?? deviceId;
+  if (!targetId) return 'failed';
 
   try {
     const ctrl = new AbortController();
@@ -144,4 +129,52 @@ export async function revokeOwnDevice(
   } catch {
     return 'failed';
   }
+}
+
+/**
+ * 撤销**任意**设备的授权（设备管理页用）。
+ *
+ * 和 revokeOwnDevice 的区别：这个直接拿服务端返回的 device.id 去撤，
+ * 不做 clientDeviceId 匹配 —— 因为管理页拿到的就是服务端 id。
+ */
+export async function revokeDevice(
+  baseUrl: string,
+  cookie: string | undefined,
+  deviceId: string,
+): Promise<RevokeOutcome> {
+  return postRevoke(baseUrl, cookie, deviceId);
+}
+
+/**
+ * 撤销本机在服务端的设备授权。
+ *
+ * 语义：让这台设备的长期 token 在服务端失效。
+ * 之后即使本地残留了 token 也连不上（服务端 401）。
+ *
+ * @param deviceId 本机的 device id（存在 Keystore 的 gatewayDeviceId）
+ */
+export async function revokeOwnDevice(
+  baseUrl: string,
+  cookie: string | undefined,
+  deviceId: string,
+): Promise<RevokeOutcome> {
+  const base = baseUrl.replace(/\/+$/, '');
+  if (!deviceId) return 'failed';
+
+  // 先在服务端列表里找到「自己」那条。
+  //
+  // 为什么要找：服务端的 device.id 是它自己生成的 UUID，而客户端存的
+  // deviceId 是 `dsh-outpost-xxx` 这种客户端标识（走 clientDeviceId 字段）。
+  // 直接用客户端 id 拼 URL 会 404。
+  const devices = await listPairedDevices(baseUrl, cookie);
+  const mine = devices.find(
+    (d) => d.id === deviceId || d.clientDeviceId === deviceId,
+  );
+
+  // 找不到也不一定是坏事：可能之前已经撤销过，或者服务端换了注册表。
+  // 但对调用方来说「已经没有可撤销的了」和「撤销成功」效果一样。
+  const targetId = mine?.id ?? deviceId;
+
+  void base;
+  return postRevoke(baseUrl, cookie, targetId);
 }
