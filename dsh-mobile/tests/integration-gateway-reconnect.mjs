@@ -48,11 +48,52 @@ Module._resolveFilename = function (request, parent, ...rest) {
   if (request === '@react-native-cookies/cookies') {
     return path.join(SHIM_DIR, '_cookie-manager-shim.cjs');
   }
+  if (request === 'react-native-keychain') {
+    return path.join(SHIM_DIR, '_keychain-shim.cjs');
+  }
   return origResolve.call(this, request, parent, ...rest);
 };
 
 const stubMod = await imp(path.join(__dirname, 'support', 'async-storage-stub.mjs'));
 const AsyncStorageStub = stubMod.default;
+
+/**
+ * Keychain 替身的状态。
+ *
+ * ⚠️ 不能 `require('./support/_keychain-shim.cjs')` —— 产品代码经 tsx
+ * 转译后走另一条模块解析路径，require 拿到的是**另一个实例**，
+ * 状态不共享（实测：产品代码写进去了，测试这边 dump 出来是空的）。
+ *
+ * 所以直接读写 globalThis 上的同一份 state。
+ */
+const Keychain = {
+  async setGenericPassword(_u, password, opts) {
+    if (!globalThis.__dshTestKeychainState__) {
+      globalThis.__dshTestKeychainState__ = { store: new Map() };
+    }
+    globalThis.__dshTestKeychainState__.store.set(opts?.service ?? 'default', {
+      username: 'k',
+      password: String(password),
+    });
+  },
+  async getGenericPassword(opts) {
+    const rec = globalThis.__dshTestKeychainState__?.store?.get(opts?.service ?? 'default');
+    return rec ?? false;
+  },
+  async resetGenericPassword(opts) {
+    globalThis.__dshTestKeychainState__?.store?.delete(opts?.service ?? 'default');
+  },
+  __dump() {
+    return Object.fromEntries(globalThis.__dshTestKeychainState__?.store ?? []);
+  },
+  __reset() {
+    globalThis.__dshTestKeychainState__?.store?.clear();
+  },
+};
+
+// 凭据已迁到 Keychain 替身（见 core/secureStore.ts）
+/** secureStore 用的 service 名 */
+const GW_TOKEN_SERVICE = 'com.dshpocket.credentials.dsh.gatewayToken';
 
 const cookieMod = await imp(path.join(__dirname, 'support', 'cookie-fetch.mjs'));
 const cookieFetch = cookieMod.makeCookieFetch();
@@ -105,6 +146,8 @@ function makeConn(srv) {
 /** 预置 cookie，模拟「已配对过」的状态 */
 async function seedCookie(srv) {
   AsyncStorageStub.__reset();
+  // 凭据在 Keystore 里，也要一起清 —— 否则上一个测试的 token 会串过来
+  Keychain.__reset();
   const conn = makeConn(srv);
   await conn.loginWithToken(srv.token);
   conn.close();
@@ -176,10 +219,11 @@ await check('断线重连：配对成功后 token 已落盘', async () => {
     await new Promise((r) => setTimeout(r, 600));
     await closeGateway(gw);
 
-    const saved = await AsyncStorageStub.getItem('@dsh/gatewayToken');
-    return saved && saved.length > 0
-      ? true
-      : '配对成功后没把 token 存下来（下次重连只能重新配对）';
+    const saved = (await Keychain.getGenericPassword({ service: GW_TOKEN_SERVICE })) || null;
+    if (!saved || !saved.password) {
+      return '诊断：ks=' + JSON.stringify(Keychain.__dump()) + ' gwToken=' + JSON.stringify(gw.token);
+    }
+    return true;
   } finally {
     await srv.close();
   }
@@ -193,7 +237,7 @@ await check('自愈：失效 token 连续失败后会被清掉', async () => {
   try {
     AsyncStorageStub.__reset();
     // 预置一个服务端不认识的 token
-    await AsyncStorageStub.setItem('@dsh/gatewayToken', 'stale-token-abc123');
+    await Keychain.setGenericPassword('k', 'stale-token-abc123', { service: GW_TOKEN_SERVICE });
     // 但 ApprovalGateway 是从内存/存储读，这里直接构造也能读到
     const gw = new ApprovalGateway(srv.baseUrl, {
       onStatus: () => {},
@@ -208,7 +252,8 @@ await check('自愈：失效 token 连续失败后会被清掉', async () => {
     await new Promise((r) => setTimeout(r, 1500));
     await closeGateway(gw);
 
-    const remaining = await AsyncStorageStub.getItem('@dsh/gatewayToken');
+    const remainingRec = await Keychain.getGenericPassword({ service: GW_TOKEN_SERVICE });
+    const remaining = remainingRec ? remainingRec.password : null;
     // 清掉了 → 下次 connect 会重新申请配对码
     if (remaining === 'stale-token-abc123') {
       return '连续失败后 token 还在（自愈没触发，会一直 401）';
@@ -224,7 +269,7 @@ await check('自愈：清掉 token 后能重新配对连上', async () => {
   await seedCookie(srv);
   try {
     AsyncStorageStub.__reset();
-    await AsyncStorageStub.setItem('@dsh/gatewayToken', 'stale-token-def456');
+    await Keychain.setGenericPassword('k', 'stale-token-def456', { service: GW_TOKEN_SERVICE });
 
     const statuses = [];
     const gw = new ApprovalGateway(srv.baseUrl, {

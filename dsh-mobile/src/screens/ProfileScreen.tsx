@@ -64,7 +64,8 @@ const GATEWAY_LABELS: Record<'idle' | 'connecting' | 'online' | 'offline', strin
 type NetState = 'checking' | 'ok' | 'fail';
 
 export function ProfileScreen({ active = true }: { active?: boolean }) {
-  const { store, baseUrl, signOut, butlerMode, setButlerMode, butlerBusy } = useApp();
+  const { store, baseUrl, signOut, clearAuthorization, butlerMode, setButlerMode, butlerBusy } =
+    useApp();
   const nav = useNav();
   const tv = useTheme();
   const insets = useSafeAreaInsets();
@@ -75,6 +76,7 @@ export function ProfileScreen({ active = true }: { active?: boolean }) {
   // 所以这里单独 ping 一次，给用户一个真实的连通性结论。
   const [net, setNet] = useState<NetState>('checking');
   const [confirmSignOut, setConfirmSignOut] = useState(false);
+  const [confirmClearAuth, setConfirmClearAuth] = useState(false);
   // 任务完成提醒开关（震动）。存内存即可 —— 重启后默认开启，
   // 用户不常改，没必要为它多做一个存储键。
   const [notifyOn, setNotifyOn] = useState(isNotifyEnabled());
@@ -508,6 +510,13 @@ export function ProfileScreen({ active = true }: { active?: boolean }) {
           ) : null}
         </View>
 
+        {/* 两个明确的操作 —— 之前只有一个「退出登录」，
+            语义含糊：到底清不清凭据？用户不知道，我们也没分清。
+
+            现在的划分：
+              · 断开连接：收起会话，凭据留在 Keystore，下次自动恢复
+              · 清除授权：凭据 + 派生状态全抹掉，不可恢复
+            后者才是真正的「退出」。 */}
         <Pressable
           onPress={() => setConfirmSignOut(true)}
           style={({ pressed }: { pressed: boolean }) => [
@@ -515,7 +524,17 @@ export function ProfileScreen({ active = true }: { active?: boolean }) {
             pressed && { opacity: tv.motion.pressOpacity },
           ]}
         >
-          <Text style={styles.signOutText}>退出登录</Text>
+          <Text style={styles.signOutText}>断开连接</Text>
+        </Pressable>
+
+        <Pressable
+          onPress={() => setConfirmClearAuth(true)}
+          style={({ pressed }: { pressed: boolean }) => [
+            styles.signOutBtn,
+            pressed && { opacity: tv.motion.pressOpacity },
+          ]}
+        >
+          <Text style={styles.signOutText}>退出并清除所有授权</Text>
         </Pressable>
 
         <View style={{ height: tv.space.xxxl }} />
@@ -523,14 +542,37 @@ export function ProfileScreen({ active = true }: { active?: boolean }) {
 
       <ConfirmSheet
         visible={confirmSignOut}
-        title="退出登录"
-        message={'退出后要用电脑上的 token 重新配对才能再用。\n也可以稍后用「上次的配对」一键恢复。'}
-        confirmText="退出"
-        destructive
+        title="断开连接"
+        message={
+          '只是这次不用了。\n' +
+          '凭据仍保存在本机的安全存储里，下次打开 App 会自动连回来。\n\n' +
+          '想彻底清除授权，用下面的「退出并清除所有授权」。'
+        }
+        confirmText="断开"
         onCancel={() => setConfirmSignOut(false)}
         onConfirm={() => {
           setConfirmSignOut(false);
           void signOut();
+        }}
+      />
+
+      <ConfirmSheet
+        visible={confirmClearAuth}
+        title="退出并清除所有授权"
+        message={
+          '这会删除保存在本机安全存储里的凭据：\n' +
+          '  · 登录 Cookie\n' +
+          '  · 审批网关的设备凭据\n' +
+          '  · 管家会话等关联状态\n\n' +
+          '删除后无法恢复，需要用电脑上的 token 重新配对。\n' +
+          '（如果要把手机给别人用、或者怀疑凭据泄露，选这个。）'
+        }
+        confirmText="全部清除"
+        destructive
+        onCancel={() => setConfirmClearAuth(false)}
+        onConfirm={() => {
+          setConfirmClearAuth(false);
+          void clearAuthorization();
         }}
       />
 

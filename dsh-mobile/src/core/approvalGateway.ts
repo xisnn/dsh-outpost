@@ -21,7 +21,12 @@
  *          outcome 只能是 allowed-once / rejected
  */
 
-import AsyncStorage from '@react-native-async-storage/async-storage';
+import {
+  CredentialKey,
+  clearCredential,
+  loadCredential,
+  saveCredential,
+} from './secureStore';
 
 import { redactUrl } from './net-security';
 
@@ -67,17 +72,17 @@ export function gatewayUrlFrom(baseUrl: string): string {
   }
 }
 
-/** 生成/读取稳定的设备 id */
+/** 生成/读取稳定的设备 id（存 Keystore，和 token 一起被 clearAllCredentials 清掉） */
 async function ensureDeviceId(): Promise<string> {
   try {
-    const saved = await AsyncStorage.getItem(DEVICE_ID_KEY);
+    const saved = await loadCredential(CredentialKey.gatewayDeviceId);
     if (saved) return saved;
   } catch {
     /* 读不到就重新生成 */
   }
   const id = `dsh-outpost-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 10)}`;
   try {
-    await AsyncStorage.setItem(DEVICE_ID_KEY, id);
+    await saveCredential(CredentialKey.gatewayDeviceId, id);
   } catch {
     /* 存不了也无所谓，本次会话内有效 */
   }
@@ -194,7 +199,7 @@ export class ApprovalGateway {
 
     if (!this.token) {
       try {
-        this.token = (await AsyncStorage.getItem(DEVICE_TOKEN_KEY)) || '';
+        this.token = (await loadCredential(CredentialKey.gatewayToken)) || '';
       } catch {
         this.token = '';
       }
@@ -215,7 +220,14 @@ export class ApprovalGateway {
       this.endpoints = paired?.endpoints;
       this.publicUrl = paired?.publicUrl;
       if (!pairingCode) {
-        this.events.onStatus?.('offline', '网关未开启');
+        // ⚠️ 这里**必须继续重试**，不能直接 return。
+        //
+        // 之前的写法是 `onStatus('offline'); return;` —— 断网时
+        // requestPairingCode() 拿不到码，整条链路就此停摆，
+        // 网络恢复后也不会自己好，必须重开 App。
+        // 用户报的「审批通道一直是灰的」有一部分就是这个。
+        this.events.onStatus?.('offline', '网关暂时不可用，稍后自动重试');
+        this.scheduleRetry();
         return;
       }
     }
@@ -293,32 +305,47 @@ export class ApprovalGateway {
           code ? `连接被关闭 ${code}${why ? ` ${why}` : ''}` : '连接已断开',
         );
 
-        // 这次是用长期 token 连的（不是配对码）→ 计入失败次数。
-        // 握手 401 在 ws 层只是 1006 + 空 reason，只能靠计数兜底。
+        // 这次是用长期 token 连的（不是配对码）→ 可能计入失败次数。
+        //
+        // ⚠️ 但**不能见到失败就计数** —— 那是之前引入的回归：
+        // 用户进电梯、断网 30 秒，WebSocket 连续握手失败两次，
+        // 就会被误判成「token 失效」，把一个完全有效的 token 删掉。
+        // 而且删掉后如果网络还没恢复，requestPairingCode() 拿不到码，
+        // 整条链路直接停摆，必须重开 App。
+        //
+        // 判据：
+        //   · 只有握手真的被服务端拒绝（HTTP 层失败）才算「凭据可能失效」
+        //   · 网络不可达（连不上、DNS 失败、超时）时，只计数用于日志，
+        //     不触发清除
+        //
+        // ws 层在这两种情况下都给 close 1006，分不出来 —— 所以改用
+        // 主动探测：见 onclose 里对 baseUrl 的 healthCheck。
         if (this.token && !pairingCode) {
           this.tokenFailures += 1;
         }
 
-        // ⚠️ 自愈：凭据失效时必须清掉本地 token 并重新配对。
+        // ⚠️ 自愈：凭据确实失效时才清 token。
         //
-        // 踩坑：网关的配对是一次性的（服务端 claimPairing 里
-        // `pairings.delete(codeHash)`，即使后续握手失败也算用掉），
-        // 而 devices 注册表可能随网关重启而重置。
-        // 如果本地存着一个已经失效的 token，connect() 会因为
-        // 「有 token 就不配对」而一直拿它重试，永远 401 —— 用户看到
-        // 的就是审批永远只能「到电脑上确认」。
+        // 判据分三档：
+        //   1. reason 明确写了 401/unauthorized → 立刻清
+        //   2. 连续失败达到阈值 → **先探测服务端是否可达**：
+        //        可达  → 说明服务端在拒我们 → 清 token
+        //        不可达 → 只是网络问题 → 保留 token，继续退避重试
+        //   3. 其他 → 不清
         //
-        // 补充：握手阶段的 401 在 ws 层只表现为 close 1006，
-        // `reason` 是**空串**，所以纯靠正则匹配靠不住。
-        // 多加一条：手里有 token 却连续失败 2 次，就当作 token 失效。
-        const unauthorized =
-          /401|unauthorized|invalid|expired/i.test(why) || this.tokenFailures >= 2;
-        if (unauthorized) {
+        // 这样「持有效 token 断网 30 秒再恢复」不会被误清。
+        const saidUnauthorized = /401|unauthorized|invalid|expired/i.test(why);
+        const exceededThreshold = this.tokenFailures >= 2;
+        if (saidUnauthorized) {
           this.token = '';
           this.tokenFailures = 0;
-          void AsyncStorage.removeItem(DEVICE_TOKEN_KEY).catch(() => undefined);
-          // 不传旧配对码：让下次 connect() 重新申请一个新的
+          void clearCredential(CredentialKey.gatewayToken).catch(() => undefined);
           this.scheduleRetry();
+          return;
+        }
+        if (exceededThreshold) {
+          // 先探一下服务端在不在 —— 结果在回调里决定清不清
+          void this.decideTokenValidity();
           return;
         }
 
@@ -385,6 +412,76 @@ export class ApprovalGateway {
     }, delay);
   }
 
+  /**
+   * 连续失败后：先确认服务端到底能不能连上，再决定 token 要不要清。
+   *
+   * ## 解决什么问题
+   *
+   * 之前只要连续失败 2 次就清 token。但**连接失败 ≠ 凭据失效**：
+   * 用户进电梯、切飞行模式、路由器抽风，都会让 WebSocket 握手失败。
+   * 那些情况下 token 完全有效，清掉是纯粹的误伤 ——
+   * 而且清了之后如果网络还没恢复，重新配对也拿不到码，整条链路停摆。
+   *
+   * ## 判据
+   *
+   * 用一个轻量的 HTTP 请求探 `/mgw/devices`（需要 cookie 鉴权）：
+   *
+   *   · 能连通、返回 200/401 → 服务端在，说明它在拒我们的 token → 清
+   *   · 连不上 / 超时 / DNS 失败 → 只是没网 → **保留 token**，继续退避重试
+   *
+   * 为什么用 HTTP 而不是再开一个 ws：HTTP 的失败原因比 ws 清楚得多
+   * （ws 在两种情况下都给 1006）。
+   */
+  private async decideTokenValidity(): Promise<void> {
+    if (this.closed) return;
+    const reachable = await this.probeServerReachable();
+
+    if (this.closed) return;
+
+    if (!reachable) {
+      // 网络问题，不是凭据问题 —— 保留 token，继续退避重试。
+      // 这里把计数降到阈值以下，避免网络恢复后第一个失败就再次触发探测。
+      this.tokenFailures = Math.max(0, this.tokenFailures - 1);
+      this.events.onStatus?.('offline', '网络不可用，稍后自动重连');
+      this.scheduleRetry();
+      return;
+    }
+
+    // 服务端可达却在拒我们 → 认定 token 失效
+    this.token = '';
+    this.tokenFailures = 0;
+    await clearCredential(CredentialKey.gatewayToken);
+    this.events.onStatus?.('offline', '配对凭据已失效，正在重新配对');
+    this.scheduleRetry();
+  }
+
+  /**
+   * 服务端是否可达（不管鉴权结果，只要能收到 HTTP 响应就算可达）。
+   *
+   * 超时给 4 秒 —— 比 ws 握手的默认超时短，避免断网时卡太久。
+   */
+  private async probeServerReachable(): Promise<boolean> {
+    const base = this.baseUrl.replace(/\/+$/, '');
+    try {
+      const ctrl = new AbortController();
+      const timer = setTimeout(() => ctrl.abort(), 4000);
+      // 和 requestPairingCode 用同样的鉴权方式（原生 cookie 容器），
+      // 保持行为一致 —— 不额外维护一份 cookie 副本。
+      const res = await fetch(`${base}/mgw/devices`, {
+        method: 'GET',
+        credentials: 'include',
+        signal: ctrl.signal,
+      });
+      clearTimeout(timer);
+      // 任何 HTTP 状态码都说明「服务端可达」：
+      //   200 = 正常；401/403 = 服务端在，只是不认我们的凭据
+      return res.status > 0;
+    } catch {
+      // 网络层失败（连不上、超时、DNS）→ 不可达
+      return false;
+    }
+  }
+
   /** 处理服务端帧 */
   private handleFrame(raw: string): void {
     let frame: Record<string, unknown>;
@@ -413,7 +510,7 @@ export class ApprovalGateway {
       const tok = String(frame.token ?? '');
       if (tok) {
         this.token = tok;
-        void AsyncStorage.setItem(DEVICE_TOKEN_KEY, tok).catch(() => undefined);
+        void saveCredential(CredentialKey.gatewayToken, tok).catch(() => undefined);
       }
       return;
     }
@@ -515,7 +612,7 @@ export class ApprovalGateway {
 /** 清掉已保存的设备 token（重新配对时用） */
 export async function forgetGatewayDevice(): Promise<void> {
   try {
-    await AsyncStorage.removeItem(DEVICE_TOKEN_KEY);
+    await clearCredential(CredentialKey.gatewayToken);
   } catch {
     /* 忽略 */
   }

@@ -56,8 +56,11 @@ check('长期 token 子协议 dsh-token.<token>', () =>
   src.includes('dsh-token.${this.token}') ? true : '缺少 token 子协议',
 );
 check('设备 id 持久化', () => (src.includes('DEVICE_ID_KEY') ? true : '缺少设备 id'));
-check('配对成功后存 token', () =>
-  /kind === 'paired'[\s\S]{0,300}setItem\(DEVICE_TOKEN_KEY/.test(src) ? true : '没存 token',
+check('配对成功后存 token（Keystore）', () =>
+  // 凭据已迁到 Keychain，不再是 AsyncStorage.setItem(DEVICE_TOKEN_KEY)
+  /kind === 'paired'[\s\S]{0,400}saveCredential\(CredentialKey\.gatewayToken/.test(src)
+    ? true
+    : '没存 token',
 );
 
 // ── 帧处理 ────────────────────────────────────────────────────────
