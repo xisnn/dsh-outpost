@@ -18,6 +18,13 @@ import AsyncStorage from '@react-native-async-storage/async-storage';
 
 import { DshConnection } from './core/transport';
 import { Store } from './core/store';
+import {
+  CredentialKey,
+  clearAllCredentials,
+  clearCredential,
+  loadCredential,
+  saveCredential,
+} from './core/secureStore';
 import { WORKSPACE_CUSTOM_KEY, type WorkspaceCustom } from './core/workspace-custom';
 import { ThemeProvider, useTheme } from './design/theme';
 import { palettes, type ThemeMode } from './design/tokens';
@@ -55,7 +62,17 @@ export interface AppContextValue {
   baseUrl: string;
   setBaseUrl: (v: string) => void;
   saveCookie: (cookie: string) => Promise<void>;
+  /**
+   * 断开连接：只是本次不用了，凭据仍留在 Keystore，下次打开会自动恢复。
+   * 想彻底清除授权用 clearAuthorization()。
+   */
   signOut: () => Promise<void>;
+  /**
+   * 退出并清除所有授权（不可恢复）：
+   * 删掉 Keystore 里的 Cookie / 网关 token / device id，
+   * 并清掉管家会话等派生状态。
+   */
+  clearAuthorization: () => Promise<void>;
   /** 管家模式：开启后首页直接跟管家对话，工作区列表退到「我的」里 */
   butlerMode: boolean;
   setButlerMode: (on: boolean) => void;
@@ -134,11 +151,13 @@ export default function App() {
         const savedButlerWs = await AsyncStorage.getItem(BUTLER_WORKSPACE_KEY);
         if (savedButlerWs) setButlerWorkspace(savedButlerWs);
 
-        const lastCookie = await AsyncStorage.getItem(LAST_COOKIE_KEY);
+        const lastCookie = await loadCredential(CredentialKey.cookie);
 
         const savedBase = await AsyncStorage.getItem(BASE_URL_KEY);
-        const savedCookie = await AsyncStorage.getItem(COOKIE_KEY);
-        setHasLastPairing(!!lastCookie || !!savedCookie);
+        // Cookie 已迁到 Keystore（见 core/secureStore.ts）。
+        // 「上次配对」不再是独立的副本 —— 见下面 signOut 的注释。
+        const savedCookie = lastCookie;
+        setHasLastPairing(!!lastCookie);
         if (savedBase) setBaseUrlState(savedBase);
         if (savedBase && savedCookie) {
           // 乐观登录：有 cookie 就直接进，不再用一次网络探测决定登录态。
@@ -207,26 +226,65 @@ export default function App() {
   }, [store]);
 
   const saveCookie = useCallback(async (c: string) => {
-    await AsyncStorage.setItem(COOKIE_KEY, c);
+    // 凭据进 Keystore，不再写 AsyncStorage
+    await saveCredential(CredentialKey.cookie, c);
     setCookie(c);
     setAuthed(true);
+    setHasLastPairing(true);
   }, []);
 
+  /**
+   * 断开连接（**不清除凭据**）。
+   *
+   * 语义：只是这次不用了。Cookie 仍在 Keystore 里，下次打开 App
+   * 会自动恢复登录 —— 和常见的「切账号」不同，这里更像是「收起」。
+   *
+   * 真正的清除用 clearAuthorization()。
+   */
   const signOut = useCallback(async () => {
-    // 留一份「上次配对」，误触退出时能一键恢复，不用重新找 token
-    const cur = await AsyncStorage.getItem(COOKIE_KEY);
-    if (cur) await AsyncStorage.setItem(LAST_COOKIE_KEY, cur);
-    await AsyncStorage.removeItem(COOKIE_KEY);
     setCookie(undefined);
     setAuthed(false);
-    setHasLastPairing(!!cur);
+    // Cookie 留在 Keystore 里，所以「上次配对」依然可用
+    const still = await loadCredential(CredentialKey.cookie);
+    setHasLastPairing(!!still);
+  }, []);
+
+  /**
+   * 退出并清除所有授权（**不可恢复**）。
+   *
+   * 清三样东西：
+   *   1. Keystore 里的 Cookie + 网关 device token + device id
+   *   2. AsyncStorage 里的派生状态（管家会话、上次工作区、自有会话标记）
+   *   3. 内存里的连接对象
+   *
+   * 为什么必须连带清本地会话状态：
+   * 如果只删凭据，下次配对成另一台电脑后，管家会话 id、工作区路径
+   * 这些会指向不存在的资源，表现为「打开就报错」或「串到别人的会话」。
+   */
+  const clearAuthorization = useCallback(async () => {
+    await clearAllCredentials();
+
+    // 派生状态一并清掉（这些不是秘密，但会污染下次配对）
+    await Promise.all(
+      [
+        BUTLER_SESSION_KEY,
+        BUTLER_WORKSPACE_KEY,
+        BUTLER_WS_SESSIONS_KEY,
+        BUTLER_PRIMED_KEY,
+        OWNED_KEY,
+        LAST_COOKIE_KEY, // 老版本遗留的明文 key，顺手清掉
+      ].map((k) => AsyncStorage.removeItem(k).catch(() => undefined)),
+    );
+
+    setCookie(undefined);
+    setAuthed(false);
+    setHasLastPairing(false);
+    setButlerSessionId(null);
   }, []);
 
   /** 用上次的 cookie 直接恢复登录（验证通过才恢复） */
   const resumePairing = useCallback(async (): Promise<boolean> => {
-    const last =
-      (await AsyncStorage.getItem(LAST_COOKIE_KEY)) ??
-      (await AsyncStorage.getItem(COOKIE_KEY));
+    const last = await loadCredential(CredentialKey.cookie);
     if (!last) return false;
     try {
       const conn = new DshConnection({ baseUrl, cookie: last });
@@ -234,7 +292,6 @@ export default function App() {
       const ok = await probe.ping();
       probe.close();
       if (!ok) return false;
-      await AsyncStorage.setItem(COOKIE_KEY, last);
       setCookie(last);
       setAuthed(true);
       return true;
@@ -379,6 +436,7 @@ export default function App() {
       setBaseUrl,
       saveCookie,
       signOut,
+      clearAuthorization,
       butlerMode,
       setButlerMode,
       butlerSessionId,
@@ -395,6 +453,7 @@ export default function App() {
       setBaseUrl,
       saveCookie,
       signOut,
+      clearAuthorization,
       butlerMode,
       setButlerMode,
       butlerSessionId,

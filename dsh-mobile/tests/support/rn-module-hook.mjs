@@ -25,6 +25,7 @@
 const MAPPING = {
   '@react-native-async-storage/async-storage': './_async-storage-shim.cjs',
   '@react-native-cookies/cookies': './_cookie-manager-shim.cjs',
+  'react-native-keychain': './_keychain-shim.cjs',
 };
 
 /**

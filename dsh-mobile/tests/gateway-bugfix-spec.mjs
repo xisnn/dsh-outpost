@@ -133,8 +133,11 @@ check('仍支持 dsh-pair 子协议', () =>
   gw.includes('dsh-pair.${pairingCode}') ? true : '配对协议被破坏',
 );
 
-check('配对成功仍会存 token', () =>
-  /kind === 'paired'[\s\S]{0,300}setItem\(DEVICE_TOKEN_KEY/.test(gw) ? true : '没存 token',
+check('配对成功仍会存 token（Keystore）', () =>
+  // 凭据迁到 Keychain 后，判定改成看 saveCredential
+  /kind === 'paired'[\s\S]{0,400}saveCredential\(CredentialKey\.gatewayToken/.test(gw)
+    ? true
+    : '没存 token',
 );
 
 console.log('');

@@ -114,18 +114,23 @@ check('401 时清掉内存 token', () =>
   /this\.token\s*=\s*''/.test(gw) ? true : '没有清内存 token',
 );
 
-check('401 时清掉持久化 token', () =>
-  /removeItem\(DEVICE_TOKEN_KEY\)/.test(gw) ? true : '没有清 AsyncStorage token',
+check('401 时清掉持久化 token（Keystore）', () =>
+  /clearCredential\(CredentialKey\.gatewayToken\)/.test(gw)
+    ? true
+    : '没有清 Keystore 里的 token',
 );
 
 check('401 后不再复用旧配对码', () => {
-  const i = gw.indexOf('unauthorized');
-  if (i < 0) return '找不到 unauthorized 分支';
-  const body = gw.slice(i, i + 500);
-  // 应该 scheduleRetry() 不带参数，而不是 scheduleRetry(pairingCode)
-  return /scheduleRetry\(\s*\)/.test(body)
-    ? true
-    : '还在拿旧配对码重试（一次性码，必然 401）';
+  // 重构后分支名从 unauthorized 改成了 saidUnauthorized /
+  // exceededThreshold，语义没变：认定凭据失效时都必须
+  // scheduleRetry() 且不带旧配对码。
+  const i = gw.indexOf('saidUnauthorized');
+  if (i < 0) return '找不到 saidUnauthorized 分支';
+  const body = gw.slice(i, i + 700);
+  if (/scheduleRetry\(\s*pairingCode\s*\)/.test(body)) {
+    return '还在拿旧配对码重试（一次性码，必然 401）';
+  }
+  return /scheduleRetry\(\s*\)/.test(body) ? true : '没有安排重试';
 });
 
 // ── 4. 网关生命周期上移到 App 级 ─────────────────────────────────
