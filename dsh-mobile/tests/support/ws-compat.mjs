@@ -83,6 +83,62 @@ function wrapWs(real, url) {
     });
   }
 
+  // ── Node `ws` 特有的 `unexpected-response`（惰性桥接）──────────────
+  //
+  // ## 为什么需要
+  //
+  // 握手被拒（401/403）时，`ws` 与 RN 的 WebSocket 事件模型不同：
+  //
+  //   · RN（Android okhttp / iOS）→ 触发 `error`（message 带 401），随后 close
+  //   · Node `ws` → 只发 `unexpected-response`
+  //
+  // 产品代码里有一个专门处理 `unexpected-response` 的分支
+  // （approvalGateway，用于「失效 token 自愈」）。替身若不提供 `on()`
+  // 订阅能力，产品那段逻辑在测试中永远收不到事件。
+  //
+  // ## ⚠️ 为什么必须「惰性」注册
+  //
+  // `ws` 库的内部逻辑是：**只要有人监听 `unexpected-response`，
+  // 就不再触发 `error` 和 `close`**。所以如果这里无条件
+  // `real.on('unexpected-response', ...)`，所有用这个替身的测试
+  // （包括纯协议层的 integration-transport）都会失去 error/close 事件，
+  // 导致「WS：没 cookie 被 401 拒绝」这类用例假失败 —— 实际已经踩过。
+  //
+  // 因此改为：只有当调用方**真的订阅了** `unexpected-response`
+  // 时才注册 real 上的监听器，保持其它测试的事件语义完全不变。
+  const unexpectedHandlers = [];
+  let unexpectedBridgeInstalled = false;
+
+  const ensureUnexpectedBridge = () => {
+    if (unexpectedBridgeInstalled) return;
+    unexpectedBridgeInstalled = true;
+    real.on('unexpected-response', (req, res) => {
+      for (const cb of [...unexpectedHandlers]) {
+        try {
+          cb(req, res);
+        } catch {
+          // 单个监听器抛错不影响其它监听器（与 EventEmitter 行为一致）
+        }
+      }
+    });
+  };
+
+  ws.on = (event, cb) => {
+    if (event !== 'unexpected-response') return;
+    unexpectedHandlers.push(cb);
+    ensureUnexpectedBridge();
+  };
+  ws.once = (event, cb) => {
+    if (event !== 'unexpected-response') return;
+    unexpectedHandlers.push(cb);
+    ensureUnexpectedBridge();
+  };
+  ws.off = ws.removeListener = (event, cb) => {
+    if (event !== 'unexpected-response') return;
+    const i = unexpectedHandlers.indexOf(cb);
+    if (i >= 0) unexpectedHandlers.splice(i, 1);
+  };
+
   const fire = (kind, ev) => {
     for (const fn of handlers[kind]) {
       try {

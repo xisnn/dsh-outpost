@@ -652,24 +652,35 @@ export class ApprovalGateway {
     // ⚠️ 这是一个**真实的跨平台差异**，也是「失效 token 不自愈」的根因：
     //
     //   · RN 的 WebSocket（Android okhttp / iOS）→ 握手失败走 `onerror`，
-    //     message 里带 `Expected HTTP 101 response but was '401 Unauthorized'`
-    //   · Node 的 `ws` 库 → **既不触发 `error` 也不触发 `close`**，
-    //     而是发一个单独的 `unexpected-response` 事件
+    //     message 里带 `Expected HTTP 101 response but was '401 Unauthorized'`，
+    //     随后还会触发 `onclose`
+    //   · Node 的 `ws` 库 → 握手失败**既不触发 error 也不触发 close**，
+    //     只发一个独立的 `unexpected-response` 事件，然后连接就结束了
     //
-    // 我们自己的测试跑在 Node 上（用 `ws` 做的替身）。如果只监听
-    // onerror/onclose，401 这条路径在测试里**永远不会触发**：
+    // 我们的测试跑在 Node 上（`ws` 替身）。只监听 onerror/onclose 时，
+    // 401 这条路径在测试里**永远走不到清理分支**：
     // `lastErrorText` 一直是空 → `isCredentialRejection('')` 为 false →
     // 保留那个已经失效的 token → 反复重连 → 最终超时。
     //
-    // 表现就是 `gateway-recovery-spec` 的「失效 token 自愈」偶发失败
-    // （本地 5 次中 1 次，CI 上更明显，因为时序更慢）。
+    // 表现就是 `gateway-recovery-spec` 的「失效 token 自愈」偶发失败。
     //
-    // 所以这里显式处理 `unexpected-response`：把状态码/状态文本记成
-    // 错误线索，并**主动结束这条连接**，让 onclose 走正常的分支判断。
-    // 真机上没有这个事件，这段不会执行，不影响生产行为。
+    // ## 为什么这里不能只记错误文本再 close()
+    //
+    // 实测（ws 8.x）：401 时事件序列只有 `unexpected-response`，
+    // **不会再有 `close`**。而在握手失败后调用 `ws.close()` 也不会
+    // 产生新的 close 事件 —— 连接从来没建立起来。
+    //
+    // 所以「记文本 → close → 让 onclose 统一处理」这条路是走不通的。
+    // 必须在 `unexpected-response` 里**直接把凭据失效这一支处理掉**，
+    // 与 onclose 里的逻辑保持一致（清 token → 通知 → 安排重试）。
+    //
+    // 真机上没有这个事件，这段不会执行，生产行为不变。
     const wsWithUnexpected = ws as unknown as {
-      on?: (event: string, cb: (req: unknown, res: { statusCode?: number; statusMessage?: string }) => void) => void;
-      once?: (event: string, cb: (req: unknown, res: unknown) => void) => void;
+      on?: (
+        event: string,
+        cb: (req: unknown, res: { statusCode?: number; statusMessage?: string }) => void,
+      ) => void;
+      removeListener?: (event: string, cb: (...args: never[]) => void) => void;
     };
     wsWithUnexpected.on?.(
       'unexpected-response',
@@ -677,17 +688,35 @@ export class ApprovalGateway {
         if (!isCurrent()) return;
         const code = typeof res?.statusCode === 'number' ? res.statusCode : 0;
         const text = String(res?.statusMessage ?? '');
-        // 记成 `HTTP 401 Unauthorized` 这种形式，让 isCredentialRejection
-        // 的 401 数字判据和 unauthorized 词汇判据都能命中。
+        // 记成 `HTTP 401 Unauthorized`，让 isCredentialRejection 的
+        // 401 数字判据与 unauthorized 词汇判据都能命中（保留给后续判断用）。
         if (code) {
           this.lastErrorText = redactUrl(`HTTP ${code}${text ? ` ${text}` : ''}`);
         }
-        // 主动关闭，触发 onclose 统一处理（重连/清 token/退避都在那里）
-        try {
-          ws.close();
-        } catch {
-          // 关闭失败也无所谓：连接本来就已经不可用
+
+        // 这条连接已经废了，先解除引用，避免后续回调误判为当前连接
+        this.ws = undefined;
+
+        const combined = `${text} ${this.lastErrorText}`.trim();
+
+        // 与 onclose 同源：只有「带 token 且不是刚用配对码」时才谈得上失效
+        if (this.token && !this.usedPairingCode && isCredentialRejection(combined)) {
+          this.token = '';
+          this.consecutiveFailures = 0;
+          void clearCredential(CredentialKey.gatewayToken).catch(() => undefined);
+          this.events.onStatus?.('offline', '配对凭据已失效，正在重新配对');
+          this.scheduleRetry();
+          return;
         }
+
+        // 其它握手失败（403/404/5xx）：按普通离线处理，**保留 token**
+        // —— 这类错误与凭据有效性无关（见 isCredentialRejection 的注释）。
+        this.consecutiveFailures += 1;
+        this.events.onStatus?.(
+          'offline',
+          code ? `连接被拒绝（HTTP ${code}）` : '连接被拒绝',
+        );
+        this.scheduleRetry();
       },
     );
 
