@@ -44,6 +44,39 @@ register('./support/rn-module-hook.mjs', import.meta.url);
 const require = createRequire(import.meta.url);
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 
+// ── 还必须补一条 CJS 解析 hook ────────────────────────────────
+//
+// ESM loader hook 管不到 **CJS 的 `require()`**。而 `secureStore.ts` 里
+// 加载 Keychain 用的正是裸 `require('react-native-keychain')`
+// （那里的注释说明了为什么不能静态 import —— 会把 RN 的 Flow 源码拉进来）。
+//
+// 之前这个文件没挂 CJS hook，于是：
+//   · `require('react-native-keychain')` 直接解析到**真实的 RN 包**
+//   · 它一加载就抛 `SyntaxError: Unexpected token 'typeof'`（Flow 语法）
+//   · `getKeychain()` 把这个异常抛给调用方
+//   · `loadCredential` / `isSecureStorageAvailable` 等全部走进 catch
+//
+// 在 P0-1 之前，「凭据读不出来」被静默当成「没有凭据」，所以没人发现。
+// P0-1 之后撤销状态要**三态 fail-closed**（读不到 ≠ 未撤销），这条原本
+// 被掩盖的脚手架缺口立刻表现为「状态变成了 unknown」。
+//
+// ⚠️ 这是**测试脚手架缺口**，不是产品缺陷：真机上 Metro 打包时
+// `require` 一直在，Keychain 是真实原生模块。修这里，不要动产品代码。
+const SHIM_DIR = path.join(__dirname, 'support');
+const origResolve = Module._resolveFilename;
+Module._resolveFilename = function (request, parent, ...rest) {
+  if (request === '@react-native-async-storage/async-storage') {
+    return path.join(SHIM_DIR, '_async-storage-shim.cjs');
+  }
+  if (request === '@react-native-cookies/cookies') {
+    return path.join(SHIM_DIR, '_cookie-manager-shim.cjs');
+  }
+  if (request === 'react-native-keychain') {
+    return path.join(SHIM_DIR, '_keychain-shim.cjs');
+  }
+  return origResolve.call(this, request, parent, ...rest);
+};
+
 /** Windows 下动态 import 必须用 file:// URL，不能用裸路径 */
 const imp = (absPath) => import(pathToFileURL(absPath).href);
 
@@ -127,6 +160,17 @@ async function login(conn, srv) {
  */
 async function seedCookie(srv) {
   AsyncStorageStub.__reset();
+  // ⚠️ 安全存储也要清。
+  //
+  // 真的 Keychain 替身接上之后（见上面的 CJS hook 注释），
+  // `gatewayToken` / `gatewayDeviceId` 会**跨测试残留**：
+  // 上一个测试配对拿到的长期 token 还躺在替身里，于是这个测试的
+  // 「首次连接」直接拿旧 token 去连新服务端 → 服务端不认 → offline。
+  //
+  // 这个 helper 的契约本来就是「保证每次都走全新配对的完整路径」，
+  // 所以清掉安全存储是它份内的事，不是为了让测试变绿而放宽断言。
+  const keychain = require(path.join(__dirname, 'support', '_keychain-shim.cjs'));
+  if (typeof keychain.__reset === 'function') keychain.__reset();
   const conn = makeConn(srv);
   await conn.loginWithToken(srv.token);
   conn.close();
@@ -157,13 +201,17 @@ async function closeGateway(gw) {
 /**
  * 建一条「裸」网关连接（不经过 ApprovalGateway）。
  *
- * 用于验证协议的可行性和边界：配对码一次性、dsh-token 能不能重连等。
+ * 用于验证协议的可行性和边界：配对码一次性、dsh-auth 能不能重连等。
  * 用 ws 库因为要往握手塞 X-DSH-Device-ID 头。
+ *
+ * ⚠️ token 子协议前缀是 `dsh-auth.` —— 和真实插件 extractCredential()
+ * 以及 PROTOCOL.md 一致。这里写成 dsh-token. 的话，测试会「验证」
+ * 一个真服务端不认的协议，反而掩盖产品代码里的前缀错误。
  */
 function openRawGateway(srv, { code, token, deviceId } = {}) {
   const protocols = ['dsh-mobile-v1'];
   if (code) protocols.push(`dsh-pair.${code}`);
-  if (token) protocols.push(`dsh-token.${token}`);
+  if (token) protocols.push(`dsh-auth.${token}`);
 
   const headers = {};
   if (deviceId) headers['X-DSH-Device-ID'] = deviceId;
@@ -435,7 +483,7 @@ await check('网关：ApprovalGateway 能连上并收到审批帧', async () => 
   }
 });
 
-await check('网关：断线后服务端接受 dsh-token 重连（协议层验证）', async () => {
+await check('网关：断线后服务端接受 dsh-auth 重连（协议层验证）', async () => {
   const srv = await startFakeDsh();
   try {
     // 第一步：配对，拿到长期 token
@@ -468,7 +516,7 @@ await check('网关：断线后服务端接受 dsh-token 重连（协议层验�
     const second = openRawGateway(srv, { token: paired.token, deviceId: 'reconnect-probe' });
     const reopened = await second.opened;
     second.ws.close();
-    return reopened ? true : '用 dsh-token 重连被拒（协议不支持）';
+    return reopened ? true : '用 dsh-auth 重连被拒（协议不支持）';
   } finally {
     await srv.close();
   }

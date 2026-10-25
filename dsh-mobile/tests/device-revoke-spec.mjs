@@ -184,9 +184,10 @@ await check('列出设备：能拿到服务端的设备列表', async () => {
       name: '手机',
       clientDeviceId: 'dsh-outpost-abc',
     });
-    const list = await listPairedDevices(srv.baseUrl, srv.cookie);
-    if (list.length !== 1) return `期望 1 台，得到 ${list.length}`;
-    return list[0].id === 'uuid-1' ? true : 'id 不对';
+    const res = await listPairedDevices(srv.baseUrl, srv.cookie);
+    if (!res.ok) return `请求失败：${res.kind} ${res.message}`;
+    if (res.devices.length !== 1) return `期望 1 台，得到 ${res.devices.length}`;
+    return res.devices[0].id === 'uuid-1' ? true : 'id 不对';
   } finally {
     await srv.close();
   }
@@ -262,12 +263,26 @@ await check('撤销：deviceId 为空时直接 failed，不发请求', async () 
 const { readFileSync } = await import('node:fs');
 const appSrc = readFileSync('src/App.tsx', 'utf8');
 
-await check('clearAuthorization 先撤销服务端，再清本地', () => {
+/**
+ * 取 `const clearAuthorization = useCallback(...)` 的**完整**函数体。
+ *
+ * ⚠️ 以前这里是 `appSrc.slice(i, i + 6000)`，靠一个魔数覆盖函数体。
+ * P0-2 把结果改成判别联合 + 分项提示之后函数变长了，魔数又不够用。
+ * 每加一点逻辑就调大一次数字不是办法 —— 改成按真正的结束标记截取。
+ */
+function clearAuthBody() {
   const i = appSrc.indexOf('const clearAuthorization');
-  if (i < 0) return '找不到实现';
-  const body = appSrc.slice(i, i + 2000);
-  const revokeIdx = body.indexOf('revokeOwnDevice');
-  const clearIdx = body.indexOf('clearAllCredentials');
+  if (i < 0) return '';
+  const end = appSrc.indexOf('}, [baseUrl, store]);', i);
+  return end < 0 ? appSrc.slice(i) : appSrc.slice(i, end);
+}
+
+const clearBody = clearAuthBody();
+
+await check('clearAuthorization 先撤销服务端，再清本地', () => {
+  if (!clearBody) return '找不到实现';
+  const revokeIdx = clearBody.indexOf('revokeOwnDevice');
+  const clearIdx = clearBody.indexOf('clearAllCredentials');
   if (revokeIdx < 0) return '没有调用 revokeOwnDevice';
   if (clearIdx < 0) return '没有调用 clearAllCredentials';
   return revokeIdx < clearIdx
@@ -276,17 +291,44 @@ await check('clearAuthorization 先撤销服务端，再清本地', () => {
 });
 
 await check('撤销失败时会提示用户', () => {
-  const i = appSrc.indexOf('const clearAuthorization');
-  const body = appSrc.slice(i, i + 2000);
-  return body.includes('notifyRevokeFailed') ? true : '撤销失败静默处理，用户以为彻底清了';
+  if (!clearBody) return '找不到实现';
+  // P0-2：不再是单个布尔 + notifyRevokeFailed()，而是把服务端/本地
+  // 两半的分项结果交给统一的提示函数。
+  //
+  // 这里断言的是**行为**而不是函数名：函数体里必须有一个「结果不完整
+  // 就提示用户」的分支，且提示文案里必须提到「电脑上」——
+  // 那是用户唯一能据以自救的地方（去电脑上手动移除设备）。
+  const hasResultGate = /isFullyClear\s*\(/.test(clearBody);
+  const hasNotify = /notifyClearResult\s*\(/.test(clearBody);
+  if (!hasResultGate) return '没有判断结果是否完整就报成功';
+  if (!hasNotify) return '结果不完整时没有提示用户';
+  // 提示文案必须真的讲清楚「服务端可能还留着授权」
+  if (!/电脑上的授权可能仍然有效|电脑上的授权可能仍然|设备管理/.test(appSrc)) {
+    return '提示文案没有告知用户服务端授权可能仍在';
+  }
+  return true;
 });
 
 await check('撤销失败不阻塞本地清理', () => {
-  const i = appSrc.indexOf('const clearAuthorization');
-  const body = appSrc.slice(i, i + 2000);
-  // 网络不通时也必须能清掉本机凭据
-  if (!/revokeFailed\s*=\s*true/.test(body)) return '找不到 revokeFailed 标记';
-  return /await clearAllCredentials\(\)/.test(body) ? true : '本地清理被跳过了';
+  if (!clearBody) return '找不到实现';
+  // 网络不通时也必须能清掉本机凭据。
+  //
+  // P0-2 之后服务端结果是一个判别联合（有 failed / unconfirmed 分支），
+  // 不再有 `revokeFailed = true` 这个布尔赋值。断言要点不变：
+  // **服务端那半失败/未确认时，本地清理必须照常执行**。
+  const hasServerFailureBranch = /kind:\s*'failed'|kind === 'failed'|reason:\s*'unexpected'/.test(
+    clearBody,
+  );
+  const hasUnconfirmedBranch = /unconfirmed/.test(clearBody);
+  if (!hasServerFailureBranch) return '没有处理服务端撤销失败的分支';
+  if (!hasUnconfirmedBranch) return '没有处理「没发出请求」的分支';
+  // 本地清理必须在这之后无条件执行（不能放在 else 里）
+  if (!/await clearAllCredentials\(\)/.test(clearBody)) return '本地清理被跳过了';
+  // 本地清理不能只在成功分支里跑
+  if (/if\s*\([^)]*server[^)]*\)\s*\{[^}]*clearAllCredentials/.test(clearBody)) {
+    return '本地清理被塞进了「服务端成功」的条件里';
+  }
+  return true;
 });
 
 console.log('');

@@ -132,18 +132,44 @@ await check('提供 clearAuthorization（清除所有授权）', () => {
 await check('clearAuthorization 同时清派生状态', () => {
   const i = appSrc.indexOf('const clearAuthorization');
   if (i < 0) return '找不到实现';
-  const body = appSrc.slice(i, i + 1800);
+  const body = appSrc.slice(i, i + 6000);
   // 至少要清管家会话和工作区，否则下次配对会串到不存在的资源
   const need = ['BUTLER_SESSION_KEY', 'BUTLER_WORKSPACE_KEY'];
   const missing = need.filter((k) => !body.includes(k));
   return missing.length === 0 ? true : `没清派生状态：${missing.join('、')}`;
 });
 
+/**
+ * 取一个「const xxx = useCallback(...)」函数体的文本。
+ *
+ * ⚠️ 不要再用 `slice(i, i + 2600)` 这种魔数切片。
+ * 之前 `clearAuthorization` 一长（P0-2 加了判别联合和分项提示），
+ * 切片就截在函数中间，断言直接失效 —— 而失效方向是「误报失败」，
+ * 一旦有人为了让它过而调大数字，下次再长又会失效。
+ *
+ * 这里按函数真正的结束标记截取：从声明处到下一个
+ * `}, [deps]);` 结尾。
+ */
+function fnBody(src, decl, depsMarker = '],') {
+  const i = src.indexOf(decl);
+  if (i < 0) return '';
+  const end = src.indexOf(depsMarker, i);
+  // 找不到结束标记就退化成「到文件末尾」，至少不会静默截半截
+  return end < 0 ? src.slice(i) : src.slice(i, end);
+}
+
 await check('clearAuthorization 会清掉老版本遗留的明文 key', () => {
-  const i = appSrc.indexOf('const clearAuthorization');
-  const body = appSrc.slice(i, i + 1800);
-  // LAST_COOKIE_KEY 是旧版本留下的明文副本，升级后要顺手抹掉
-  return body.includes('LAST_COOKIE_KEY') ? true : '没有清理旧版明文副本';
+  const body = fnBody(appSrc, 'const clearAuthorization');
+  if (!body) return '找不到 clearAuthorization';
+  // 旧版本明文副本（@dsh/cookie / @dsh/gatewayToken /
+  // @dsh/gatewayDeviceId / @dsh/lastCookie）统一由
+  // core/credentialMigration.ts 的 clearLegacyCredentialStorage* 清。
+  //
+  // P1-3 之后用的是 *Verified 版本：它保证「经回读确认磁盘上没有残留」，
+  // 而不是「我调了几次 removeItem」。断言要接受两种写法。
+  return /clearLegacyCredentialStorage(Verified)?\s*\(/.test(body)
+    ? true
+    : '没有清理旧版明文副本';
 });
 
 await check('signOut 不再复制 Cookie 留后门', () => {
@@ -190,25 +216,33 @@ const { startFakeDsh } = await imp(path.join(__dirname, 'support', 'fake-dsh.mjs
 /** Keystore 的内存替身（测试里替换 secureStore 的两个函数行为） */
 const keystoreStub = new Map();
 
-await check('静态：断网时不清 token（走 probe 判断）', () => {
-  // 关键语义：连续失败后要先探测服务端可达性
-  if (!/decideTokenValidity/.test(gwSrc)) {
-    return '没有「先探测再决定」的逻辑';
-  }
-  if (!/probeServerReachable/.test(gwSrc)) {
-    return '没有可达性探测';
+await check('静态：断网时不清 token（只认明确的鉴权拒绝）', () => {
+  // 关键语义：清 token 的判据只能是「服务端明确拒绝凭据」，
+  // 不能是失败次数。
+  if (!/isCredentialRejection/.test(gwSrc)) {
+    return '没有「是否明确鉴权拒绝」的判断';
   }
   // 不能是「失败两次就直接清」
-  if (/tokenFailures\s*>=\s*2\s*\)\s*\{[\s\S]{0,80}this\.token\s*=\s*''/.test(gwSrc)) {
+  if (/consecutiveFailures\s*>=\s*2\s*\)\s*\{[\s\S]{0,200}this\.token\s*=\s*''/.test(gwSrc)) {
     return '失败两次还是直接清 token';
   }
-  return true;
+  if (/tokenFailures\s*>=\s*2/.test(gwSrc)) {
+    return '还在用失败次数当判据';
+  }
+  // 清 token 的分支必须挂在 isCredentialRejection 上
+  const i = gwSrc.indexOf('isCredentialRejection(combined)');
+  if (i < 0) return '清 token 的分支没有用 isCredentialRejection 判定';
+  const body = gwSrc.slice(i, i + 400);
+  return /this\.token\s*=\s*''/.test(body) ? true : '清 token 的分支没清 token';
 });
 
 await check('静态：配对码申请失败后会继续重试', () => {
-  const i = gwSrc.indexOf('if (!pairingCode) {');
-  if (i < 0) return '找不到分支';
-  const body = gwSrc.slice(i, i + 400);
+  // ⚠️ 锚点必须是「申请配对码失败」那个分支，不能是第一个
+  // `if (!pairingCode) {` —— 撤销状态检查现在也用了同样的写法，
+  // 用 indexOf 会锚错位置（曾经因此误报）。
+  const i = gwSrc.indexOf('const paired = await this.requestPairingCode();');
+  if (i < 0) return '找不到申请配对码的位置';
+  const body = gwSrc.slice(i, i + 1200);
   if (!body.includes('scheduleRetry')) {
     return '拿不到配对码时直接 return，不重试（网络恢复后也起不来）';
   }
@@ -245,7 +279,7 @@ await check('断网 30 秒恢复：有效 token 不被清，且自动重连', as
       gw.disconnect();
       return '首次连接就没成功';
     }
-    const tokenBefore = gw.token;
+    const tokenBefore = gw.deviceToken;
     if (!tokenBefore) {
       gw.disconnect();
       return '连上了但没有 token，测试前提不成立';
@@ -261,7 +295,7 @@ await check('断网 30 秒恢复：有效 token 不被清，且自动重连', as
     // 3. 断网 6 秒（足够触发两次失败 + 一次探测）
     await new Promise((r) => setTimeout(r, 6000));
 
-    const tokenDuringOutage = gw.token;
+    const tokenDuringOutage = gw.deviceToken;
     if (!tokenDuringOutage) {
       globalThis.fetch = realFetch;
       gw.disconnect();
@@ -281,7 +315,7 @@ await check('断网 30 秒恢复：有效 token 不被清，且自动重连', as
       }
     }
 
-    const tokenAfter = gw.token;
+    const tokenAfter = gw.deviceToken;
     gw.disconnect();
 
     if (!backOnline) {

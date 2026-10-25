@@ -448,9 +448,37 @@ await check('设备：配对过的设备会出现在 /mgw/devices', async () => 
       headers: { Cookie: srv.cookie },
     });
     const json = await res.json();
-    const devices = json?.payload?.devices ?? [];
-    const found = devices.some((d) => d.id === 'listed-device');
-    return found ? true : '配对的设备没出现在列表里：' + JSON.stringify(devices);
+
+    // ⚠️ 真实插件的返回形状是顶层 `devices`，不是 `payload.devices`；
+    // 而且 `id` 是**服务端 UUID**，不是客户端发来的 X-DSH-Device-ID。
+    //
+    // 之前这里断言 `d.id === 'listed-device'`（客户端标识），等于把
+    // 「服务端拿客户端标识当主键」这个错误假设固化进了测试 ——
+    // 真机上服务端返回 UUID，客户端于是永远认不出自己，
+    // 「撤销这台手机」返回 already-gone 却被当成成功。
+    const devices = Array.isArray(json?.devices) ? json.devices : [];
+    if (devices.length === 0) {
+      return '配对的设备没出现在列表里：' + JSON.stringify(json);
+    }
+
+    const serverId = srv.serverDeviceIds.get('listed-device');
+    if (!serverId) return '模拟服务端没有为该设备生成 UUID（前置条件不成立）';
+    if (serverId === 'listed-device') {
+      return '服务端 UUID 等于客户端标识 —— 模拟服务端没复刻真实行为';
+    }
+
+    const found = devices.some((d) => d.id === serverId);
+    if (!found) {
+      return `列表里没有服务端 UUID ${serverId}：` + JSON.stringify(devices);
+    }
+
+    // 关键契约：列表条目**不返回** clientDeviceId
+    // （真实插件 publicDevice() 只给 id/name/createdAt/lastSeenAt/online/connections）
+    const leaked = devices.filter((d) => 'clientDeviceId' in d);
+    if (leaked.length > 0) {
+      return '列表条目泄露了 clientDeviceId —— 与真实插件契约不符（客户端不能依赖它）';
+    }
+    return true;
   } finally {
     await srv.close();
   }

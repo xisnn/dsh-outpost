@@ -52,10 +52,21 @@ check('子协议 dsh-mobile-v1', () => (src.includes("'dsh-mobile-v1'") ? true :
 check('配对子协议 dsh-pair.<code>', () =>
   src.includes('dsh-pair.${pairingCode}') ? true : '缺少配对子协议',
 );
-check('长期 token 子协议 dsh-token.<token>', () =>
-  src.includes('dsh-token.${this.token}') ? true : '缺少 token 子协议',
+check('长期 token 子协议 dsh-auth.<token>', () =>
+  // ⚠️ 是 dsh-auth. 不是 dsh-token. —— 插件 extractCredential() 只认
+  // dsh-auth. / dsh-pair.，写错前缀服务端就当「没带凭据」→ 401。
+  src.includes('dsh-auth.${this.token}')
+    ? true
+    : '缺少 token 子协议（必须是 dsh-auth. 前缀）',
 );
-check('设备 id 持久化', () => (src.includes('DEVICE_ID_KEY') ? true : '缺少设备 id'));
+check('设备 id 持久化（Keystore，不再是 DEVICE_ID_KEY）', () =>
+  // 凭据迁到 Keychain 后，device id 也走 secureStore，
+  // 原来的 AsyncStorage 常量 DEVICE_ID_KEY 已经不存在了。
+  /saveCredential\(CredentialKey\.gatewayDeviceId/.test(src) &&
+  /loadCredential\(CredentialKey\.gatewayDeviceId/.test(src)
+    ? true
+    : '缺少设备 id 的读写',
+);
 check('配对成功后存 token（Keystore）', () =>
   // 凭据已迁到 Keychain，不再是 AsyncStorage.setItem(DEVICE_TOKEN_KEY)
   /kind === 'paired'[\s\S]{0,400}saveCredential\(CredentialKey\.gatewayToken/.test(src)

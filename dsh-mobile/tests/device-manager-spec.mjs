@@ -147,9 +147,10 @@ await check('列出设备：带上了完整信息（在线、活跃时间）', a
     },
   ]);
   try {
-    const list = await listPairedDevices(srv.baseUrl, srv.cookie);
-    if (list.length !== 1) return `期望 1 台，得到 ${list.length}`;
-    const d = list[0];
+    const res = await listPairedDevices(srv.baseUrl, srv.cookie);
+    if (!res.ok) return `请求失败：${res.kind} ${res.message}`;
+    if (res.devices.length !== 1) return `期望 1 台，得到 ${res.devices.length}`;
+    const d = res.devices[0];
     if (!d.displayName) return '缺 displayName';
     if (d.online !== true) return '缺 online 状态';
     if (!d.lastSeenAt) return '缺 lastSeenAt';
@@ -233,9 +234,9 @@ await check('能认出「这台手机」', () => {
 await check('撤销成功后从列表移除（不整页刷新）', () => {
   const i = src.indexOf('doRevoke');
   if (i < 0) return '找不到 doRevoke';
-  const body = src.slice(i, i + 1200);
-  // 允许写法差异（括号/空格/三元），只要是对 setDevices 做 filter
-  return /setDevices\([\s\S]{0,120}\.filter\(/.test(body)
+  const body = src.slice(i, i + 3000);
+  // 允许写法差异（括号/空格/三元），只要是对列表做 filter
+  return /filter\(\(d\) => d\.id !== device\.id\)/.test(body)
     ? true
     : '撤销后没有局部更新列表';
 });

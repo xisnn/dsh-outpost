@@ -198,6 +198,27 @@ function makeWsServer() {
       }
       clients.clear();
     },
+    /**
+     * 发一个 close 帧再断开（模拟服务端主动 close(code, reason)）。
+     *
+     * 必须真的发 WebSocket close 帧 —— 直接 destroy() 的话客户端只会
+     * 收到 1006（异常关闭），拿不到服务端想表达的 4003。
+     */
+    killAllWithCode(code, reason) {
+      const body = Buffer.alloc(2 + Buffer.byteLength(String(reason ?? ''), 'utf8'));
+      body.writeUInt16BE(code, 0);
+      body.write(String(reason ?? ''), 2, 'utf8');
+      const frame = encodeFrame(body, 0x8);
+      for (const c of clients) {
+        try {
+          c.write(frame);
+          c.end();
+        } catch {
+          /* ignore */
+        }
+      }
+      clients.clear();
+    },
     close() {
       this.killAll();
     },
@@ -214,8 +235,16 @@ function makeWsServer() {
  */
 export async function startFakeDsh(opts = {}) {
   const token = opts.token ?? 'TESTTOKEN' + crypto.randomBytes(12).toString('hex');
-  /** 配对成功后发给客户端的长期 token（重连时用 dsh-token.<它>） */
+  /** 配对成功后发给客户端的长期 token（重连时用 dsh-auth.<它>） */
   const DEVICE_TOKEN = 'device-token-' + crypto.randomBytes(12).toString('hex');
+  /**
+   * 服务端**实例标识**（插件的 `gatewayId`）。
+   *
+   * 真实插件把它存进独立状态文件，跨重启稳定、不随设备撤销变化。
+   * 测试需要能指定它（模拟「同一地址换了服务器」/「注册表重建」），
+   * 所以允许 opts.gatewayId 覆盖。
+   */
+  const GATEWAY_ID = opts.gatewayId ?? crypto.randomUUID();
   const cookieName = 'dsh-auth-test';
   const cookieValue = 'v1.' + crypto.randomBytes(24).toString('base64url');
   const cookie = `${cookieName}=${cookieValue}`;
@@ -226,8 +255,19 @@ export async function startFakeDsh(opts = {}) {
   const calls = [];
   /** 网关连上的设备 */
   const gatewayDevices = new Set();
+  /**
+   * 客户端 device id → **服务端** device id（UUID）。
+   *
+   * 真实插件里这是两套完全不同的 id：客户端发 `X-DSH-Device-ID`
+   * （`dsh-outpost-xxx`），服务端自己生成 UUID 当注册表主键，
+   * 且 `GET /mgw/devices` 只返回 UUID（不返回客户端标识）。
+   * 这里复刻这个映射，才能测出「撤销自己」是否真的能找到记录。
+   */
+  const SERVER_DEVICE_IDS = new Map();
   /** /mgw/pair 被调了几次（测试诊断用） */
   let pairCalls = 0;
+  /** 撤销请求收到的服务端 device id 列表（测试断言用） */
+  const revokeCalls = [];
   const gatewayPairings = new Map(); // pairingCode → { deviceId, used }
   let gatewayConnected = false;
 
@@ -301,20 +341,106 @@ export async function startFakeDsh(opts = {}) {
       return;
     }
 
-    // ── 设备列表 ───────────────────────────────────────────────
-    if (req.method === 'GET' && url.pathname === '/mgw/devices') {
+    // ── 网关状态（真实插件同款）────────────────────────────────
+    //
+    // 真实插件：`GET /mgw/status` 返回
+    //   { version, requireAuth, gatewayEnabled, gatewayMode,
+    //     gatewayId, gatewayName,          ← ...gatewayIdentity
+    //     gatewayInstanceId,               ← 每次启动都变，**不可**当身份
+    //     endpoints, connectedClients, wsPath, lan: {...}, ... }
+    //
+    // 客户端用 gatewayId 确认「存下来的设备 UUID 属于这台服务器」
+    // （见 src/core/serverIdentity.ts）。这里只需暴露身份相关字段。
+    if (req.method === 'GET' && url.pathname === '/mgw/status') {
       res.writeHead(200, { 'content-type': 'application/json' });
       res.end(
         JSON.stringify({
-          payload: {
-            devices: [...gatewayDevices].map((id, i) => ({
-              id,
-              name: `fake-device-${i}`,
-              lastSeenAt: Date.now(),
-            })),
-          },
+          version: 'fake',
+          requireAuth: true,
+          gatewayEnabled: true,
+          gatewayMode: 'persistent',
+          gatewayId: GATEWAY_ID,
+          gatewayName: 'fake-gateway',
+          gatewayInstanceId: crypto.randomUUID(),
+          wsPath: '/ws/mobile',
+          connectedClients: gatewayDevices.size,
         }),
       );
+      return;
+    }
+
+    // ── 设备列表 ───────────────────────────────────────────────
+    //
+    // ⚠️ 返回形状必须复刻真实插件的 `GET /mgw/devices`：
+    //      { devices: [ { id, name, createdAt, lastSeenAt, online,
+    //                     connections, displayName } ] }
+    //   关键是 **id 是服务端 UUID，且没有 clientDeviceId**。
+    //
+    //   这里之前返回 `payload.devices` + 把客户端 id 当 `id`，
+    //   两个问题：
+    //     · 形状不对（真实是顶层 devices，不是 payload 包一层）
+    //     · id 语义不对（客户端标识 ≠ 服务端主键）
+    //   结果「撤销自己」在测试里能过、真机失败。
+    if (req.method === 'GET' && url.pathname === '/mgw/devices') {
+      const devices = [...gatewayDevices].map((clientId, i) => ({
+        id: SERVER_DEVICE_IDS.get(clientId) ?? `srv-${i}`,
+        name: `fake-device-${i}`,
+        createdAt: Date.now(),
+        lastSeenAt: Date.now(),
+        online: true,
+        connections: 1,
+        displayName: `fake-device-${i}`,
+      }));
+      res.writeHead(200, { 'content-type': 'application/json' });
+      res.end(JSON.stringify({ devices }));
+      return;
+    }
+
+    // ── 撤销设备 ───────────────────────────────────────────────
+    //
+    // 真实插件：POST /mgw/devices/<serverUUID>/revoke
+    //   · 成功 200 { revoked: true }
+    //   · 不存在 404 { revoked: false }
+    //   · 非 GET 且不同源 → 403（CSRF 保护）
+    if (
+      req.method === 'POST' &&
+      url.pathname.startsWith('/mgw/devices/') &&
+      url.pathname.endsWith('/revoke')
+    ) {
+      const origin = req.headers.origin;
+      const host = req.headers.host;
+      let sameOrigin = false;
+      try {
+        sameOrigin = !!origin && !!host && new URL(origin).host === host;
+      } catch {
+        sameOrigin = false;
+      }
+      if (!sameOrigin) {
+        res.writeHead(403, { 'content-type': 'application/json' });
+        res.end(
+          JSON.stringify({
+            error: 'forbidden',
+            message: 'cross-origin management request rejected',
+          }),
+        );
+        return;
+      }
+      const targetId = decodeURIComponent(
+        url.pathname.slice('/mgw/devices/'.length, -'/revoke'.length),
+      );
+      // 按服务端 UUID 找对应的客户端 id
+      let revoked = false;
+      for (const [clientId, serverId] of SERVER_DEVICE_IDS) {
+        if (serverId === targetId) {
+          gatewayDevices.delete(clientId);
+          SERVER_DEVICE_IDS.delete(clientId);
+          revoked = true;
+          break;
+        }
+      }
+      revokeCalls.push(targetId);
+      res.writeHead(revoked ? 200 : 404, { 'content-type': 'application/json' });
+      res.end(JSON.stringify({ revoked }));
       return;
     }
 
@@ -412,7 +538,16 @@ export async function startFakeDsh(opts = {}) {
         .split(',')
         .map((s) => s.trim());
       const pairProto = protocols.find((p) => p.startsWith('dsh-pair.'));
-      const authProto = protocols.find((p) => p.startsWith('dsh-token.'));
+      // ⚠️ 长期 token 的子协议是 `dsh-auth.`，不是 `dsh-token.`。
+      //
+      // 真实插件 lib/index.mjs 的 extractCredential() 只认这两个前缀：
+      //   if (protocol.startsWith('dsh-auth.')) return { kind: 'token', ... }
+      //   if (protocol.startsWith('dsh-pair.')) return { kind: 'pairing', ... }
+      // PROTOCOL.md 第 90-91 行也是 `dsh-auth.<token>`。
+      //
+      // 模拟服务端曾经写成 dsh-token.，于是「客户端写错前缀」这个真实缺陷
+      // 一直测不出来 —— 假服务端认了一个真服务端不认的前缀。
+      const authProto = protocols.find((p) => p.startsWith('dsh-auth.'));
 
       if (pairProto) {
         const code = pairProto.slice('dsh-pair.'.length);
@@ -428,7 +563,7 @@ export async function startFakeDsh(opts = {}) {
         rec.deviceId = String(deviceId);
         gatewayDevices.add(String(deviceId));
       } else if (authProto) {
-        const tok = authProto.slice('dsh-token.'.length);
+        const tok = authProto.slice('dsh-auth.'.length);
         if (tok !== DEVICE_TOKEN) {
           socket.write(
             'HTTP/1.1 401 Unauthorized\r\nConnection: close\r\nContent-Length: 0\r\n\r\n',
@@ -447,17 +582,68 @@ export async function startFakeDsh(opts = {}) {
       // 回 `dsh-mobile-v1` —— 协议里的基础子协议。
       // 不回的话 ws 客户端会报 "Server sent no subprotocol" 并断开。
       const s = gatewayWs.accept(req, socket, 'dsh-mobile-v1');
-      // 配对上就发 paired 帧（真实服务端行为）
+      // 配对上就发 paired 帧（复刻真实服务端行为）
       //
       // ⚠️ 字段名必须是 `token` 不是 `deviceToken` ——
       // ApprovalGateway 读的是 `frame.token`（见 handleFrame 的 paired 分支），
       // 存下来用于后续重连。第一版写成 deviceToken，导致重连一直失败，
       // 表现出来就是「断线后永远连不回来」。
+      //
+      // ⚠️ `device` 是**嵌套对象**，不是扁平字段 `deviceId`。
+      // 真实插件（lib/index.mjs）发的是：
+      //   { kind:'paired', token, device: { id, name, createdAt, lastSeenAt,
+      //                                      online, connections } }
+      // 而 publicDevice() 不返回 clientDeviceId。
+      //
+      // 这里之前写成了扁平的 `deviceId: '<client id>'`，导致：
+      //   · 产品代码读 frame.device.id 拿不到东西（字段根本不存在）
+      //   · 「撤销自己」在测试里能过（因为测试假服务端返回了 clientDeviceId），
+      //     真机上却认不出自己 —— 又一个「假服务端迎合错误假设」的例子。
+      // 所以这里必须按真实形状发：device.id 是**服务端 UUID**（这里用
+      // 客户端 id 的哈希派生一个稳定 UUID，模拟服务端自己生成的主键）。
+      const serverDeviceId = SERVER_DEVICE_IDS.get(String(deviceId)) ?? (() => {
+        const id = crypto.randomUUID();
+        SERVER_DEVICE_IDS.set(String(deviceId), id);
+        return id;
+      })();
       setTimeout(() => {
         s.send({
           kind: 'paired',
           token: DEVICE_TOKEN,
-          deviceId: String(deviceId),
+          device: {
+            id: serverDeviceId,
+            name: 'fake-device',
+            createdAt: Date.now(),
+            lastSeenAt: null,
+            online: true,
+            connections: 1,
+          },
+          // 真实插件发的是 `{ kind:'paired', token, device, ...gatewayIdentity }`，
+          // 而 `gatewayIdentity = { gatewayId, gatewayName }`。
+          // gatewayId 来自插件的独立状态文件（`gateway-state.mjs`），
+          // 用 linkSync 保证「永不覆盖已有身份」，所以**跨重启、跨设备撤销
+          // 都稳定** —— 这正是客户端用来判断「这个 UUID 是不是这台服务器
+          // 给的」的依据（见 src/core/serverIdentity.ts）。
+          //
+          // ⚠️ 注意别和 `gatewayInstanceId` 搞混：那个是
+          // `crypto.randomUUID()`，插件每次进程启动都重新生成，
+          // **不能**用来标识服务器身份。
+          gatewayId: GATEWAY_ID,
+          gatewayName: 'fake-gateway',
+        });
+        // 真实插件紧接着发 hello（也带 device.id）。
+        // 重连时不发 paired，只有 hello —— 客户端要能从这里学到自己的
+        // 服务端 UUID，否则老用户重连后仍然撤销不了自己。
+        s.send({
+          kind: 'hello',
+          gatewayId: GATEWAY_ID,
+          gatewayName: 'fake-gateway',
+          protocol: 3,
+          capabilities: ['split-channels', 'images'],
+          authenticated: true,
+          device: { id: serverDeviceId, name: 'fake-device' },
+          port: 3095,
+          clients: 1,
         });
       }, 5);
       return;
@@ -479,6 +665,17 @@ export async function startFakeDsh(opts = {}) {
     cookie,
     calls,
     gatewayDevices,
+    /** 撤销请求收到的服务端 device id（测试断言「撤的是不是对的那条」） */
+    revokeCalls,
+    /**
+     * 客户端 device id → 服务端 UUID。
+     *
+     * 测试要验证「撤销自己」时，需要知道服务端给这台设备分配的 UUID，
+     * 因为客户端只能从 paired/hello 帧里学到它。
+     */
+    serverDeviceIds: SERVER_DEVICE_IDS,
+    /** 本假服务端的实例标识（paired/hello/`GET /mgw/status` 都会带） */
+    gatewayId: GATEWAY_ID,
     get pairCalls() {
       return pairCalls;
     },
@@ -506,6 +703,17 @@ export async function startFakeDsh(opts = {}) {
     dropConnections() {
       muxWs.killAll();
       gatewayWs.killAll();
+      gatewayConnected = false;
+    },
+    /**
+     * 用指定 close code 主动关闭网关连接（模拟服务端撤销设备）。
+     *
+     * 真实插件 revoke 设备时执行 `client.close(4003, 'device revoked')`。
+     * 客户端必须能靠这个码区分「授权被作废」和「网络断了」——
+     * 两者要触发完全相反的处理。
+     */
+    closeGatewayWith(code, reason) {
+      gatewayWs.killAllWithCode(code, reason);
       gatewayConnected = false;
     },
     /** 发一个配对码（给测试直接构造） */

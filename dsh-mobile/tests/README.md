@@ -154,7 +154,7 @@ Node 的全局 WebSocket **静默忽略**第三个参数。
 ```bash
 cd dsh-mobile
 
-npm test                      # 静态检查 + 单测（约 40 秒，CI 跑这个）
+npm test                      # 静态检查 + 单测（约 60 秒，CI 跑这个）
 npm run test:integration      # 全部集成测试（约 25 秒，需要本地端口）
 npm run test:integration:protocol   # 只跑协议层
 npm run test:integration:product    # 只跑产品层
@@ -162,6 +162,78 @@ npm run test:e2e              # 端到端（需要真 DSH，见下）
 ```
 
 集成测试只需要本地端口，**不需要 DSH**，可以进 CI。
+
+### 工具链起不来时的备用跑法（Node 22.6+）
+
+`npm test` 走 tsx，而 tsx 依赖 esbuild —— esbuild 启动时会 **spawn 一个子进程**。
+在受限沙箱 / 某些企业环境里 `spawn` 会被拒绝：
+
+```
+TransformError: spawn EPERM
+```
+
+这时可以用 Node 自带的 TypeScript 类型剥离跑同一批测试：
+
+```bash
+node --experimental-transform-types \
+  --import ./tests/support/node-ts-bootstrap.mjs \
+  tests/credential-migration-spec.mjs
+```
+
+`tests/support/node-ts-bootstrap.mjs` 补两个 tsx 会自动做、Node 不会做的事：
+
+| 洞 | 说明 |
+|---|---|
+| 目录 / 无扩展名 import | 产品代码写 `from './fold'`、`from './secureStore'`，Node 的 ESM 解析器不认 |
+| 裸 `require` | `secureStore.ts` 延迟加载 Keychain 用的是 `require(...)`（不能静态 import） |
+
+⚠️ 这只是**测试引导**，不改变产品代码；真机上 Metro 打包时 `require` 一直都在。
+
+### 安全相关的测试组
+
+| 文件 | 守什么 | 项数 |
+|---|---|---|
+| `credential-migration-spec.mjs` | 旧版明文凭据迁移/清理：升级路径、写入失败、幂等、不泄露；「读不到」≠「确认没有」 | 35 |
+| `credential-migration-crash-spec.mjs` | 迁移各阶段崩溃/中断后重跑：不丢凭据、不假 clean | 17 |
+| `login-intent-spec.mjs` | 登录意图持久化：断开后多次重启仍不自动登录 | 22 |
+| `migration-race-spec.mjs` | `lastCookie` 迁移的异步竞争：先落意图再销毁证据；写失败移除可自动登录凭据 | 20 |
+| `device-revocation-spec.mjs` | 撤销后不得自动重新授权：撤销自己/别人、重启、竞态、4003 | 20 |
+| `revocation-persistence-spec.mjs` | 撤销标记**持久化失败**的安全降级：双通道 + 回读校验 + 跨重启 fail-closed | 38 |
+| `revocation-unknown-spec.mjs` | 撤销状态读失败必须 fail-closed（三态，`unknown` ≠ `not-revoked`） | 19 |
+| `device-list-state-spec.mjs` | 设备列表错误态 vs 空列表：network/unauthorized/server 分开 | 24 |
+| `device-manager-spec.mjs` | 设备管理页：列出、撤销任意设备、不误伤自己 | 14 |
+| `server-identity-binding-spec.mjs` | 服务端设备 UUID 必须和**服务器身份**绑定：换服务器/注册表重建后 404 不能算撤销成功 | 32 |
+| `cookie-cleanup-spec.mjs` | Cookie 清理结果可信性：cleared/unavailable/partial/unverified 四态分开 | 29 |
+| `gateway-recovery-spec.mjs` | WebSocket 异常恢复：断网 30 秒、切网络、服务重启、WS 不可用 | 13 |
+| `security-review-fixes-spec.mjs` | 第二轮独立复核发现的 C1/C2/M1~M7/m2/m7 回归防线 | 19 |
+| `protocol-contract-spec.mjs` | 和**真实插件源码**的协议契约（含「列表不返回 clientDeviceId」这个致命前提） | 16 |
+| `crosscheck-revoke-self-spec.mjs` | 用真实插件的 `createRegistry()` 交叉验证「撤销自己」 | 5 |
+
+这些文件**都驱动真实产品函数**（不是正则扫源码），
+服务端用 `support/fake-dsh.mjs`（复刻真实插件协议，含 `gatewayId` 实例标识）。
+
+> ⚠️ 少数**静态检查**（扫 `App.tsx` 源码那种）保留在 `device-revoke-spec` /
+> `credential-security-spec` / `security-review-fixes-spec` / `login-intent-spec` /
+> `migration-race-spec` 里，因为它们守的是「代码结构上的顺序不变式」
+> （比如「必须先读凭据再停网关」），这类东西行为测试测不出来。
+>
+> 注意：**不要用 `slice(i, i + 数字)` 这种魔数切片** —— 函数一长就静默截断，
+> 失效方向是误报，会诱导人为了让它过而调大数字。请按真正的结束标记截取
+> （如 `indexOf('}, [baseUrl, store]);', i)`）。本轮就因为 `clearAuthorization`
+> 变长而踩了两次。
+
+**记账**（2026-10-25，本轮修复后实测）：
+
+| 层 | 文件数 | 断言数 |
+|---|---|---|
+| 单元 / 静态 spec（`npm test` 覆盖） | 41 | **774 通过，0 失败** |
+| 协议集成（`integration-transport/-gateway/-long-session`） | 3 | 39 通过 |
+| 产品集成（`integration-product`） | 1 | 16 通过 |
+| 重连集成（`integration-gateway-reconnect`） | 1 | 6 通过 |
+
+> 本轮新增的 spec 文件：`server-identity-binding`(32)、`migration-race`(20)、
+> `credential-migration-crash`(17)、`revocation-persistence`(38)、`cookie-cleanup`(29)。
+> 上一轮基线是 680 通过 / 37 个 spec 文件；本轮 774 通过 / 41 个 spec 文件。
 
 `e2e.mjs` 需要真服务：
 

@@ -115,7 +115,9 @@ check('请求带 cookie', () =>
 );
 
 check('无 token 时先申请配对码', () =>
-  /!pairingCode && !this\.token[\s\S]{0,400}requestPairingCode/.test(gw)
+  // 重构后中间插入了配对次数上限/撤销检查，跨度放宽到 1200 字符。
+  // 语义不变：没配对码也没 token → 必须走 requestPairingCode。
+  /!pairingCode && !this\.token[\s\S]{0,1200}requestPairingCode/.test(gw)
     ? true
     : '缺少自动配对分支',
 );
@@ -125,8 +127,8 @@ check('申请失败给出可读原因', () =>
 );
 
 // ── 不能破坏「有 token 就复用」 ────────────────────────────────
-check('仍支持 dsh-token 子协议', () =>
-  gw.includes('dsh-token.${this.token}') ? true : 'token 重连被破坏',
+check('仍支持 dsh-auth 子协议', () =>
+  gw.includes('dsh-auth.${this.token}') ? true : 'token 重连被破坏',
 );
 
 check('仍支持 dsh-pair 子协议', () =>
