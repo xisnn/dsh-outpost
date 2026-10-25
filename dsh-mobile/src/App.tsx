@@ -25,7 +25,25 @@ import {
   loadCredential,
   saveCredential,
 } from './core/secureStore';
-import { revokeOwnDevice } from './core/deviceAuth';
+import {
+  clearLegacyCredentialStorageVerified,
+  migrateLegacyCredentials,
+  shouldBlockAutoLogin,
+  LegacyCredentialKey,
+  type CredentialMigrationReport,
+} from './core/credentialMigration';
+import { clearNativeCookieJarDetailed } from './core/cookieJar';
+import {
+  clearApprovalRevoked,
+  loadRevocationState,
+  markApprovalRevoked,
+  type RevocationPersistResult,
+} from './core/deviceRevocation';
+import {
+  loadLoginIntent,
+  setLoginIntent,
+} from './core/loginIntent';
+import { revokeOwnDeviceDetailed } from './core/deviceAuth';
 import { WORKSPACE_CUSTOM_KEY, type WorkspaceCustom } from './core/workspace-custom';
 import { ThemeProvider, useTheme } from './design/theme';
 import { palettes, type ThemeMode } from './design/tokens';
@@ -40,8 +58,9 @@ import { DevicesScreen } from './screens/DevicesScreen';
 import { WorkspacesScreen } from './screens/WorkspacesScreen';
 import { TaskBoardScreen } from './screens/TaskBoardScreen';
 
-const COOKIE_KEY = '@dsh/cookie';
-const LAST_COOKIE_KEY = '@dsh/lastCookie';
+// 旧版本明文凭据键（@dsh/cookie / @dsh/lastCookie / @dsh/gatewayToken /
+// @dsh/gatewayDeviceId）统一由 core/credentialMigration.ts 管理 ——
+// 迁移、清理、以及「清除授权」时的兜底删除都在那里。
 const BASE_URL_KEY = '@dsh/baseUrl';
 const OWNED_KEY = '@dsh/ownedSessions';
 const THEME_KEY = '@dsh/themeMode';
@@ -59,22 +78,115 @@ const BUTLER_WORKSPACE_KEY = '@dsh/butlerWorkspace';
 const BUTLER_WS_SESSIONS_KEY = '@dsh/butlerSessionsByWs';
 const BUTLER_PRIMED_KEY = '@dsh/butlerPrimed';
 
+/**
+ * 服务端撤销那一半的结果（P0-2）。
+ *
+ * ## 为什么不能用 `revokeFailed: boolean`
+ *
+ * 之前是一个布尔值，只在「凭据齐全、请求发出去了、且返回 failed」时才
+ * 被置位。于是**所有没发出请求的路径都是「成功」**：
+ *
+ *   · Cookie 读不出来（Keystore 异常）      → 静默跳过 → 报「全部成功」
+ *   · deviceId / serverDeviceId 都没有      → 静默跳过 → 报「全部成功」
+ *   · baseUrl 空（用户没连过）              → 静默跳过 → 报「全部成功」
+ *
+ * 用户看到的是「所有授权已成功撤销」，而电脑上那条记录一直有效。
+ * 手机丢了场景下这一点非常致命。
+ *
+ * 现在改成判别联合，每种结局都有明确含义，且**只有前两种**能对用户
+ * 声称「服务端那边已经没问题了」。
+ */
+type ServerRevokeResult =
+  /** 服务端确认撤销成功 */
+  | { kind: 'revoked' }
+  /**
+   * 服务端确认目标设备不存在，**且**设备身份已确认属于这台服务器。
+   *
+   * ⚠️ 注意它和「撤销成功」的区别：对用户是等价的（都没有残留授权），
+   * 但推导路径不同，报告里要分开写清楚。
+   */
+  | { kind: 'already-gone'; how: 'identity' | 'empty-list' }
+  /** 服务端撤销失败（网络 / 鉴权 / 服务端错误）—— 授权**可能还在** */
+  | { kind: 'failed'; reason: string; status?: number }
+  /** 缺凭据 / 身份不明，**根本没发出请求** —— 无法确认，不能算成功 */
+  | { kind: 'unconfirmed'; reason: string };
+
+/** 本地凭据清理的结果（P0-2 / P1-3 / P1-4） */
+interface LocalCleanupResult {
+  /** Keystore 里四份凭据是否清理并回读确认 */
+  secureStorage: 'cleared' | 'failed';
+  /**
+   * 旧版明文副本是否**经回读确认**全部删除。
+   *
+   * ⚠️ 不是「删了几个」，而是「能不能断言磁盘上没有了」。
+   * 回读失败 / 删除抛错 / 仍有残留 → false。
+   */
+  legacyPlaintext: boolean;
+  /** 原生 cookie 容器的清理结论（P1-4：区分清掉了 / 平台没有 / 有残留 / 无法确认） */
+  cookieJar: 'cleared' | 'unavailable' | 'partial' | 'unverified';
+  /**
+   * 「审批授权已撤销」这个决定本身有没有**持久化**（P0-1）。
+   *
+   * 和上面几项分开：那几项是「敏感凭据清掉了没有」，这一项是
+   * 「撤销决定能不能跨重启存活」。二者独立 —— 凭据清干净了，
+   * 撤销标记仍可能没写进去，下次启动就会自动重新申请配对。
+   */
+  revocation: RevocationPersistResult;
+}
+
+/**
+ * 「退出并清除所有授权」的完整结果。
+ *
+ * 两半分开：本地清理成功**不等于**服务端撤销成功，反之亦然。
+ * 界面必须能分别如实告知，绝不能把两者混成一个「成功」。
+ */
+interface ClearAuthorizationResult {
+  server: ServerRevokeResult;
+  local: LocalCleanupResult;
+}
+
+/**
+ * 结果里有没有「不能让用户以为全部搞定」的成分。
+ *
+ * 这是 UI 文案的**唯一**判据 —— 集中在一处，避免各处自己拼条件时
+ * 漏掉某条路径（漏掉的那条就会显示成「全部成功」）。
+ */
+function isFullyClear(result: ClearAuthorizationResult): boolean {
+  const serverOk = result.server.kind === 'revoked' || result.server.kind === 'already-gone';
+  return (
+    serverOk &&
+    result.local.secureStorage === 'cleared' &&
+    result.local.legacyPlaintext &&
+    // cookie 容器「平台没有」不算残留（这个平台上没有第二份存储）
+    (result.local.cookieJar === 'cleared' || result.local.cookieJar === 'unavailable') &&
+    // 撤销决定必须真的落盘 —— 只留在内存里的话重启后会被推翻（P0-1）
+    result.local.revocation.ok
+  );
+}
+
 export interface AppContextValue {
   store: Store;
   baseUrl: string;
   setBaseUrl: (v: string) => void;
   saveCookie: (cookie: string) => Promise<void>;
   /**
-   * 断开连接：只是本次不用了，凭据仍留在 Keystore，下次打开会自动恢复。
+   * 断开连接：只是本次不用了，凭据仍留在 Keystore。
+   *
+   * 返回 false 表示「退出意图没能落盘」—— 下次启动可能仍会自动登录，
+   * 界面必须如实告知（否则用户以为退出了，其实没有）。
    * 想彻底清除授权用 clearAuthorization()。
    */
-  signOut: () => Promise<void>;
+  signOut: () => Promise<boolean>;
   /**
-   * 退出并清除所有授权（不可恢复）：
+   * 退出并清除所有授权（**不可恢复**）。
+   *
    * 删掉 Keystore 里的 Cookie / 网关 token / device id，
-   * 并清掉管家会话等派生状态。
+   * 清掉管家会话等派生状态，并尽量通知服务端撤销。
+   *
+   * 返回值把「服务端撤销」和「本地清理」两半**分别**报告 ——
+   * 界面必须能如实告知用户哪一半成功了（见 ClearAuthorizationResult）。
    */
-  clearAuthorization: () => Promise<void>;
+  clearAuthorization: () => Promise<ClearAuthorizationResult>;
   /** 管家模式：开启后首页直接跟管家对话，工作区列表退到「我的」里 */
   butlerMode: boolean;
   setButlerMode: (on: boolean) => void;
@@ -90,20 +202,108 @@ export interface AppContextValue {
   /** 退出后仍保留的上一次配对，可一键恢复，避免误触后要重新找 token */
   hasLastPairing: boolean;
   resumePairing: () => Promise<boolean>;
+  /**
+   * 本机审批授权是否已被撤销（用户主动撤销 / 服务端踢掉）。
+   *
+   * true 时不会自动建立审批连接 —— 只有用户主动重新授权才恢复。
+   */
+  approvalRevoked: boolean;
+  /** 用户主动重新授权审批通道（清除撤销标记 + 重新配对） */
+  reauthorizeApprovals: () => Promise<boolean>;
+  /** 撤销本机的审批授权（服务端 + 本地），不影响聊天用的 Cookie */
+  revokeOwnApproval: () => Promise<{ serverOk: boolean; localOk: boolean }>;
+  /**
+   * 安全存储不可用 / 迁移失败时的错误说明（null = 正常）。
+   *
+   * 有这个值时界面必须明确告知用户「凭据没能安全保存」，
+   * 而不是静默降级到明文存储。
+   */
+  secureStorageError: string | null;
 }
 
 /**
- * 服务端撤销失败时的提示。
+ * 「清除所有授权」结果的分项提示（P0-2）。
  *
- * 用系统的 Alert 而不是应用内通知：这是「安全操作只做了一半」，
- * 必须让用户看到并且知道要手动处理。
+ * ## 为什么要替换掉原来的两个布尔提示
+ *
+ * 之前是 `revokeFailed: boolean` + `legacyCleared/cookieJarCleared: boolean`：
+ * 布尔值只有两个状态，而实际有四种**对用户含义完全不同**的结局：
+ *
+ *   · 发出去并成功了
+ *   · 服务端说本来就没有（且身份确认过）
+ *   · 请求失败（网络/鉴权）—— 授权可能还在
+ *   · 压根没发出去（缺凭据 / 身份不明）—— 无法确认
+ *
+ * 后两种压进同一个 `true` 里，文案只能说「撤销失败」，用户分不清
+ * 「我该换个网络重试」还是「我根本不在这台服务器的配对上」。
+ *
+ * 这里按结果分项列出，**服务端**和**本地**分开说 —— 本地清干净了
+ * 不代表服务端也干净了，这是本轮的核心要求之一。
+ *
+ * ⚠️ 绝不出现 Cookie / token / 设备 UUID 原文，只说结论。
  */
-function notifyRevokeFailed(): void {
+function notifyClearResult(result: ClearAuthorizationResult): void {
+  const problems: string[] = [];
+
+  // ── 服务端那半边 ────────────────────────────────────────────
+  switch (result.server.kind) {
+    case 'revoked':
+    case 'already-gone':
+      // 服务端确认没有残留授权 —— 不用提示
+      break;
+    case 'failed':
+      problems.push(
+        '没能通知电脑撤销这台设备的授权（网络或权限问题）。\n' +
+          '  **电脑上的授权可能仍然有效**，请联网后重试，或在电脑上打开\n' +
+          '  DSH 的「设备管理」手动移除这台设备。',
+      );
+      break;
+    case 'unconfirmed':
+      problems.push(
+        `无法确认服务端授权是否已撤销（${result.server.reason}）。\n` +
+          '  **不要假定它已经撤销**：请在电脑上打开 DSH 的「设备管理」\n' +
+          '  核对这台设备是否还在列表里。',
+      );
+      break;
+  }
+
+  // ── 本地那半边 ──────────────────────────────────────────────
+  if (result.local.secureStorage === 'failed') {
+    problems.push(
+      '本机的安全凭据没能确认全部清除（或「已退出」状态没能保存）。\n' +
+        '  下次启动可能仍会自动登录，建议重启后再执行一次清除。',
+    );
+  }
+  if (!result.local.legacyPlaintext) {
+    problems.push(
+      '旧版本遗留的明文凭据可能还有残留。\n' +
+        '  建议重启一次 App 让它重试；如果仍然提示，可以卸载重装。',
+    );
+  }
+  if (result.local.cookieJar === 'partial' || result.local.cookieJar === 'unverified') {
+    problems.push(
+      '系统的 cookie 缓存没能确认清空。\n' +
+        '  这可能导致下次启动仍以原身份通过鉴权，建议重启后重试清除。',
+    );
+  }
+  if (!result.local.revocation.ok) {
+    // P0-1：撤销标记只留在内存里。本次运行是安全的（不会自动配对），
+    // 但重启后就没有任何东西拦着自动重新授权了 —— 而这正是用户
+    // 按下「撤销」时最不希望发生的事。
+    problems.push(
+      '「审批授权已撤销」这个状态没能写入本机存储（存储异常）。\n' +
+        '  **本次运行期间不会自动重新授权**，但重启 App 后可能失效。\n' +
+        '  建议重启后到「我的」页确认审批授权仍显示为「已撤销」，\n' +
+        '  必要时在电脑上手动移除这台设备。',
+    );
+  }
+
+  // 不该发生：调用方只在 !isFullyClear 时进来
+  if (problems.length === 0) return;
+
   Alert.alert(
-    '本机凭据已清除',
-    '但没能通知电脑撤销这台设备的授权（网络不通）。\n\n' +
-      '如果手机丢了或怀疑凭据泄露，请在电脑上打开 DSH 的「设备管理」，' +
-      '手动移除这台设备。',
+    '已清除本机授权，但有部分内容未能确认',
+    `凭据主体已清除，下面这些没能确认完成：\n\n  · ${problems.join('\n  · ')}`,
     [{ text: '知道了' }],
   );
 }
@@ -119,6 +319,60 @@ export function useApp(): AppContextValue {
 /** 从持久化值解析主题，非法值回落到纯白 */
 function readThemeMode(raw: string | null): ThemeMode {
   return raw && raw in palettes ? (raw as ThemeMode) : 'light';
+}
+
+/**
+ * 在迁移**动手之前**先看一眼：旧版里用户是不是主动断开过？（P1-2）
+ *
+ * ## 为什么必须提前看
+ *
+ * 旧版本 `signOut()` 会把当前 Cookie **复制**到 `@dsh/lastCookie` 再删
+ * `@dsh/cookie`。所以：
+ *
+ *   · `@dsh/cookie` 有值        → 旧版里是「正常已登录」
+ *   · 只有 `@dsh/lastCookie`    → 旧版里用户**点过「断开连接」**
+ *
+ * 而 `migrateLegacyCredentials()` 会把这个键删掉（它本来就是一份应该
+ * 消失的明文副本）。于是「用户主动退出过」这个证据只存在于
+ * **迁移之前**的那一瞬间。
+ *
+ * 原来的代码是迁移完才 `void setLoginIntent('signed-out')` —— 既不 await，
+ * 也不看结果。那段窗口里 App 被系统杀掉，证据已经没了、意图也没写成，
+ * 下次启动就会自动登录回去。
+ *
+ * 所以这里在迁移前先读一次，把「要不要写 signed-out」这个判断提前。
+ *
+ * ## 读失败怎么办
+ *
+ * 返回 `unknown: true` 且**不**声称任何结论。调用方按「证据不明」处理
+ * （不自动登录），并在迁移报告上体现风险 —— 宁可让用户点一下
+ * 「直接继续」，也不能替他做一个「其实你已经退出了」的猜测。
+ *
+ * ⚠️ 这个函数只读 `@dsh/lastCookie` 是否存在，**不读取也不返回它的值**
+ * —— 那个值是完整可用的认证凭据，绝不能流到日志或界面里。
+ */
+async function peekLegacySignedOutEvidence(): Promise<{
+  /** 只有 lastCookie、没有当前 cookie —— 旧版里用户主动断开过 */
+  fromLastCookieOnly: boolean;
+  /** 读存储失败，证据不明 */
+  unknown: boolean;
+}> {
+  try {
+    const entries = await AsyncStorage.multiGet([
+      LegacyCredentialKey.cookie,
+      LegacyCredentialKey.lastCookie,
+    ]);
+    const map = new Map(entries);
+    const hasCookie = !!map.get(LegacyCredentialKey.cookie);
+    const hasLastCookie = !!map.get(LegacyCredentialKey.lastCookie);
+    return {
+      // 当前登录态还在 → 不是「主动断开」；只有备份 → 是
+      fromLastCookieOnly: hasLastCookie && !hasCookie,
+      unknown: false,
+    };
+  } catch {
+    return { fromLastCookieOnly: false, unknown: true };
+  }
 }
 
 function parseCustomMap(raw: string | null): Record<string, WorkspaceCustom> | null {
@@ -150,11 +404,56 @@ export default function App() {
   const [butlerNeedWorkspace, setButlerNeedWorkspace] = useState(false);
   const [butlerBusy, setButlerBusy] = useState(false);
   const [hasLastPairing, setHasLastPairing] = useState(false);
+  /** 本机审批授权已撤销（禁止自动配对） */
+  const [approvalRevoked, setApprovalRevoked] = useState(false);
+  /** 安全存储 / 迁移失败说明（null = 正常） */
+  const [secureStorageError, setSecureStorageError] = useState<string | null>(null);
 
   const store = useMemo(() => {
     const conn = new DshConnection({ baseUrl, cookie });
     return new Store(conn);
   }, [baseUrl, cookie]);
+
+  /**
+   * 把迁移结果翻译成界面状态。
+   *
+   * 只有两种需要告知用户：
+   *   · failed        —— 安全存储不可用，凭据没能安全保存
+   *   · fromLastCookie —— 旧版本里用户点过「断开连接」，
+   *                       这次只恢复「上次配对」，不自动登录
+   *
+   * 其余情况静默（迁移成功对用户应该是无感的）。
+   *
+   * 注意：**不打印任何凭据值**，报告里只有键名。
+   */
+  const applyMigrationReport = useCallback((report: CredentialMigrationReport) => {
+    if (report.status === 'failed') {
+      setSecureStorageError(
+        report.error ?? '凭据没能保存到安全存储，请检查系统锁屏设置后重试',
+      );
+      return;
+    }
+    setSecureStorageError(null);
+  }, []);
+
+  // ── 「审批授权已撤销」的唯一事实来源 ──────────────────────────
+  //
+  // 之前这里只有一份 React state（approvalRevoked），由 App 自己维护。
+  // 问题是服务端 4003 那条路径在网关内部直接置撤销状态，**不会**回来
+  // 更新 React state —— 于是：
+  //   · store.gatewayStatus 显示「已撤销授权」
+  //   · 但「我的」页的「重新授权审批」入口不出现（它看的是 React state）
+  // 两个事实来源描述同一个安全决定，还会往不同方向漂。
+  //
+  // 现在统一成：store 是唯一来源（它自己会 emit 通知订阅者），
+  // App 只在启动时把存储里的标记灌进 store。React state 保留一份镜像，
+  // 但每次 store 变化都重新对齐，不再各说各话。
+  useEffect(() => {
+    const unsub = store.subscribe(() => {
+      setApprovalRevoked(store.gatewayStatus === 'revoked');
+    });
+    return unsub;
+  }, [store]);
 
   useEffect(() => {
     (async () => {
@@ -169,20 +468,132 @@ export default function App() {
         const savedButlerWs = await AsyncStorage.getItem(BUTLER_WORKSPACE_KEY);
         if (savedButlerWs) setButlerWorkspace(savedButlerWs);
 
+        // ── 旧版本明文凭据迁移 ────────────────────────────────────
+        //
+        // v0.16.0 把凭据搬进 Keystore，但没管老版本留在 AsyncStorage
+        // 里的那份。结果：升级上来的用户读不到凭据（被踢回配对页），
+        // 而明文副本永远躺在那里。
+        //
+        // 迁移规则见 core/credentialMigration.ts：先写安全存储并回读
+        // 校验，成功后才删明文；失败不静默降级。
+        //
+        // ⚠️ P1-2：迁移会**删掉 `@dsh/lastCookie`**，而那个键同时又是
+        // 「旧版本里用户主动断开过」的**唯一证据**。所以必须在迁移动手
+        // 之前，先把这个证据转成持久化的登录意图 —— 否则存在一个窗口：
+        //
+        //   lastCookie 已删 → signed-out 还没写进去 → App 被杀
+        //   → 下次启动：意图键不存在 → loadLoginIntent() 返回 'active'
+        //     （升级兼容语义）→ **自动登录**
+        //
+        // 用户「我主动断开过」的决定就这样丢了。
+        //
+        // 顺序改成：**先读证据 → 先落意图 → 再迁移**。写意图失败时
+        // 不能硬着头皮迁移（那会销毁证据），按下面的降级策略处理。
+        const legacyPeek = await peekLegacySignedOutEvidence();
+        let exitIntentPersisted: boolean | null = null;
+        if (legacyPeek.fromLastCookieOnly) {
+          // 旧版里只剩 lastCookie = 用户点过「断开连接」。
+          // 先把这个结论持久化，并且**等它落盘**（不再 void 掉）。
+          exitIntentPersisted = await setLoginIntent('signed-out').catch(() => false);
+        } else if (legacyPeek.unknown) {
+          // 读不到证据：不知道用户断开过没有。
+          // 当作「退出意图未能确认」处理 —— 下面会移除可自动登录的凭据，
+          // 让用户自己点「直接继续」，而不是替他猜。
+          exitIntentPersisted = false;
+        }
+
+        const migration = await migrateLegacyCredentials();
+        applyMigrationReport(migration);
+
+        // 迁移这条路径也要覆盖：万一 peek 没识别出来（比如 cookie 和
+        // lastCookie 同时存在但内容是「上次配对」），而迁移报告说
+        // fromLastCookie，同样要以 signed-out 为准。
+        if (migration.fromLastCookie && exitIntentPersisted === null) {
+          exitIntentPersisted = await setLoginIntent('signed-out').catch(() => false);
+        }
+
         const lastCookie = await loadCredential(CredentialKey.cookie);
+
+        // 撤销标记：决定要不要自动建立审批连接。
+        // 它和 Cookie 无关 —— 用户撤销的是审批权限，不是登录态。
+        //
+        // ⚠️ 这里读的是**三态**结论（revoked / unknown / not-revoked）。
+        // 不能只取布尔值：读失败时必须让 store 进入 'unknown'，
+        // 而不是停留在「未连接」（那样界面和行为会不一致）。
+        const revocation = await loadRevocationState();
+        setApprovalRevoked(revocation.status === 'revoked');
+        // 把持久化的撤销状态灌进 store —— 它才是 UI 的唯一事实来源。
+        store.syncRevokedState(revocation.status);
 
         const savedBase = await AsyncStorage.getItem(BASE_URL_KEY);
         // Cookie 已迁到 Keystore（见 core/secureStore.ts）。
-        // 「上次配对」不再是独立的副本 —— 见下面 signOut 的注释。
         const savedCookie = lastCookie;
         setHasLastPairing(!!lastCookie);
         if (savedBase) setBaseUrlState(savedBase);
-        if (savedBase && savedCookie) {
-          // 乐观登录：有 cookie 就直接进，不再用一次网络探测决定登录态。
-          // 之前探测失败（网络抖动 / 服务正重启）会把人打回配对页，
-          // 看起来就像「莫名其妙被退出登录」。
+
+        // ── 要不要自动登录 ────────────────────────────────────────
+        //
+        // 判据是**持久化的登录意图**，不是迁移函数的一次性返回值。
+        //
+        // 之前这里用的是 `!migration.fromLastCookie`，只在第一次启动
+        // 是对的：迁移会删掉 @dsh/lastCookie，于是第二次启动
+        // fromLastCookie 就变成 false，用户「我主动断开过」的决定
+        // 被程序悄悄推翻（见 core/loginIntent.ts 的详细推演）。
+        //
+        // 现在的规则：
+        //   active     → 允许自动登录（有 baseUrl + cookie 才真的进）
+        //   signed-out → **不**自动登录，配对页显示「直接继续」
+        //   unknown    → 不自动登录（读不到意图时 fail-closed）
+        //
+        // 另外，迁移刚把 lastCookie 迁进来的那一次（fromLastCookie）
+        // 仍然要拦一下：那是「旧版里用户点过断开」的证据。
+        const intent = await loadLoginIntent();
+        const intentAllowsAutoLogin = intent === 'active';
+
+        // 退出意图**没能落盘**，而本机又有可用 Cookie ——
+        // 这是一个真实的跨重启风险：下次启动读不到 signed-out，
+        // 会按升级兼容语义自动登录回去。
+        //
+        // 安全降级：把可用于自动登录的 Cookie 凭据**移除**。
+        // 这样即使意图丢了，也没有东西能自动登录 —— 用户重新扫码即可，
+        // 而「以为退出了、其实没退」不会发生。
+        // （和 P0-1 里「持久化失败就移除可自动恢复的凭据」是同一策略。）
+        let exitIntentLost = false;
+        if (exitIntentPersisted === false && savedCookie) {
+          await clearCredential(CredentialKey.cookie).catch(() => undefined);
+          setHasLastPairing(false);
+          exitIntentLost = true;
+        }
+
+        const autoResume =
+          intentAllowsAutoLogin && !migration.fromLastCookie && !exitIntentLost;
+        if (savedBase && savedCookie && autoResume) {
           setCookie(savedCookie);
           setAuthed(true);
+        } else if (savedCookie && savedBase && !autoResume) {
+          // 用户主动断开过（或意图读不出来）：停在配对页，
+          // 「直接继续」入口由 hasLastPairing 控制。
+          // 这里**不清凭据** —— 用户点一下就能恢复。
+        }
+
+        if (exitIntentLost) {
+          setSecureStorageError(
+            '没能保存「已退出」状态，为避免下次启动自动登录，本机登录凭据已被移除。请重新扫码配对。',
+          );
+        }
+
+        // ── 明文存储的状态未知 / 迁移失败 → 不自动登录（P1-3）────
+        //
+        // 「读不到明文存储」不等于「确认没有明文凭据」。那几份明文可能
+        // 还躺在磁盘上，只是这次看不见。这种情况下自动登录会把用户
+        // 带进一个「凭据可能已泄露」的会话，所以按 fail-closed 拦下。
+        if (shouldBlockAutoLogin(migration)) {
+          setAuthed(false);
+          setCookie(undefined);
+          setSecureStorageError(
+            migration.error ??
+              '无法确认本机是否还留有旧版本的明文凭据，为避免使用可能已泄露的凭据，本次不会自动登录。',
+          );
         }
       } catch {
         // 读取失败就当作未登录
@@ -190,6 +601,8 @@ export default function App() {
         setReady(true);
       }
     })();
+    // applyMigrationReport 是稳定的（只在 App 内部用 useState setter）
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
   // 「手机创建的会话」标记持久化 + 恢复
@@ -246,6 +659,18 @@ export default function App() {
   const saveCookie = useCallback(async (c: string) => {
     // 凭据进 Keystore，不再写 AsyncStorage
     await saveCredential(CredentialKey.cookie, c);
+    // 用户主动完成了一次配对 —— 这同时是「明确授权」的动作，
+    // 之前被撤销的审批权限应该在这里解禁（见 core/deviceRevocation.ts）。
+    await clearApprovalRevoked();
+    // 登录意图置回 active：用户刚扫码配对，明确表达了「我要登录」。
+    //
+    // ⚠️ 顺序：**先存凭据，再写意图**。
+    // 崩在中间的话意图还是 signed-out → 下次启动不自动登录，
+    // 用户点一下「直接继续」即可。反过来（先写 active 再存凭据）
+    // 会留下「意图说已登录但没有凭据」的状态。
+    await setLoginIntent('active');
+    setApprovalRevoked(false);
+    setSecureStorageError(null);
     setCookie(c);
     setAuthed(true);
     setHasLastPairing(true);
@@ -254,32 +679,51 @@ export default function App() {
   /**
    * 断开连接（**不清除凭据**）。
    *
-   * 语义：只是这次不用了。Cookie 仍在 Keystore 里，下次打开 App
-   * 会自动恢复登录 —— 和常见的「切账号」不同，这里更像是「收起」。
+   * 语义：用户明确表示「这次不自动登录了」，但凭据留在 Keystore 里，
+   * 下次打开 App 停在配对页并显示「直接继续」，由用户自己决定要不要恢复。
+   *
+   * ⚠️ 这里**必须**把登录意图持久化成 `signed-out`。
+   *
+   * 之前这个函数只改内存 state（setAuthed(false)），什么都没落盘 ——
+   * 于是下次启动时「有 cookie 就自动登录」又把用户带回了主界面。
+   * 用户点「断开连接」这个动作等于没生效。
+   *
+   * 它**不**清掉任何旧版明文副本 —— 那是「清除授权」的职责。
+   * 断开连接后明文副本如果还在，说明迁移失败了，由启动时的迁移
+   * 重试处理（失败会显示 secureStorageError）。
    *
    * 真正的清除用 clearAuthorization()。
+   *
+   * @returns true 表示意图已确认落盘（用户下次启动确实会停在配对页）；
+   *          false 表示没写成功 —— 下次启动可能仍会自动登录，界面要如实告知。
    */
-  const signOut = useCallback(async () => {
+  const signOut = useCallback(async (): Promise<boolean> => {
+    // ⚠️ 顺序：先落盘意图，再改内存状态。
+    // 崩在中间的话意图已经是 signed-out（方向安全）；
+    // 反过来先改内存再落盘，崩了就会「界面已退出但下次启动自动登录」。
+    const persisted = await setLoginIntent('signed-out');
     setCookie(undefined);
     setAuthed(false);
     // Cookie 留在 Keystore 里，所以「上次配对」依然可用
     const still = await loadCredential(CredentialKey.cookie);
     setHasLastPairing(!!still);
+    return persisted;
   }, []);
 
   /**
    * 退出并清除所有授权（**不可恢复**）。
    *
-   * 清三样东西：
-   *   1. Keystore 里的 Cookie + 网关 device token + device id
-   *   2. AsyncStorage 里的派生状态（管家会话、上次工作区、自有会话标记）
-   *   3. 内存里的连接对象
+   * 清四样东西：
+   *   1. 服务端的设备记录（先撤销，再清本地 —— 顺序见下）
+   *   2. Keystore 里的 Cookie + 网关 device token + device id
+   *   3. AsyncStorage 里的**所有**历史明文凭据副本
+   *   4. AsyncStorage 里的派生状态（管家会话、上次工作区、自有会话标记）
    *
    * 为什么必须连带清本地会话状态：
    * 如果只删凭据，下次配对成另一台电脑后，管家会话 id、工作区路径
    * 这些会指向不存在的资源，表现为「打开就报错」或「串到别人的会话」。
    */
-  const clearAuthorization = useCallback(async () => {
+  const clearAuthorization = useCallback(async (): Promise<ClearAuthorizationResult> => {
     // ⚠️ 顺序很重要：**先撤销服务端，再清本地**。
     //
     // 反过来的话，本地 deviceId / cookie 已经被删，就没法再证明
@@ -288,21 +732,147 @@ export default function App() {
     //
     // 撤销失败不阻塞本地清理：网络不通时用户仍然应该能清掉本机凭据，
     // 只是服务端那条记录还在（会在界面上提示）。
-    let revokeFailed = false;
+    //
+    // ⚠️ 竞态防护：**先把凭据读进局部变量**，再停网关。
+    //
+    // 4003（服务端撤销）会异步调用 markApprovalRevoked()，它清
+    // gateway token；如果它抢在下面这几行之前落地，这里就会读到
+    // deviceId=undefined → 服务端撤销被静默跳过。先读出来就避开这个窗口。
+    //
+    // ⚠️ 而且读失败**不能**当成「没凭据」静默跳过（P0-2）。
+    //
+    // 之前 `catch {}` 把 Keystore 读取异常吞掉，随后 `if (cookie && ...)`
+    // 为假 → 撤销被跳过 → `revokeFailed` 保持 false → 用户看到「全部成功」。
+    // 现在读失败单独记账，结论是 unconfirmed（**不是**成功）。
+    let cookie: string | undefined;
+    let deviceId: string | undefined;
+    let serverDeviceId: string | undefined;
+    let credentialReadFailed = false;
     try {
-      const [cookie, deviceId] = await Promise.all([
+      [cookie, deviceId, serverDeviceId] = await Promise.all([
         loadCredential(CredentialKey.cookie),
         loadCredential(CredentialKey.gatewayDeviceId),
+        loadCredential(CredentialKey.gatewayServerDeviceId),
       ]);
-      if (cookie && deviceId && baseUrl) {
-        const outcome = await revokeOwnDevice(baseUrl, cookie, deviceId);
-        revokeFailed = outcome === 'failed';
-      }
     } catch {
-      revokeFailed = true;
+      // 读不到 → 无法证明身份 → 撤销一定发不出去，如实记账
+      credentialReadFailed = true;
     }
 
-    await clearAllCredentials();
+    // ── 服务端撤销 ────────────────────────────────────────────
+    //
+    // 用 revokeOwnDeviceDetailed 而不是旧的三值版本：后者把
+    // 「确认撤销」「确认不存在」「身份无法确认」压在一个字符串里，
+    // 上层没法区分该不该对用户声称成功。
+    let server: ServerRevokeResult;
+    if (credentialReadFailed) {
+      server = { kind: 'unconfirmed', reason: '本地凭据读取失败' };
+    } else if (!baseUrl) {
+      server = { kind: 'unconfirmed', reason: '还没连接过电脑（没有服务地址）' };
+    } else if (!cookie) {
+      server = { kind: 'unconfirmed', reason: '登录凭据已不在本机' };
+    } else if (!deviceId && !serverDeviceId) {
+      server = { kind: 'unconfirmed', reason: '本机没有设备标识' };
+    } else {
+      try {
+        const detail = await revokeOwnDeviceDetailed(
+          baseUrl,
+          cookie,
+          deviceId ?? '',
+          serverDeviceId,
+        );
+        switch (detail.kind) {
+          case 'revoked':
+            server = { kind: 'revoked' };
+            break;
+          case 'already-gone':
+            server = { kind: 'already-gone', how: detail.how };
+            break;
+          case 'failed':
+            server = { kind: 'failed', reason: detail.reason, status: detail.status };
+            break;
+          case 'unconfirmed':
+            server = { kind: 'unconfirmed', reason: detail.reason };
+            break;
+        }
+      } catch {
+        // 内部已兜了网络异常，走到这里是意料之外的错误 ——
+        // 同样只能报「无法确认」，绝不能报成功。
+        server = { kind: 'failed', reason: 'unexpected' };
+      }
+    }
+
+    // 先停掉网关：否则清凭据的瞬间它可能正好在重连，
+    // 拿还没删干净的 token 建起一条新连接。
+    //
+    // ⚠️ P0-1：这里必须拿到 markApprovalRevoked() 的**持久化结果**。
+    //
+    // 它现在返回 RevocationPersistResult 而不是 void —— 「撤销标记有没有
+    // 真的落盘」和「服务端有没有撤销成功」是两件独立的事，都不能假设。
+    // 落盘失败时本次运行仍会拒绝自动配对（内存态是 revoked），
+    // 但重启后就没人拦着了，所以必须让用户知道。
+    let revocation: RevocationPersistResult = {
+      ok: false,
+      persisted: 'none',
+      memoryOnly: true,
+      error: '未能写入撤销状态',
+    };
+    try {
+      revocation = await store.revokeOwnApprovalAuthorization('cleared');
+    } catch {
+      // 停网关 / 置标记整体失败：再单独尝试一次只置标记的部分，
+      // 因为「清掉凭据」不影响「记住撤销决定」这个独立动作。
+      try {
+        revocation = await markApprovalRevoked('cleared');
+      } catch {
+        // 彻底失败：保持默认的 ok:false
+      }
+    }
+
+    // ── 本地：Keystore 凭据 ───────────────────────────────────
+    let secureStorage: 'cleared' | 'failed' = 'cleared';
+    try {
+      await clearAllCredentials();
+      // 回读校验：clearCredential 内部把异常吞掉了（「本来就没有也算成功」），
+      // 所以必须实际读一次才能断言真的没了。
+      const [cookieLeft, tokenLeft, devLeft, srvLeft] = await Promise.all([
+        loadCredential(CredentialKey.cookie),
+        loadCredential(CredentialKey.gatewayToken),
+        loadCredential(CredentialKey.gatewayDeviceId),
+        loadCredential(CredentialKey.gatewayServerDeviceId),
+      ]);
+      if (cookieLeft || tokenLeft || devLeft || srvLeft) secureStorage = 'failed';
+    } catch {
+      secureStorage = 'failed';
+    }
+
+    // ── 本地：历史明文副本 ────────────────────────────────────
+    //
+    // 用 *Verified 版本：它保证「经回读确认磁盘上没有残留」，
+    // 而不是「我调了几次 removeItem」。区别只在存储层异常时才看得出来，
+    // 而那正是必须如实告知用户的时候。
+    let legacyPlaintext = false;
+    try {
+      const legacy = await clearLegacyCredentialStorageVerified();
+      legacyPlaintext = legacy.verified;
+    } catch {
+      legacyPlaintext = false;
+    }
+
+    // ── 本地：原生 cookie 容器 ────────────────────────────────
+    //
+    // 这是第三个存储。登录时 `credentials: 'include'` 让 RN 原生层把
+    // dsh-auth-* 存进了 CookieManager，和 Keystore 里那份是**两份独立的
+    // 凭据**。只清 Keystore 的话下次启动 readCookieFromJar() 会把它读回来，
+    // 任何 credentials:'include' 的请求（含 POST /mgw/pair）仍以老用户
+    // 身份通过鉴权 —— 「清除授权」等于没清干净。
+    let cookieJar: LocalCleanupResult['cookieJar'] = 'unverified';
+    try {
+      const jar = await clearNativeCookieJarDetailed(baseUrl || undefined);
+      cookieJar = jar.kind;
+    } catch {
+      cookieJar = 'unverified';
+    }
 
     // 派生状态一并清掉（这些不是秘密，但会污染下次配对）
     await Promise.all(
@@ -312,21 +882,149 @@ export default function App() {
         BUTLER_WS_SESSIONS_KEY,
         BUTLER_PRIMED_KEY,
         OWNED_KEY,
-        LAST_COOKIE_KEY, // 老版本遗留的明文 key，顺手清掉
       ].map((k) => AsyncStorage.removeItem(k).catch(() => undefined)),
     );
+
+    // ── 登录意图也要处理 ──────────────────────────────────────
+    //
+    // 彻底清除后，下次启动必须停在配对页。
+    //
+    // ⚠️ 这里**不能**用 clearLoginIntent()（删掉意图键）。
+    // 删掉之后 loadLoginIntent() 会返回 `active`（升级兼容语义），
+    // 万一凭据没删干净（Keystore 异常 / 明文残留），就会自动登录回
+    // 一个本该被清除的账号 —— 正是「清除授权」最不该发生的事。
+    //
+    // 所以明确写 signed-out：它比「删掉」严格。
+    const intentPersisted = await setLoginIntent('signed-out').catch(() => false);
+    if (!intentPersisted) {
+      // 意图没落盘 → 下次启动可能自动登录。
+      // 这和「凭据没清干净」是同级的风险，计入本地失败。
+      secureStorage = 'failed';
+    }
 
     setCookie(undefined);
     setAuthed(false);
     setHasLastPairing(false);
     setButlerSessionId(null);
+    // 清除授权 = 明确回到了「未授权」状态，界面要能看到
+    setApprovalRevoked(true);
 
-    // 服务端撤销失败要告诉用户 —— 否则他以为「彻底清了」，
-    // 实际上电脑上还留着一条可用授权。
-    if (revokeFailed) {
-      notifyRevokeFailed();
+    const result: ClearAuthorizationResult = {
+      server,
+      local: { secureStorage, legacyPlaintext, cookieJar, revocation },
+    };
+
+    // ── 如实告知用户 ──────────────────────────────────────────
+    //
+    // 只有**确认全部干净**才静默。任何一半没做成都要说清楚，
+    // 否则用户以为「彻底清了」，实际电脑上 / 本机还留着可用的授权。
+    if (!isFullyClear(result)) {
+      notifyClearResult(result);
     }
-  }, [baseUrl]);
+
+    return result;
+  }, [baseUrl, store]);
+
+  /**
+   * 撤销本机的审批授权（服务端 + 本地），**保留 Cookie**。
+   *
+   * 和 clearAuthorization 的区别：
+   *   · 这个只撤销「能在手机上批准命令执行」的权限
+   *   · 聊天、看会话、文件浏览继续可用（Cookie 不动）
+   *
+   * 返回两个独立的结果，让界面能如实告知用户哪一半成功了 ——
+   * 服务端撤销失败时**绝不能**提示「撤销成功」。
+   *
+   * ⚠️ P0-2 同一类问题：这里原来用 `revokeOwnDevice()` 的三值结果，
+   * 并且**只有**凭据齐全时才发请求；缺凭据时 serverOk 保持 false ——
+   * 这一点是对的，但 `outcome === 'already-gone'` 被当成成功同样是
+   * 危险的，因为服务端返回 404 可能只是「这个 UUID 不属于这台服务器」。
+   * 现在改用 detailed 版本，只有确认类结果才算服务端成功。
+   */
+  const revokeOwnApproval = useCallback(async () => {
+    let serverOk = false;
+    let localOk = false;
+    let serverReason = '';
+    try {
+      const [cookie, deviceId, serverDeviceId] = await Promise.all([
+        loadCredential(CredentialKey.cookie),
+        loadCredential(CredentialKey.gatewayDeviceId),
+        loadCredential(CredentialKey.gatewayServerDeviceId),
+      ]);
+      if (!baseUrl) {
+        serverReason = '还没连接过电脑（没有服务地址）';
+      } else if (!cookie) {
+        serverReason = '登录凭据已不在本机';
+      } else if (!deviceId && !serverDeviceId) {
+        serverReason = '本机没有设备标识';
+      } else {
+        const detail = await revokeOwnDeviceDetailed(
+          baseUrl,
+          cookie,
+          deviceId ?? '',
+          serverDeviceId,
+        );
+        // 只有「确认撤销」和「确认本来就没有（身份已验证）」才算成功
+        serverOk = detail.kind === 'revoked' || detail.kind === 'already-gone';
+        if (!serverOk) {
+          serverReason =
+            detail.kind === 'failed'
+              ? `服务端没撤销成功（${detail.reason}）`
+              : detail.kind === 'unconfirmed'
+                ? `没能发出撤销请求（${detail.reason}）`
+                : '服务端结果无法确认';
+        }
+      }
+    } catch {
+      serverOk = false;
+      serverReason = '撤销请求出现意外错误';
+    }
+
+    // 不管服务端成功与否，本地都必须停连 + 置撤销标记 ——
+    // 否则「服务端撤销失败」会变成「本地继续自动配对」，等于没撤销。
+    try {
+      await store.revokeOwnApprovalAuthorization('self-revoked');
+      localOk = true;
+    } catch {
+      localOk = false;
+    }
+    setApprovalRevoked(true);
+    // 服务端那半没成功 → 必须让用户知道电脑上那条记录可能还在。
+    // 只有「本机真的撤销了一部分但服务端不确定」才提示，避免刷屏：
+    // 本地成功是常态，提示的重点是服务端残留风险。
+    if (!serverOk && localOk) {
+      Alert.alert(
+        '本机审批已停止，但电脑上的授权没能确认撤销',
+        `${serverReason}。\n\n` +
+          '本机不会再自动连接审批。但**电脑上这台设备的记录可能仍然有效**。\n' +
+          '请联网后重试，或在电脑上打开 DSH 的「设备管理」手动移除这台设备。',
+        [{ text: '知道了' }],
+      );
+    }
+    return { serverOk, localOk };
+  }, [baseUrl, store]);
+
+  /**
+   * 用户主动重新授权审批通道。
+   *
+   * 只有这个（以及重新配对）会清除「已撤销」标记 ——
+   * 网络恢复、自动重连都不得调用。
+   *
+   * 返回 false 表示「撤销标记没清掉」（存储写失败），此时**不能**
+   * 假装重新授权成功了 —— 网关那边仍然会拦住自动配对。
+   */
+  const reauthorizeApprovals = useCallback(async (): Promise<boolean> => {
+    if (!baseUrl) return false;
+    const cleared = await clearApprovalRevoked();
+    if (!cleared) {
+      // 存储删不掉：保持「已撤销」。界面上不能显示成已恢复。
+      setApprovalRevoked(true);
+      return false;
+    }
+    setApprovalRevoked(false);
+    store.reauthorizeApprovals(baseUrl);
+    return true;
+  }, [baseUrl, store]);
 
   /** 用上次的 cookie 直接恢复登录（验证通过才恢复） */
   const resumePairing = useCallback(async (): Promise<boolean> => {
@@ -338,6 +1036,10 @@ export default function App() {
       const ok = await probe.ping();
       probe.close();
       if (!ok) return false;
+      // 用户点了「直接继续」= 明确表达「要恢复登录」。
+      // 意图置回 active，之后每次启动都会正常自动登录
+      // （而不是每次都弹一次「直接继续」）。
+      await setLoginIntent('active');
       setCookie(last);
       setAuthed(true);
       return true;
@@ -492,6 +1194,10 @@ export default function App() {
       butlerWorkspace,
       hasLastPairing,
       resumePairing,
+      approvalRevoked,
+      reauthorizeApprovals,
+      revokeOwnApproval,
+      secureStorageError,
     }),
     [
       store,
@@ -509,6 +1215,10 @@ export default function App() {
       butlerWorkspace,
       hasLastPairing,
       resumePairing,
+      approvalRevoked,
+      reauthorizeApprovals,
+      revokeOwnApproval,
+      secureStorageError,
     ],
   );
 
@@ -542,7 +1252,7 @@ export default function App() {
  * 由 NavHost 里的页面消费——见 store.pendingOpenSession。
  */
 function GlobalNotices() {
-  const { store, baseUrl } = useApp();
+  const { store, baseUrl, approvalRevoked } = useApp();
   const [, force] = React.useState(0);
 
   React.useEffect(() => {
@@ -562,11 +1272,22 @@ function GlobalNotices() {
   //   2. 每进一次会话都要重新申请配对码，路径长了容易失败
   //   3. 「我的」里那个状态永远显示「未连接」，没法用来排查
   // 网关本来就是个轻量旁路连接，常驻更合理。
+  //
+  // ⚠️ 依赖里**不含** approvalRevoked：撤销后不能因为依赖变化
+  // 又跑一遍 connect —— 那正是「撤销后自动重新配对」的入口。
+  // 撤销时 store 自己会断开并保持 'revoked'，connectApprovals 也会
+  // 自己查撤销标记（见 core/deviceRevocation.ts）。
   React.useEffect(() => {
     if (!baseUrl) return;
     store.connectApprovals(baseUrl);
     return () => store.disconnectApprovals();
   }, [store, baseUrl]);
+
+  // 撤销后（approvalRevoked 变 true）主动断一次，避免界面上还挂着
+  // 可点的审批按钮。这里只断不连。
+  React.useEffect(() => {
+    if (approvalRevoked) store.disconnectApprovals();
+  }, [approvalRevoked, store]);
 
   // 通知初始化 + 点通知跳转。
   // initNotifications 会申请权限、建通道；原生模块缺失时静默降级。

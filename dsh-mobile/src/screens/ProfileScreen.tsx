@@ -9,6 +9,7 @@
 import React, { useCallback, useEffect, useMemo, useState } from 'react';
 import {
   ActivityIndicator,
+  Alert,
   Linking,
   Pressable,
   RefreshControl,
@@ -30,6 +31,7 @@ import { ConfirmSheet } from '../components/ConfirmSheet';
 import { SlideSegmented } from '../components/SlideSegmented';
 import { APP_VERSION, APP_VERSION_LABEL } from '../core/version';
 import { isNotifyEnabled, notifyDebugState, setNotifyEnabled, vibrateShort } from '../core/notify';
+import type { GatewayStatus } from '../core/approvalGateway';
 import {
   checkForUpdate,
   downloadAndInstall,
@@ -54,18 +56,30 @@ const NET_LABELS: Record<NetState, string> = {
 };
 
 /** 审批网关状态的中文说明 */
-const GATEWAY_LABELS: Record<'idle' | 'connecting' | 'online' | 'offline', string> = {
+const GATEWAY_LABELS: Record<GatewayStatus, string> = {
   idle: '未连接',
   connecting: '连接中…',
   online: '已连通',
   offline: '未连通',
+  revoked: '已撤销授权',
+  unknown: '授权状态未知',
 };
 
 type NetState = 'checking' | 'ok' | 'fail';
 
 export function ProfileScreen({ active = true }: { active?: boolean }) {
-  const { store, baseUrl, signOut, clearAuthorization, butlerMode, setButlerMode, butlerBusy } =
-    useApp();
+  const {
+    store,
+    baseUrl,
+    signOut,
+    clearAuthorization,
+    butlerMode,
+    setButlerMode,
+    butlerBusy,
+    approvalRevoked,
+    reauthorizeApprovals,
+    secureStorageError,
+  } = useApp();
   const nav = useNav();
   const tv = useTheme();
   const insets = useSafeAreaInsets();
@@ -425,6 +439,20 @@ export function ProfileScreen({ active = true }: { active?: boolean }) {
 
         {/* ── 连接 ─────────────────────────────────────── */}
         <SectionLabel text="连接" />
+
+        {/* 安全存储异常：凭据没能进 Keystore。
+            必须显式告知 —— 静默降级到明文存储等于没做加固。 */}
+        {secureStorageError ? (
+          <View style={styles.secureWarn}>
+            <Text style={styles.secureWarnTitle}>⚠ 凭据没能安全保存</Text>
+            <Text style={styles.secureWarnBody}>{secureStorageError}</Text>
+            <Text style={styles.secureWarnHint}>
+              常见原因：系统锁屏方式刚改过、或设备不支持硬件加密。
+              建议设置一个锁屏密码后重启 App 再试。
+            </Text>
+          </View>
+        ) : null}
+
         <View style={styles.infoCard}>
           <View style={styles.infoRow}>
             <Text style={styles.infoKey}>服务地址</Text>
@@ -455,7 +483,9 @@ export function ProfileScreen({ active = true }: { active?: boolean }) {
             <Text
               style={[
                 styles.infoVal,
-                store.gatewayStatus === 'offline'
+                store.gatewayStatus === 'offline' ||
+                store.gatewayStatus === 'revoked' ||
+                store.gatewayStatus === 'unknown'
                   ? { color: tv.colors.danger }
                   : store.gatewayStatus === 'online'
                     ? { color: tv.colors.accent }
@@ -467,6 +497,66 @@ export function ProfileScreen({ active = true }: { active?: boolean }) {
               {store.gatewayHint ? ` · ${store.gatewayHint}` : ''}
             </Text>
           </View>
+
+          {/* 授权状态未知时的说明。
+              ⚠️ 它和「已撤销」不是一回事：撤销要用户主动重新授权，
+              未知只需要等存储恢复（程序会自动重试）。
+              但两者都**不会**自动配对 —— 这一点必须在界面上说清楚，
+              否则用户会以为是卡住了。 */}
+          {store.gatewayStatus === 'unknown' ? (
+            <View style={styles.infoRow}>
+              <Text style={[styles.infoKey, { color: tv.colors.danger }]}>
+                授权状态读不出来
+              </Text>
+              <Text style={[styles.infoVal, { color: tv.colors.danger }]}>
+                不会自动连接审批，稍后自动重试
+              </Text>
+            </View>
+          ) : null}
+
+          {/* 审批授权被撤销后的重新授权入口。
+              ⚠️ 必须由用户主动点 —— 撤销后任何「自动恢复」都等于
+              把用户的撤销决定撤销掉（见 core/deviceRevocation.ts）。 */}
+          {approvalRevoked ? (
+            <Pressable
+              onPress={() => {
+                Alert.alert(
+                  '重新授权审批',
+                  '这会重新向电脑申请一次配对，恢复「在手机上批准命令执行」的能力。\n\n' +
+                    '只在你确实要恢复时才继续。',
+                  [
+                    { text: '取消', style: 'cancel' },
+                    {
+                      text: '重新授权',
+                      onPress: () => {
+                        void (async () => {
+                          const ok = await reauthorizeApprovals();
+                          if (!ok) {
+                            // 撤销标记没清掉（存储写失败）→ 不能假装成功。
+                            // 否则用户以为恢复了，实际网关仍然拦住自动配对。
+                            Alert.alert(
+                              '重新授权没生效',
+                              '本机保存的「已撤销」状态没能清除。\n\n' +
+                                '请重启 App 后再试一次。',
+                            );
+                          }
+                        })();
+                      },
+                    },
+                  ],
+                );
+              }}
+              style={({ pressed }: { pressed: boolean }) => [
+                styles.infoRow,
+                pressed && { opacity: tv.motion.pressOpacity },
+              ]}
+            >
+              <Text style={[styles.infoKey, { color: tv.colors.accent }]}>重新授权审批</Text>
+              <Text style={[styles.infoVal, { color: tv.colors.accent }]}>
+                已撤销，点这里恢复 ›
+              </Text>
+            </Pressable>
+          ) : null}
 
           {/* 设备管理：看哪些手机配过对、撤销不认识的。
               手机能批准电脑执行命令，所以「谁有权限」这件事
@@ -560,15 +650,28 @@ export function ProfileScreen({ active = true }: { active?: boolean }) {
         visible={confirmSignOut}
         title="断开连接"
         message={
-          '只是这次不用了。\n' +
-          '凭据仍保存在本机的安全存储里，下次打开 App 会自动连回来。\n\n' +
+          '这次不自动登录了。\n' +
+          '凭据仍保存在本机的安全存储里，下次打开 App 会停在配对页，' +
+          '可以点「直接继续」恢复。\n\n' +
           '想彻底清除授权，用下面的「退出并清除所有授权」。'
         }
         confirmText="断开"
         onCancel={() => setConfirmSignOut(false)}
         onConfirm={() => {
           setConfirmSignOut(false);
-          void signOut();
+          void (async () => {
+            const persisted = await signOut();
+            if (!persisted) {
+              // 退出意图没能落盘：下次启动可能仍会自动登录。
+              // 必须说清楚，否则用户以为已经断开，实际没有。
+              Alert.alert(
+                '断开状态没能保存',
+                '这次已经退出到配对页，但「不再自动登录」这个决定没能写入本机存储。\n\n' +
+                  '下次打开 App 可能仍会自动登录。请重启 App 后再断开一次；\n' +
+                  '如果反复出现，用「退出并清除所有授权」。',
+              );
+            }
+          })();
         }}
       />
 
@@ -826,6 +929,34 @@ function makeStyles(tv: ReturnType<typeof useTheme>) {
       textAlign: 'right',
     },
     infoSep: { height: StyleSheet.hairlineWidth, backgroundColor: C.border },
+
+    // 安全存储异常提示（凭据没能进 Keystore）
+    secureWarn: {
+      marginHorizontal: tv.layout.screenPadding,
+      marginBottom: tv.space.sm,
+      paddingHorizontal: tv.space.lg,
+      paddingVertical: tv.space.md,
+      borderRadius: tv.radius.lg,
+      borderWidth: StyleSheet.hairlineWidth,
+      borderColor: C.danger,
+      backgroundColor: C.dangerWash,
+      gap: 4,
+    },
+    secureWarnTitle: {
+      color: C.danger,
+      fontSize: tv.type.sm,
+      fontWeight: tv.weight.medium,
+    },
+    secureWarnBody: {
+      color: C.text,
+      fontSize: tv.type.xs,
+      lineHeight: tv.type.xs * 1.5,
+    },
+    secureWarnHint: {
+      color: C.textTertiary,
+      fontSize: tv.type.micro,
+      lineHeight: tv.type.micro * 1.6,
+    },
 
     // 更新下载进度条
     updateProgressWrap: {
