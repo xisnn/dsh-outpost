@@ -141,3 +141,6 @@ _eslint*.json
 
 # 本地验收证据（ZIP/截图，体积大且含本机路径，不入库）
 _test-artifacts/
+
+# 提交信息临时文件
+_m*.txt
