@@ -121,11 +121,10 @@ check('401 时清掉持久化 token（Keystore）', () =>
 );
 
 check('401 后不再复用旧配对码', () => {
-  // 重构后分支名从 unauthorized 改成了 saidUnauthorized /
-  // exceededThreshold，语义没变：认定凭据失效时都必须
-  // scheduleRetry() 且不带旧配对码。
-  const i = gw.indexOf('saidUnauthorized');
-  if (i < 0) return '找不到 saidUnauthorized 分支';
+  // 重构后判据从「失败次数」换成了 isCredentialRejection（明确的鉴权拒绝），
+  // 语义没变：认定凭据失效时都必须 scheduleRetry() 且不带旧配对码。
+  const i = gw.indexOf('isCredentialRejection(combined)');
+  if (i < 0) return '找不到「明确鉴权拒绝」的分支';
   const body = gw.slice(i, i + 700);
   if (/scheduleRetry\(\s*pairingCode\s*\)/.test(body)) {
     return '还在拿旧配对码重试（一次性码，必然 401）';
