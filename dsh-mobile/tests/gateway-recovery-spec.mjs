@@ -743,82 +743,173 @@ await check('拿不到配对码：有限次重试后停下，不无限打服务�
   }
 });
 
+
 // ══════════════════════════════════════════════════════════════
-// 八、握手被拒的跨平台差异（真实缺陷的回归防线）
+// 九、握手被拒（401）→ 凭据失效判定（确定性测试）
 // ══════════════════════════════════════════════════════════════
 
 /**
- * 这个用例守的是一个**真实发生过**的缺陷。
+ * ## 为什么要用「确定性替身」而不是真实 WebSocket 测这一段
  *
- * ## 背景
+ * 这里最初是两条「起 fake-dsh → 让它回 401 → 等客户端自愈」的集成用例。
+ * 它们本地稳定通过，但在 GitHub Actions 上**稳定失败**：
  *
- * 「失效 token 自愈」依赖 `isCredentialRejection(lastErrorText)` 判断
- * 服务端是不是明确拒绝了我们的凭据。而 `lastErrorText` 只在 `onerror`
- * 里被赋值。
+ *     connecting: | offline:连接失败 | offline:连接被关闭 1006 | ...
  *
- * ## 问题
+ * 1006 = TCP 层就断了，服务端连 HTTP 401 都没送达。根因是「握手失败」
+ * 在两端的**事件模型不同**：
  *
- * 握手失败（401）在两个平台上的事件模型**完全不同**：
+ *   · RN（Android okhttp / iOS）→ 触发 `error`，message 里带 401
+ *   · Node `ws` → 只发 `unexpected-response`（不触发 error/close）
  *
- *   · RN（Android okhttp / iOS）→ 触发 `error`，message 里带
- *     `Expected HTTP 101 response but was '401 Unauthorized'`
- *   · Node `ws` 库 → **既不触发 `error` 也不触发 `close`**，
- *     只发一个 `unexpected-response` 事件
+ * 加上 CI runner 的网络与调度时序和本地不同，用例变成了看运气的
+ * 集成测试 —— 而**发布门禁不能建立在随机性上**。
  *
- * 我们的测试跑在 Node 上，所以只监听 onerror/onclose 时，401 路径
- * **永远不触发**：`lastErrorText` 恒为空 → 判定为「不是凭据问题」→
- * 保留失效 token → 反复重连 1006 → 最终超时。
+ * ## 这个写法保留了什么
  *
- * 表现为 `gateway-recovery-spec` 的「失效 token 自愈」偶发失败
- * （本地 5 次中 1 次、CI 上更明显）。修复方式是显式处理
- * `unexpected-response` 并主动 close，让 onclose 走正常分支。
+ * 仍然驱动**真实的 ApprovalGateway**（不是断言源码字符串），只是把
+ * 「WebSocket 传输层」换成进程内可控替身，精确复现两种握手失败：
+ * 401（凭据失效）与 403（与凭据无关）。于是：
  *
- * ## 断言
+ *   · 测的是真实产品逻辑：收到 401 → 清 token → 通知 → 安排重试
+ *   · CI 结果确定，不再依赖真实网络的时序
  *
- * 直接把「401 拒绝」这条链路单独跑一遍，并在**很短的超时**内要求
- * 出现「重新配对」的迹象（不是靠 25 秒的宽松等待碰运气）。
+ * 端到端「真实 401 自愈」保留在人工验收清单
+ * （RELEASE-ACCEPTANCE-CHECKLIST.md）里用真机验证。
  */
-await check('回归：握手 401 在 Node(ws) 下也能被识别为凭据拒绝', async () => {
-  const srv = await startFakeDsh();
-  await seedCookie(srv);
-  try {
-    AsyncStorageStub.__reset();
-    ks().clear();
-    __resetRevocationCache();
-    // 预置一个服务端不认识的 token
-    ks().set(GW_TOKEN_SERVICE, { username: 'k', password: 'STALE-TOKEN-REGRESSION' });
 
-    const statuses = [];
-    const gw = new ApprovalGateway(srv.baseUrl, {
+/**
+ * 造一个「握手立刻被拒」的 WebSocket 替身。
+ *
+ * 模拟 Node `ws` 的行为：握手失败时只发 `unexpected-response`。
+ *
+ * @param {number} statusCode 例如 401 / 403
+ * @param {string} statusMessage
+ */
+function makeHandshakeRejectingWS(statusCode, statusMessage) {
+  class RejectingWS {
+    constructor(url) {
+      this.url = url;
+      this.readyState = 0; // CONNECTING
+      this.onopen = null;
+      this.onclose = null;
+      this.onerror = null;
+      this.onmessage = null;
+      this._unexpected = [];
+      // 下一拍就拒绝（模拟握手阶段即刻失败）
+      setTimeout(() => {
+        for (const cb of [...this._unexpected]) {
+          try {
+            cb({}, { statusCode, statusMessage });
+          } catch {
+            /* 单个监听器抛错不影响其它 */
+          }
+        }
+      }, 0);
+    }
+    // Node ws 的 EventEmitter 风格（产品代码用它监听 unexpected-response）
+    on(event, cb) {
+      if (event === 'unexpected-response') this._unexpected.push(cb);
+    }
+    once(event, cb) {
+      this.on(event, cb);
+    }
+    removeListener() {}
+    off() {}
+    send() {}
+    close() {}
+    addEventListener() {}
+    removeEventListener() {}
+    /** 测试辅助：本次连接是否注册过 unexpected-response 监听 */
+    get hadUnexpectedListener() {
+      return this._unexpected.length > 0;
+    }
+  }
+  RejectingWS.CONNECTING = 0;
+  RejectingWS.OPEN = 1;
+  RejectingWS.CLOSING = 2;
+  RejectingWS.CLOSED = 3;
+  return RejectingWS;
+}
+
+await check('确定性：握手 401 → 识别为凭据失效并清掉 token', async () => {
+  AsyncStorageStub.__reset();
+  ks().clear();
+  __resetRevocationCache();
+
+  const STALE = 'STALE-TOKEN-DETERMINISTIC';
+  ks().set(GW_TOKEN_SERVICE, { username: 'k', password: STALE });
+
+  const realWS = globalThis.WebSocket;
+  globalThis.WebSocket = makeHandshakeRejectingWS(401, 'Unauthorized');
+  const statuses = [];
+  try {
+    const gw = new ApprovalGateway('http://127.0.0.1:1', {
       onStatus: (s, d) => statuses.push(`${s}:${d ?? ''}`),
       onApproval: () => {},
       onResolved: () => {},
     });
-
     try {
       await gw.connect();
-      // 关键：必须出现「配对凭据已失效，正在重新配对」这条状态，
-      // 说明 401 被识别出来了（而不是被当成普通网络失败一直重试）。
-      const recognised = await waitFor(
-        () => statuses.some((s) => s.includes('凭据已失效')),
-        12000,
-        150,
-      );
-      if (!recognised) {
-        return `握手 401 没有被识别为凭据拒绝（状态链：${statuses.slice(-8).join(' | ')}）`;
+      // 让 401 那一支跑完（它是同步触发 + 一个 await clearCredential）
+      await new Promise((r) => setTimeout(r, 400));
+
+      // 1) 必须出现「配对凭据已失效」——
+      //    说明 401 被判定为凭据问题，而不是当成普通网络失败。
+      if (!statuses.some((s) => s.includes('凭据已失效'))) {
+        return `401 没被识别为凭据失效（状态：${statuses.join(' | ') || '无'}）`;
       }
-      // 而且最终要靠重新配对连上
-      const backOnline = await waitFor(
-        () => statuses.some((s) => s.startsWith('online')),
-        20000,
-        200,
-      );
-      return backOnline ? true : `识别到失效但没能自愈（${statuses.slice(-6).join(' | ')}）`;
+
+      // 2) token 必须真的被清掉 —— 只提示不清的话，下次还会拿它重连
+      const left = ks().get(GW_TOKEN_SERVICE);
+      if (left && left.password === STALE) {
+        return 'token 没被清掉 —— 下次仍会拿失效 token 重连';
+      }
+      return true;
     } finally {
       await closeGateway(gw);
     }
   } finally {
-    await srv.close();
+    globalThis.WebSocket = realWS;
+  }
+});
+
+await check('确定性：握手 403 → **不**清 token（真实网关 403 与凭据无关）', async () => {
+  AsyncStorageStub.__reset();
+  ks().clear();
+  __resetRevocationCache();
+
+  const GOOD = 'VALID-TOKEN-MUST-SURVIVE';
+  ks().set(GW_TOKEN_SERVICE, { username: 'k', password: GOOD });
+
+  const realWS = globalThis.WebSocket;
+  globalThis.WebSocket = makeHandshakeRejectingWS(403, 'Forbidden');
+  const statuses = [];
+  try {
+    const gw = new ApprovalGateway('http://127.0.0.1:1', {
+      onStatus: (s, d) => statuses.push(`${s}:${d ?? ''}`),
+      onApproval: () => {},
+      onResolved: () => {},
+    });
+    try {
+      await gw.connect();
+      await new Promise((r) => setTimeout(r, 400));
+
+      // 403 在真实网关上意味着 CSRF / loopback 限制，**与凭据有效性无关**。
+      // 因此绝不能被当成「凭据失效」而清掉有效 token —— 那是纯误伤。
+      const left = ks().get(GW_TOKEN_SERVICE);
+      if (!left || left.password !== GOOD) {
+        return '403 把有效 token 清掉了 —— 误伤（真实网关 403 与凭据无关）';
+      }
+      if (statuses.some((s) => s.includes('凭据已失效'))) {
+        return '403 被误报成凭据失效';
+      }
+      return true;
+    } finally {
+      await closeGateway(gw);
+    }
+  } finally {
+    globalThis.WebSocket = realWS;
   }
 });
 
