@@ -513,13 +513,57 @@ export async function startFakeDsh(opts = {}) {
   const muxWs = makeWsServer();
   const gatewayWs = makeWsServer();
 
+  /**
+   * 拒绝一个 WebSocket 升级请求，并**确保 HTTP 响应真的送达**。
+   *
+   * ## 为什么不能 write() 之后立刻 destroy()
+   *
+   * 这是本项目真实踩过的竞态：
+   *
+   *     socket.write('HTTP/1.1 401 Unauthorized\r\n...');
+   *     socket.destroy();        // ← 太早
+   *
+   * write() 只是把数据交给内核缓冲，**并不保证已经发出**。
+   * 紧接着 destroy() 会销毁 socket，在慢一点的机器上（CI 共享 runner
+   * 比本地开发机慢很多）401 响应还没刷出就被丢掉，对端看到的是
+   * 「连接被重置」而不是「HTTP 401」。
+   *
+   * 后果很具体：客户端的 401 判据（isCredentialRejection）依赖能读到
+   * 401 / Unauthorized。只看到连接重置时它会当成**普通网络故障**，
+   * 于是保留那个其实已失效的 token、反复重连 —— 正是
+   * gateway-recovery-spec「失效 token 自愈」偶发失败的成因
+   * （本地 5 次中 1 次、CI 上稳定失败）。
+   *
+   * ## 正确做法
+   *
+   * end() 会先冲刷缓冲再半关闭写方向；之后延迟 destroy() 兜底，
+   * 确保响应一定发得出去，同时不泄漏句柄。
+   *
+   * @param {import('node:net').Socket} socket
+   * @param {string} statusLine 例如 '401 Unauthorized'
+   */
+  function rejectUpgrade(socket, statusLine) {
+    try {
+      socket.end(`HTTP/1.1 ${statusLine}\r\nConnection: close\r\nContent-Length: 0\r\n\r\n`);
+    } catch {
+      // socket 可能已经不可写
+    }
+    const t = setTimeout(() => {
+      try {
+        socket.destroy();
+      } catch {
+        /* ignore */
+      }
+    }, 500);
+    if (typeof t.unref === 'function') t.unref();
+  }
+
   server.on('upgrade', (req, socket, head) => {
     const url = new URL(req.url ?? '/', `http://${req.headers.host}`);
 
     if (url.pathname === '/api/remote.mux') {
       if (!(req.headers.cookie ?? '').includes(cookieName)) {
-        socket.write('HTTP/1.1 401 Unauthorized\r\nConnection: close\r\nContent-Length: 0\r\n\r\n');
-        socket.destroy();
+        rejectUpgrade(socket, '401 Unauthorized');
         return;
       }
       homeSocket = muxWs.accept(req, socket);
@@ -553,10 +597,7 @@ export async function startFakeDsh(opts = {}) {
         const code = pairProto.slice('dsh-pair.'.length);
         const rec = gatewayPairings.get(code);
         if (!rec || rec.used) {
-          socket.write(
-            'HTTP/1.1 401 Unauthorized\r\nConnection: close\r\nContent-Length: 0\r\n\r\n',
-          );
-          socket.destroy();
+          rejectUpgrade(socket, '401 Unauthorized');
           return;
         }
         rec.used = true; // 一次性
@@ -565,16 +606,12 @@ export async function startFakeDsh(opts = {}) {
       } else if (authProto) {
         const tok = authProto.slice('dsh-auth.'.length);
         if (tok !== DEVICE_TOKEN) {
-          socket.write(
-            'HTTP/1.1 401 Unauthorized\r\nConnection: close\r\nContent-Length: 0\r\n\r\n',
-          );
-          socket.destroy();
+          rejectUpgrade(socket, '401 Unauthorized');
           return;
         }
         gatewayDevices.add(String(deviceId));
       } else {
-        socket.write('HTTP/1.1 401 Unauthorized\r\nConnection: close\r\nContent-Length: 0\r\n\r\n');
-        socket.destroy();
+        rejectUpgrade(socket, '401 Unauthorized');
         return;
       }
 
