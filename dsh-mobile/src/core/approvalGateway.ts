@@ -15,10 +15,30 @@
  *   连接   ws://<host>:3081/ws/mobile
  *   配对   子协议 ['dsh-mobile-v1', 'dsh-pair.<pairingCode>']
  *          请求头 X-DSH-Device-ID（稳定设备 id，用于复用可信设备记录）
+ *   重连   子协议 ['dsh-mobile-v1', 'dsh-auth.<deviceToken>']
  *   收     {"kind":"approval-requested", rpcId, sessionId, approvalId, toolName, reason, displayReason, replay}
  *          {"kind":"approval-resolved",  rpcId, sessionId, approvalId, outcome}
  *   发     {"type":"approval-response", rpcId, sessionId, approvalId, outcome}
  *          outcome 只能是 allowed-once / rejected
+ *
+ * ## 三条不能违反的规则
+ *
+ * 1. **网络问题不能破坏授权状态**
+ *    握手失败有太多与凭据无关的原因：切 Wi-Fi、进电梯、电脑休眠、
+ *    DSH 重启、3081 被防火墙拦、代理抽风。这些情况下 token 完全有效，
+ *    清掉是纯误伤 —— 而且清掉之后如果网络还没恢复，重新配对也拿不到码，
+ *    整条链路停摆，用户必须重开 App。
+ *    所以：**只有服务端明确说凭据不行，才清 token**。
+ *
+ * 2. **用户主动撤销后不得自动恢复**
+ *    撤销后本地没有 token，但 Cookie 还在。如果 connect() 看到
+ *    「没 token」就自动申请配对码，几秒内设备就又被授权了 ——
+ *    用户的撤销决定被自己撤销掉。见 core/deviceRevocation.ts。
+ *
+ * 3. **旧连接的异步回调不得影响新连接**
+ *    断线重连、切前后台、撤销后重连都会并发产生多个 WebSocket。
+ *    每个连接带一个 generation，回调里先校验是不是当前连接，
+ *    否则「旧连接迟到的 onclose」会把刚建好的新连接状态踩掉。
  */
 
 import {
@@ -28,16 +48,88 @@ import {
   saveCredential,
 } from './secureStore';
 
+import {
+  clearApprovalRevoked,
+  getApprovalRevocationStatus,
+  markApprovalRevoked,
+} from './deviceRevocation';
+
+import { readGatewayId, readServerDeviceId, saveServerBinding } from './serverIdentity';
+
 import { redactUrl } from './net-security';
 
 /** 网关默认端口（插件配置 lanPort） */
 const GATEWAY_PORT = 3081;
 
-/** 设备 id 持久化键：配对时用它复用可信设备记录 */
-const DEVICE_ID_KEY = '@dsh/gatewayDeviceId';
+/**
+ * 服务端「设备被撤销」的关闭码。
+ *
+ * 插件 lib/index.mjs 里撤销设备时会：
+ *   client.close(4003, 'device revoked')
+ *
+ * ⚠️ **4003 不等于「设备被撤销」**。真实插件把 4003 用在两个完全不同的场景：
+ *
+ *   client.close(4003, 'device revoked')        ← 撤销了这台设备（凭据作废）
+ *   client.close(4003, 'authentication enabled') ← 管理界面把鉴权开关打开了，
+ *                                                  踢掉的是**没带凭据**的连接
+ *
+ * 第二个场景和「这台设备被撤销」毫无关系：它是 Debug 模式下无凭证连接
+ * 被清理，或者服务端重新开启鉴权。把这种情况也当成「设备被撤销」，
+ * 会在服务端**没有**删掉设备记录的情况下永久停掉自动配对 ——
+ * 用户必须手动重新授权才能恢复，而服务端那条记录一直有效。
+ *
+ * 所以必须按 reason 区分。见 isDeviceRevokedClose()。
+ */
+const CLOSE_DEVICE_REVOKED = 4003;
 
-/** 长期设备 token（配对成功后拿到，避免每次重连都要配对码） */
-const DEVICE_TOKEN_KEY = '@dsh/gatewayToken';
+/**
+ * 判断 4003 的关闭是不是「设备被撤销」。
+ *
+ * 服务端 reason 只有两种（见插件源码）：
+ *   'device revoked'        → 真的撤销了
+ *   'authentication enabled' → 鉴权开关变化，设备记录还在
+ *
+ * 判定原则：只有**明确**是 device revoked 才算撤销。
+ * 其它（含拿不到 reason、未来新增的 4003 用途）一律按「未知原因」处理 ——
+ * 保留凭据、继续退避重连，而不是永久停掉用户的审批功能。
+ *
+ * 这个方向的保守是刻意的：
+ *   · 误判成「已撤销」→ 用户失去审批功能，且服务端记录还在（不一致）
+ *   · 误判成「普通断开」→ 最多多连几次，服务端仍会用 4003 拒绝我们
+ */
+export function isDeviceRevokedClose(code: number, reason: string): boolean {
+  if (code !== CLOSE_DEVICE_REVOKED) return false;
+  // 归一化后精确匹配，避免 'not device revoked' 之类被 startsWith 放进来
+  return /(^|\s)device\s+revoked(\s|$)/i.test(reason.trim());
+}
+
+/**
+ * 连续申请配对码的次数上限。
+ *
+ * 防止「拿不到码 → 重试 → 还是拿不到」无限循环打服务端。
+ * 超过后停止自动配对，只保留退避重连（等用户手动干预）。
+ * 成功连上（onopen）会重置为 0。
+ */
+const MAX_PAIRING_ATTEMPTS = 3;
+
+/**
+ * 连续申请配对码达到上限后的冷却时间。
+ *
+ * 到这个阶段说明「网关确实起不来」（插件没装 / 没开 / 网络长期不通）。
+ * 此时既不能无限打服务端，也不能永久停摆 —— 用一个长间隔的慢速重试，
+ * 让网络恢复后仍能自己好起来。
+ */
+const PAIRING_COOLDOWN_MS = 60_000;
+
+/**
+ * 「授权状态未知」时的重试间隔。
+ *
+ * 撤销标记读不出来时不能自动配对（fail-closed），但也不能永久停摆 ——
+ * 存储故障通常是暂时的（磁盘满被清理、进程被杀在写入中途、系统正在
+ * 压缩数据库）。用一个中等间隔重试：比正常退避慢（别为了一次 IO 抖动
+ * 就打服务端），但比配对码冷却快（存储恢复后要能及时连回来）。
+ */
+const REVOCATION_UNKNOWN_RETRY_MS = 15_000;
 
 /** 一条待审批 */
 export interface PendingApproval {
@@ -53,9 +145,25 @@ export interface PendingApproval {
 
 export type ApprovalOutcome = 'allowed-once' | 'rejected';
 
+/** 网关连接状态 */
+export type GatewayStatus =
+  | 'idle'
+  | 'connecting'
+  | 'online'
+  | 'offline'
+  | 'revoked'
+  /**
+   * 授权状态未知：读不到撤销标记（存储故障 / 数据损坏）。
+   *
+   * 和 `revoked` 分开是为了让界面能说清楚「是撤销了」还是「暂时确认不了」——
+   * 前者要用户主动重新授权，后者通常等一下就好。
+   * 两者都**禁止**自动配对。
+   */
+  | 'unknown';
+
 export interface GatewayEvents {
   /** 连接状态变化 */
-  onStatus?: (status: 'idle' | 'connecting' | 'online' | 'offline', detail?: string) => void;
+  onStatus?: (status: GatewayStatus, detail?: string) => void;
   /** 来了一个待审批 */
   onApproval?: (a: PendingApproval) => void;
   /** 审批已决（可能是本机回的，也可能是别的设备/WebUI 回的） */
@@ -66,13 +174,16 @@ export interface GatewayEvents {
 export function gatewayUrlFrom(baseUrl: string): string {
   try {
     const u = new URL(baseUrl);
-    return `ws://${u.hostname}:${GATEWAY_PORT}/ws/mobile`;
+    const scheme = u.protocol === 'https:' ? 'wss' : 'ws';
+    return `${scheme}://${u.hostname}:${GATEWAY_PORT}/ws/mobile`;
   } catch {
     return '';
   }
 }
 
-/** 生成/读取稳定的设备 id（存 Keystore，和 token 一起被 clearAllCredentials 清掉） */
+/**
+ * 生成/读取稳定的设备 id（存 Keystore，和 token 一起被 clearAllCredentials 清掉）
+ */
 async function ensureDeviceId(): Promise<string> {
   try {
     const saved = await loadCredential(CredentialKey.gatewayDeviceId);
@@ -90,9 +201,65 @@ async function ensureDeviceId(): Promise<string> {
 }
 
 /**
+ * 判断关闭原因里是否**明确**表示凭据被拒。
+ *
+ * 数据来源（不要假设 RN 能稳定拿到 HTTP 状态码 —— 它拿不到）：
+ *
+ *   · Android okhttp 握手失败时，RN 会把异常消息塞进 close reason，
+ *     形如 `Expected HTTP 101 response but was '401 Unauthorized'`。
+ *     见 react-native/Libraries/WebSocket/WebSocket.js：
+ *     `websocketFailed` → `CloseEvent('close', { code: 1006, reason: ev.message })`。
+ *   · iOS 上 reason 可能是空的 —— 所以 onerror 里也存一份（lastErrorText）。
+ *
+ * ## 为什么只认 401，不认 403
+ *
+ * 这一条是**照着真实网关源码核对**的（dsh-plugin-mobile-gateway 0.10.3
+ * lib/index.mjs 的 rejectUpgrade 调用点）：
+ *
+ *   · 凭据缺失 / 无效 / 过期 → `rejectUpgrade(socket, 401, 'missing or invalid device credential')`
+ *   · 配对码无效或已用过     → `rejectUpgrade(socket, 401, 'invalid or expired pairing code')`
+ *   · 网关未开启             → `rejectUpgrade(socket, 503, 'mobile gateway is disabled')`
+ *   · 缺少 X-DSH-Device-ID   → `rejectUpgrade(socket, 400, ...)`
+ *
+ * 而 403 只出现在这些地方，**全都与设备凭据无关**：
+ *
+ *   · 管理接口 loopback-only
+ *   · 跨源管理请求（CSRF）
+ *   · Web restart / stop 的 loopback 限制
+ *   · 局域网监听只接受私网地址（`LAN listener accepts private-network clients only`）
+ *   · 无效的 WebSocket 路径
+ *
+ * 也就是说：**真实的设备凭据失效只会以 401 出现，永远不会是 403**。
+ * 把 403 当成「凭据失效」，会让下面这个真实场景误删有效 token：
+ *
+ *   手机从公司网络 / 移动网络接入，源地址不是私网
+ *   → 局域网监听回 403 'LAN listener accepts private-network clients only'
+ *   → 客户端看到 "403 Forbidden" → 以为 token 失效 → 删掉它
+ *   → 换回家里 Wi-Fi 时，本来有效的凭据已经没了，必须重新扫码。
+ *
+ * 这正是「网络连接失败 ≠ 认证凭据失效」。
+ *
+ * ⚠️ 也不要把 timeout / ECONNREFUSED / 1006 / 'Network request failed'
+ * 算进来 —— 那是「断网误清 token」的老 bug。
+ */
+export function isCredentialRejection(text: string): boolean {
+  if (!text) return false;
+
+  // 401 是唯一由网关用来表达「凭据不对」的 HTTP 码。
+  // 前后不能紧邻数字（避免匹配到端口号、时间戳、ECONNREFUSED 127.0.0.1:4011）。
+  if (/(^|[^0-9])401([^0-9]|$)/.test(text)) return true;
+
+  // 网关 401 的正文 / close reason 用词（见上面 rejectUpgrade 的调用点）。
+  // 这些词只会出现在「凭据不对」的语境里。
+  return /unauthorized|missing or invalid device credential|invalid device credential|invalid or expired (?:token|pairing code)|token (?:is )?(?:invalid|expired)/i.test(
+    text,
+  );
+}
+
+/**
  * 审批网关连接。
  *
- * 生命周期由调用方控制：进聊天页 connect()，离开 disconnect()。
+ * 生命周期由调用方控制：App 挂载时 connect()，卸载时 disconnect()。
  * 断线自动重连（指数退避，最长 30 秒）。
  */
 export class ApprovalGateway {
@@ -108,13 +275,46 @@ export class ApprovalGateway {
   private retry = 0;
   private retryTimer?: ReturnType<typeof setTimeout>;
   /**
-   * 用「长期 token」连接时连续失败的次数。
+   * 连接代次。
    *
-   * 握手阶段的 401 在 ws 层只表现为 close 1006，reason 是空串，
-   * 没法靠 reason 判断 token 是否失效。所以改成计数：
-   * 有 token 却连续失败 2 次，就当作 token 过期，清掉重新配对。
+   * 每次真正新建 WebSocket 就 +1；回调里先比对，不匹配就忽略 ——
+   * 这样「旧连接迟到的 onclose/onerror」不会污染新连接。
+   * 也是「撤销授权和自动重连同时发生」时不出错的关键。
    */
-  private tokenFailures = 0;
+  private generation = 0;
+  /**
+   * 是否有一次 connect 正在 await 途中。
+   *
+   * 防止并发 connect()：`connect()` 里有一串 await，期间 `this.ws`
+   * 还是空的，第二个调用会以为「没连」而再建一条。
+   */
+  private connecting = false;
+  /**
+   * 当前占着 `connecting` 标记的那一代（0 = 没人占）。
+   *
+   * `finally` 里靠它判断「该不该由我来放开标记」——
+   * 否则旧 connect 醒来时会把新 connect 的标记一起清掉。
+   */
+  private connectOwner = 0;
+  /** 上一次连接错误的消息（用于判断是否鉴权失败） */
+  private lastErrorText = '';
+  /**
+   * 当前这条连接是用**配对码**建立的（而不是长期 token）。
+   *
+   * 用途：配对码被拒（一次性码已用过/过期）时服务端也回 401，
+   * 那种情况下要清的是「这次配对尝试」，**不能**去清已经存好的
+   * 长期 token —— 那是另一份凭据。
+   */
+  private usedPairingCode = false;
+  /** 连续申请配对码的次数（见 MAX_PAIRING_ATTEMPTS） */
+  private pairingAttempts = 0;
+  /**
+   * 诊断计数：连续握手失败次数。
+   *
+   * ⚠️ **只用于状态提示，绝不用于判定 token 失效**。
+   * 之前就是拿它当判据（>= 2 就清 token），断网 30 秒即误删有效凭据。
+   */
+  private consecutiveFailures = 0;
   /** 等特定帧的调用者（文件下载用） */
   private frameWaiters = new Map<
     string,
@@ -133,6 +333,11 @@ export class ApprovalGateway {
 
   get url(): string {
     return this.pickUrl();
+  }
+
+  /** 这个网关实例连向哪个服务地址（store 用它判断要不要重建实例） */
+  get serviceUrl(): string {
+    return this.baseUrl;
   }
 
   /**
@@ -192,175 +397,350 @@ export class ApprovalGateway {
     return gatewayUrlFrom(this.baseUrl);
   }
 
-  /** 建立连接。没有设备 token 时自动申请配对码 */
+  /**
+   * 建立连接。
+   *
+   * @param pairingCode 用户主动提供的配对码（扫码/粘贴）。传了就一定用它配对，
+   *                    并清除「已撤销」标记 —— 这是用户的明确授权动作。
+   */
   async connect(pairingCode?: string): Promise<void> {
-    this.closed = false;
-    this.deviceId = await ensureDeviceId();
-
-    if (!this.token) {
-      try {
-        this.token = (await loadCredential(CredentialKey.gatewayToken)) || '';
-      } catch {
-        this.token = '';
-      }
-    }
-
-    // 没 token 也没传配对码 → 向 DSH 申请一个
-    //
-    // 这一步之前缺了，导致网关永远连不上：connect() 只在「有 pairingCode」
-    // 或「有已保存 token」时才连，而首次两者都没有，直接 return 了。
-    // 用户看到的就是「审批无法在手机上回答」。
-    //
-    // POST /mgw/pair 用 App 现有的 cookie 鉴权，返回一次性配对码。
-    if (!pairingCode && !this.token) {
-      const paired = await this.requestPairingCode();
-      pairingCode = paired?.pairingCode;
-      // 顺手把地址列表存下来 —— 真机上 3081 常被防火墙拦，
-      // 需要用 endpoints 里走 3095 的那条（见 pickUrl）
-      this.endpoints = paired?.endpoints;
-      this.publicUrl = paired?.publicUrl;
-      if (!pairingCode) {
-        // ⚠️ 这里**必须继续重试**，不能直接 return。
-        //
-        // 之前的写法是 `onStatus('offline'); return;` —— 断网时
-        // requestPairingCode() 拿不到码，整条链路就此停摆，
-        // 网络恢复后也不会自己好，必须重开 App。
-        // 用户报的「审批通道一直是灰的」有一部分就是这个。
-        this.events.onStatus?.('offline', '网关暂时不可用，稍后自动重试');
-        this.scheduleRetry();
-        return;
-      }
-    }
-
-    const url = this.url;
-    if (!url) {
-      this.events.onStatus?.('offline', '地址无效');
-      return;
-    }
-
-    // 有 token 就用 token，否则用配对码
-    const protocols = ['dsh-mobile-v1'];
     if (pairingCode) {
-      protocols.push(`dsh-pair.${pairingCode}`);
-    } else if (this.token) {
-      protocols.push(`dsh-token.${this.token}`);
-    } else {
-      this.events.onStatus?.('offline', '需要配对码');
-      return;
+      // 用户主动配对 = 明确重新授权。先解掉撤销标记再连。
+      await clearApprovalRevoked();
     }
+    this.closed = false;
 
-    this.events.onStatus?.('connecting');
+    // 已经有连接在跑（CONNECTING/OPEN）或已排了重试 → 不重复建。
+    // 切前后台、store 重建、页面重进都会调用 connect()，
+    // 不去重的话会同时挂好几条 WS，服务端看到多台「设备」，
+    // 撤销时也容易踩到旧连接。
+    if (this.retryTimer) {
+      clearTimeout(this.retryTimer);
+      this.retryTimer = undefined;
+    }
+    if (this.ws && (this.ws.readyState === 0 || this.ws.readyState === 1)) return;
+
+    // ⚠️ 并发保护。
+    //
+    // connect() 里有一串 await（读 deviceId / 读 token / 查撤销标记 /
+    // 申请配对码），期间如果又有人调 connect()，两个调用都会通过上面
+    // 的 `this.ws` 检查（那时还没建 ws），于是各建一条连接。
+    // 结果是服务端看到两条「同一台设备」的连接，撤销时只踢掉一条。
+    //
+    // 用代次 + 在途标记双重兜底：后进来的调用直接返回，
+    // 由前一个调用负责把连接建起来。
+    if (this.connecting) return;
+    this.connecting = true;
+
+    // 在**入口**就占一代。这样 disconnect()（会把 generation +1）
+    // 能立刻让这次还在 await 中的 connect 作废 —— 否则「用户在
+    // 加载过程中点了断开」会被随后的建连动作覆盖掉。
+    const generation = ++this.generation;
+    // 记录「这次 connect 占着在途标记」，finally 里只清自己的那一份 ——
+    // 否则旧 connect 醒来时会把新 connect 的标记一起清掉。
+    this.connectOwner = generation;
+
+    /** 这次 connect 是否还有效（没被 disconnect / 更新的 connect 取代） */
+    const stillValid = () => !this.closed && generation === this.generation;
+
     try {
-      // ⚠️ 这里必须带 `X-DSH-Device-ID` 请求头，否则服务端直接 400。
+      this.deviceId = await ensureDeviceId();
+      if (!stillValid()) return;
+
+      // ── 用户撤销过 / 撤销状态未知 → 绝不自动配对 ─────────────
       //
-      // 网关源码里是硬性要求的：
-      //   if (!clientDeviceId) {
-      //     log('pairing rejected: missing X-DSH-Device-ID (outdated client)')
-      //     rejectUpgrade(socket, 400, ...)
-      //   }
-      // 而且它只认 header（query 里塞 deviceId 不认）——之前把 deviceId
-      // 放查询串是错的，结果网关永远 offline，审批只能显示「到电脑上确认」。
+      // 这是 P0 的核心：撤销后本地没有 token，而 Cookie 通常还有效。
+      // 如果这里放行，connect() 会申请配对码 → 配对成功 → 设备重新获得
+      // 审批权限。用户点的那下「撤销」等于没生效。
       //
-      // RN 的 WebSocket 构造函数有第三个参数可以传 headers（非标准但 RN 支持），
-      // Android 端会逐个 addHeader。这是唯一能在 RN 里设置 WS 请求头的办法，
-      // 不需要写原生模块。
-      const TypeCtor = WebSocket as unknown as new (
-        url: string,
-        protocols?: string | string[],
-        options?: { headers?: Record<string, string> },
-      ) => WebSocket;
-      const ws = new TypeCtor(url, protocols, {
-        headers: { 'X-DSH-Device-ID': this.deviceId },
-      });
-      this.ws = ws;
-
-      ws.onopen = () => {
-        this.retry = 0;
-        // 连上了说明凭据是好的，清掉失败计数
-        this.tokenFailures = 0;
-        this.events.onStatus?.('online');
-      };
-
-      ws.onmessage = (ev: WebSocketMessageEvent) => {
-        this.handleFrame(String(ev.data));
-      };
-
-      ws.onerror = () => {
-        this.events.onStatus?.('offline', '连接失败');
-      };
-
-      ws.onclose = (ev: { code?: number; reason?: string }) => {
-        this.ws = undefined;
-        if (this.closed) return;
-        // 把关闭码带出来 —— 400/401 的含义完全不同，排查时全靠它：
-        //   400 = 缺 X-DSH-Device-ID 头（RN 没发出去）
-        //   401 = 配对码无效/已用/过期，或设备 token 已失效
-        const code = ev?.code ?? 0;
-        // 服务端的 close reason 会拼进用户可见的提示里。
-        // 理论上它只写「invalid or expired pairing code」这类文本，
-        // 但万一哪天带上了凭据，就会直接显示在界面上 —— 先脱敏再拼。
-        const why = redactUrl(String(ev?.reason ?? ''));
-        this.events.onStatus?.(
-          'offline',
-          code ? `连接被关闭 ${code}${why ? ` ${why}` : ''}` : '连接已断开',
-        );
-
-        // 这次是用长期 token 连的（不是配对码）→ 可能计入失败次数。
-        //
-        // ⚠️ 但**不能见到失败就计数** —— 那是之前引入的回归：
-        // 用户进电梯、断网 30 秒，WebSocket 连续握手失败两次，
-        // 就会被误判成「token 失效」，把一个完全有效的 token 删掉。
-        // 而且删掉后如果网络还没恢复，requestPairingCode() 拿不到码，
-        // 整条链路直接停摆，必须重开 App。
-        //
-        // 判据：
-        //   · 只有握手真的被服务端拒绝（HTTP 层失败）才算「凭据可能失效」
-        //   · 网络不可达（连不上、DNS 失败、超时）时，只计数用于日志，
-        //     不触发清除
-        //
-        // ws 层在这两种情况下都给 close 1006，分不出来 —— 所以改用
-        // 主动探测：见 onclose 里对 baseUrl 的 healthCheck。
-        if (this.token && !pairingCode) {
-          this.tokenFailures += 1;
+      // ⚠️ 判据是三态，不是布尔值：
+      //
+      //   revoked     → 用户明确撤销过，禁止自动配对
+      //   unknown     → 读不到 / 数据损坏 / 存储不可用，**同样禁止**
+      //   not-revoked → 确认没撤销过，才允许自动配对
+      //
+      // `unknown` 必须和 `revoked` 一样拦下来。把它当成「未撤销」是一个
+      // fail-open：用户撤销自己时如果服务端撤销失败（serverOk=false），
+      // 本地标记就是**唯一**屏障 —— 而那种情况下不会有 4003 来兜底，
+      // 因为服务端根本没删掉那条记录。屏障一失效，设备就静默重新获得
+      // 了审批权限。
+      //
+      // 只有用户再次主动配对（传 pairingCode，或走 reauthorize()）才解禁。
+      if (!pairingCode) {
+        const revocation = await getApprovalRevocationStatus();
+        if (revocation === 'revoked') {
+          this.events.onStatus?.('revoked', '审批授权已撤销，需要重新授权');
+          return;
         }
+        if (revocation === 'unknown') {
+          // 状态未知 ≠ 授权有效。
+          //
+          // 这里**不清**任何凭据，也**不**置撤销标记 —— 存储里可能明明
+          // 有标记，只是这次读不到。等存储恢复后自然能读到。
+          //
+          // 用慢速通道重试而不是高频轮询：存储故障通常不会在几百毫秒内
+          // 自愈，但也必须能自己好起来（要求 5：存储恢复后允许重新读取）。
+          this.events.onStatus?.('unknown', '授权状态暂时无法确认，稍后自动重试');
+          this.scheduleRetry(REVOCATION_UNKNOWN_RETRY_MS);
+          return;
+        }
+      }
+      if (!stillValid()) return;
 
-        // ⚠️ 自愈：凭据确实失效时才清 token。
-        //
-        // 判据分三档：
-        //   1. reason 明确写了 401/unauthorized → 立刻清
-        //   2. 连续失败达到阈值 → **先探测服务端是否可达**：
-        //        可达  → 说明服务端在拒我们 → 清 token
-        //        不可达 → 只是网络问题 → 保留 token，继续退避重试
-        //   3. 其他 → 不清
-        //
-        // 这样「持有效 token 断网 30 秒再恢复」不会被误清。
-        const saidUnauthorized = /401|unauthorized|invalid|expired/i.test(why);
-        const exceededThreshold = this.tokenFailures >= 2;
-        if (saidUnauthorized) {
+      if (!this.token) {
+        try {
+          this.token = (await loadCredential(CredentialKey.gatewayToken)) || '';
+        } catch {
           this.token = '';
-          this.tokenFailures = 0;
-          void clearCredential(CredentialKey.gatewayToken).catch(() => undefined);
+        }
+      }
+      if (!stillValid()) return;
+
+      // 没 token 也没传配对码 → 向 DSH 申请一个
+      //
+      // 这一步之前缺了，导致网关永远连不上：connect() 只在「有 pairingCode」
+      // 或「有已保存 token」时才连，而首次两者都没有，直接 return 了。
+      // 用户看到的就是「审批无法在手机上回答」。
+      //
+      // POST /mgw/pair 用 App 现有的 cookie 鉴权，返回一次性配对码。
+      if (!pairingCode && !this.token) {
+        if (this.pairingAttempts >= MAX_PAIRING_ATTEMPTS) {
+          // ⚠️ 不能直接 return —— 那样网络恢复后这条链路就永久停摆了
+          // （必须重开 App 才能好，这正是用户报过的症状）。
+          //
+          // 正确做法：退到**慢速通道**。不再连着打服务端，但保留一个
+          // 长间隔重试；下次重试时重置计数，允许再试一小轮。
+          // 净效果：最多 3 次/分钟，既不刷服务端，也不会永久卡死。
+          this.events.onStatus?.('offline', '网关暂时不可用，稍后自动重试');
+          this.pairingAttempts = 0;
+          this.scheduleRetry(PAIRING_COOLDOWN_MS);
+          return;
+        }
+        this.pairingAttempts += 1;
+        const paired = await this.requestPairingCode();
+        if (!stillValid()) return;
+        pairingCode = paired?.pairingCode;
+        // 顺手把地址列表存下来 —— 真机上 3081 常被防火墙拦，
+        // 需要用 endpoints 里走 3095 的那条（见 pickUrl）
+        this.endpoints = paired?.endpoints;
+        this.publicUrl = paired?.publicUrl;
+        if (!pairingCode) {
+          // ⚠️ 这里**必须继续重试**，不能直接 return。
+          //
+          // 之前的写法是 `onStatus('offline'); return;` —— 断网时
+          // requestPairingCode() 拿不到码，整条链路就此停摆，
+          // 网络恢复后也不会自己好，必须重开 App。
+          // 用户报的「审批通道一直是灰的」有一部分就是这个。
+          this.events.onStatus?.('offline', '网关暂时不可用，稍后自动重试');
           this.scheduleRetry();
           return;
         }
-        if (exceededThreshold) {
-          // 先探一下服务端在不在 —— 结果在回调里决定清不清
-          void this.decideTokenValidity();
-          return;
-        }
+      }
 
-        // ⚠️ 重连时**绝不能复用配对码**。
-        //
-        // 配对码是一次性的（服务端配对成功立刻 delete），拿旧码重连
-        // 必然 401 —— 这正是「断线后再也连不回来」的根因。
-        //
-        // 正确做法：不传参数，让 connect() 自己决定 ——
-        // 有 token 就用 `dsh-token.` 子协议，没 token 才重新申请配对码。
+      const url = this.url;
+      if (!url) {
+        this.events.onStatus?.('offline', '地址无效');
+        return;
+      }
+
+      // 有 token 就用 token，否则用配对码
+      //
+      // ⚠️ token 的子协议是 `dsh-auth.`，不是 `dsh-token.`。
+      // 插件 extractCredential() 只认 dsh-auth. / dsh-pair.：
+      //   if (protocol.startsWith('dsh-auth.')) return { kind: 'token', ... }
+      // 写错的话服务端认为「没带凭据」→ 401 → 客户端以为是 token 失效
+      // → 清 token 重新配对。表现就是「每次断线都掉审批权限」。
+      const protocols = ['dsh-mobile-v1'];
+      if (pairingCode) {
+        protocols.push(`dsh-pair.${pairingCode}`);
+      } else if (this.token) {
+        protocols.push(`dsh-auth.${this.token}`);
+      } else {
+        this.events.onStatus?.('offline', '需要配对码');
+        return;
+      }
+
+      if (!stillValid()) return;
+
+      this.events.onStatus?.('connecting');
+      this.lastErrorText = '';
+      try {
+        this.openSocket(url, protocols, generation);
+      } catch (e) {
+        if (generation !== this.generation) return;
+        this.events.onStatus?.('offline', e instanceof Error ? e.message : '连接出错');
         this.scheduleRetry();
-      };
-    } catch (e) {
-      this.events.onStatus?.('offline', e instanceof Error ? e.message : '连接出错');
+      }
+    } finally {
+      // 无论走哪个分支（成功建连 / 撤销拦住 / 申请码失败 / 抛错），
+      // 都要放开在途标记，否则后续 connect() 会被永久挡住。
+      //
+      // ⚠️ 只清**自己这一代**的标记：如果期间已经有一次新的 connect()
+      // 接管了（connectOwner 变了），说明标记归它管，不能在这里清掉。
+      if (this.connectOwner === generation) {
+        this.connecting = false;
+        this.connectOwner = 0;
+      }
     }
+  }
+
+  /**
+   * 真正建 WebSocket 并挂回调。
+   *
+   * 抽出来是为了让 connect() 的流程（读凭据 → 判断授权 → 申请配对码）
+   * 保持线性可读，而不是所有东西挤在一个 try 里。
+   *
+   * @param generation 本次连接属于第几代，回调里用它丢弃旧连接的事件
+   */
+  private openSocket(url: string, protocols: string[], generation: number): void {
+    // ⚠️ 这里必须带 `X-DSH-Device-ID` 请求头，否则服务端直接 400。
+    //
+    // 网关源码里是硬性要求的：
+    //   if (!clientDeviceId) {
+    //     log('pairing rejected: missing X-DSH-Device-ID (outdated client)')
+    //     rejectUpgrade(socket, 400, ...)
+    //   }
+    // 而且它只认 header（query 里塞 deviceId 不认）——之前把 deviceId
+    // 放查询串是错的，结果网关永远 offline，审批只能显示「到电脑上确认」。
+    //
+    // RN 的 WebSocket 构造函数有第三个参数可以传 headers（非标准但 RN 支持），
+    // Android 端会逐个 addHeader。这是唯一能在 RN 里设置 WS 请求头的办法，
+    // 不需要写原生模块。
+    const TypeCtor = WebSocket as unknown as new (
+      url: string,
+      protocols?: string | string[],
+      options?: { headers?: Record<string, string> },
+    ) => WebSocket;
+    const ws = new TypeCtor(url, protocols, {
+      headers: { 'X-DSH-Device-ID': this.deviceId },
+    });
+    this.ws = ws;
+    this.usedPairingCode = protocols.some((p) => p.startsWith('dsh-pair.'));
+
+    /** 这个回调是否属于当前这一代连接 */
+    const isCurrent = () => generation === this.generation && this.ws === ws;
+
+    ws.onopen = () => {
+      if (!isCurrent()) return;
+      this.retry = 0;
+      this.consecutiveFailures = 0;
+      this.pairingAttempts = 0;
+      this.lastErrorText = '';
+      this.events.onStatus?.('online');
+    };
+
+    ws.onmessage = (ev: WebSocketMessageEvent) => {
+      if (!isCurrent()) return;
+      this.handleFrame(String(ev.data));
+    };
+
+    ws.onerror = (ev: Event) => {
+      if (!isCurrent()) return;
+      // Android 的握手失败会把 okhttp 的异常消息带进来
+      // （形如 `Expected HTTP 101 response but was '401 Unauthorized'`），
+      // 这是判断「服务端明确拒了我们」的重要线索，先存下来。
+      // 脱敏后再用：理论上它不该含凭据，但显示到界面之前一律过一遍。
+      const msg = (ev as { message?: unknown })?.message;
+      if (typeof msg === 'string' && msg) {
+        this.lastErrorText = redactUrl(msg);
+      }
+      this.events.onStatus?.('offline', '连接失败');
+    };
+
+    ws.onclose = (ev: { code?: number; reason?: string }) => {
+      if (!isCurrent()) return; // 旧连接的迟到回调，忽略
+      this.ws = undefined;
+
+      const code = ev?.code ?? 0;
+      // 服务端的 close reason 会拼进用户可见的提示里。
+      // 理论上它只写「invalid or expired pairing code」这类文本，
+      // 但万一哪天带上了凭据，就会直接显示在界面上 —— 先脱敏再拼。
+      const why = redactUrl(String(ev?.reason ?? ''));
+      const combined = `${why} ${this.lastErrorText}`.trim();
+
+      // 主动断开（disconnect）不触发任何状态/重连
+      if (this.closed) {
+        this.events.onStatus?.('idle');
+        return;
+      }
+
+      // ── 4003：服务端用这个码表示两件不同的事 ─────────────────
+      //
+      //   'device revoked'         → 授权被作废（最强信号，必须停）
+      //   'authentication enabled' → 鉴权开关变化，设备记录还在
+      //
+      // 只有前者能触发「置撤销标记 + 停自动重连」。后者是普通断开：
+      // 保留 token、继续退避重连（用户可能只是切了下 Debug 开关）。
+      //
+      // ⚠️ 拿不到 reason 时按普通断开处理，不按撤销处理 ——
+      // 撤销是破坏性结论（会清凭据、要用户手动重新授权），
+      // 不能在证据不足时下。
+      if (isDeviceRevokedClose(code, why)) {
+        this.events.onStatus?.('revoked', '这台设备的审批授权已被撤销');
+        this.token = '';
+        this.pairingAttempts = 0;
+        // 标记 + 清 Keystore/明文副本。失败也继续（内存里已经不重连了）。
+        void markApprovalRevoked('server-revoked').catch(() => undefined);
+        return; // 不再 scheduleRetry —— 撤销后自动重连等于自愈成未授权
+      }
+
+      // 4003 但不是 device revoked（鉴权开关变化 / reason 缺失）
+      if (code === CLOSE_DEVICE_REVOKED) {
+        this.consecutiveFailures += 1;
+        this.events.onStatus?.('offline', '连接被服务端关闭（鉴权设置变化），稍后重试');
+        this.scheduleRetry();
+        return;
+      }
+
+      // ── 服务端明确拒绝凭据 → 清 token，重新配对 ─────────────
+      //
+      // 判据只有「明确的鉴权词汇」（401/403/unauthorized/...）。
+      // 不看失败次数 —— 次数永远不能证明凭据失效。
+      if (this.token && !this.usedPairingCode && isCredentialRejection(combined)) {
+        this.token = '';
+        this.consecutiveFailures = 0;
+        void clearCredential(CredentialKey.gatewayToken).catch(() => undefined);
+        this.events.onStatus?.('offline', '配对凭据已失效，正在重新配对');
+        this.scheduleRetry();
+        return;
+      }
+
+      // ── 其它情况：网络/服务端不可达，**保留 token** ──────────
+      //
+      // 切 Wi-Fi、进电梯、电脑休眠、DSH 重启、3081 被防火墙拦、
+      // 代理异常 —— 全部走这里。token 是有效的，动它才是 bug。
+      this.consecutiveFailures += 1;
+      this.events.onStatus?.(
+        'offline',
+        code ? `连接被关闭 ${code}${why ? ` ${why}` : ''}` : '连接已断开',
+      );
+
+      // ⚠️ 重连时**绝不能复用配对码**。
+      //
+      // 配对码是一次性的（服务端配对成功立刻 delete），拿旧码重连
+      // 必然 401 —— 这正是「断线后再也连不回来」的根因。
+      //
+      // 正确做法：不传参数，让 connect() 自己决定 ——
+      // 有 token 就用 `dsh-auth.` 子协议，没 token 才重新申请配对码。
+      this.scheduleRetry();
+    };
+  }
+
+  /**
+   * 用户主动重新授权审批。
+   *
+   * 和 connect() 的区别：这个**先解掉「已撤销」标记**，属于用户明确动作。
+   * 只应该由 UI 上「重新授权」按钮、或扫码配对成功调用。
+   *
+   * @param pairingCode 用户提供的配对码；不传则自动向服务端申请
+   */
+  async reauthorize(pairingCode?: string): Promise<void> {
+    await clearApprovalRevoked();
+    this.token = '';
+    this.pairingAttempts = 0;
+    this.retry = 0;
+    this.disconnect();
+    await this.connect(pairingCode);
   }
 
   /**
@@ -380,12 +760,20 @@ export class ApprovalGateway {
     try {
       // 管理接口在 web server 端口上（不是网关的 3081）
       const base = this.baseUrl.replace(/\/+$/, '');
-      const res = await fetch(`${base}/mgw/pair`, {
-        method: 'POST',
-        credentials: 'include',
-        headers: { 'Content-Type': 'application/json' },
-        body: '{}',
-      });
+      const ctrl = new AbortController();
+      const timer = setTimeout(() => ctrl.abort(), 8000);
+      let res: Response;
+      try {
+        res = await fetch(`${base}/mgw/pair`, {
+          method: 'POST',
+          credentials: 'include',
+          headers: { 'Content-Type': 'application/json' },
+          body: '{}',
+          signal: ctrl.signal,
+        });
+      } finally {
+        clearTimeout(timer);
+      }
       if (!res.ok) return null;
       const j = (await res.json()) as {
         payload?: { pairingCode?: string; endpoints?: string[]; publicUrl?: string };
@@ -402,89 +790,76 @@ export class ApprovalGateway {
     }
   }
 
-  /** 断线重连：指数退避，最长 30 秒 */
-  private scheduleRetry(pairingCode?: string): void {
+  /**
+   * 断线重连：指数退避，最长 30 秒。
+   *
+   * 上限 30 秒是刻意的：
+   *   · 太短（1 秒）在服务端长时间不可用时会打出大量握手，
+   *     耗电、耗连接、日志刷屏；
+   *   · 太长（几分钟）用户网络恢复后要等太久。
+   *
+   * @param overrideMs 指定延迟（用于「配对码拿不到」时的慢速通道），
+   *                   不传则按退避序列算
+   */
+  private scheduleRetry(overrideMs?: number): void {
     if (this.closed) return;
     this.retry += 1;
-    const delay = Math.min(30_000, 1000 * 2 ** Math.min(this.retry, 5));
+    const delay =
+      typeof overrideMs === 'number'
+        ? overrideMs
+        : Math.min(30_000, 1000 * 2 ** Math.min(this.retry, 5));
+    if (this.retryTimer) clearTimeout(this.retryTimer);
     this.retryTimer = setTimeout(() => {
-      void this.connect(pairingCode);
+      this.retryTimer = undefined;
+      void this.connect();
     }, delay);
   }
 
   /**
-   * 连续失败后：先确认服务端到底能不能连上，再决定 token 要不要清。
+   * 从 paired / hello 帧里记下「本机在这台服务器上的身份」。
    *
-   * ## 解决什么问题
+   * 存两样东西，缺一不可：
    *
-   * 之前只要连续失败 2 次就清 token。但**连接失败 ≠ 凭据失效**：
-   * 用户进电梯、切飞行模式、路由器抽风，都会让 WebSocket 握手失败。
-   * 那些情况下 token 完全有效，清掉是纯粹的误伤 ——
-   * 而且清了之后如果网络还没恢复，重新配对也拿不到码，整条链路停摆。
+   *   1. `gatewayServerDeviceId` —— 服务端注册表主键（UUID），撤销时用它
+   *   2. `gatewayServerBinding`  —— **这个 UUID 属于哪台服务器**
+   *      （`{ baseUrl, gatewayId, deviceId }`）
    *
-   * ## 判据
+   * ## 为什么必须一起存（P1-1）
    *
-   * 用一个轻量的 HTTP 请求探 `/mgw/devices`（需要 cookie 鉴权）：
+   * 只存 UUID 的话，它就是个全局凭据。用户换服务器（电脑 A → 电脑 B）、
+   * 或者 A 重装插件导致注册表重建之后，旧 UUID 打过去会得到 404，
+   * 而 404 会被上层解释成「本来就没有」→ 用户看到「撤销成功」，
+   * 实际新服务器上这台设备的授权还在。
    *
-   *   · 能连通、返回 200/401 → 服务端在，说明它在拒我们的 token → 清
-   *   · 连不上 / 超时 / DNS 失败 → 只是没网 → **保留 token**，继续退避重试
+   * 真实插件的 paired/hello 帧都带 `gatewayId`
+   * （`...gatewayIdentity` = `{ gatewayId, gatewayName }`），
+   * 所以「UUID 属于哪台服务器」是**能被真实验证**的，不需要猜。
    *
-   * 为什么用 HTTP 而不是再开一个 ws：HTTP 的失败原因比 ws 清楚得多
-   * （ws 在两种情况下都给 1006）。
+   * ⚠️ 别用 `gatewayInstanceId`：那个每次进程启动都重新生成，
+   * 拿它当身份会导致每次重启都误判成「换了服务器」。
+   *
+   * @param frame paired 或 hello 帧
    */
-  private async decideTokenValidity(): Promise<void> {
-    if (this.closed) return;
-    const reachable = await this.probeServerReachable();
-
-    if (this.closed) return;
-
-    if (!reachable) {
-      // 网络问题，不是凭据问题 —— 保留 token，继续退避重试。
-      // 这里把计数降到阈值以下，避免网络恢复后第一个失败就再次触发探测。
-      this.tokenFailures = Math.max(0, this.tokenFailures - 1);
-      this.events.onStatus?.('offline', '网络不可用，稍后自动重连');
-      this.scheduleRetry();
+  private async rememberServerDevice(frame: Record<string, unknown>): Promise<void> {
+    const serverId = readServerDeviceId(frame);
+    if (!serverId) return;
+    try {
+      await saveCredential(CredentialKey.gatewayServerDeviceId, serverId);
+    } catch {
+      // 存不下 device id 不阻塞连接：撤销时会退回「列表里找自己」
       return;
     }
-
-    // 服务端可达却在拒我们 → 认定 token 失效
-    this.token = '';
-    this.tokenFailures = 0;
-    await clearCredential(CredentialKey.gatewayToken);
-    this.events.onStatus?.('offline', '配对凭据已失效，正在重新配对');
-    this.scheduleRetry();
-  }
-
-  /**
-   * 服务端是否可达（不管鉴权结果，只要能收到 HTTP 响应就算可达）。
-   *
-   * 超时给 4 秒 —— 比 ws 握手的默认超时短，避免断网时卡太久。
-   */
-  private async probeServerReachable(): Promise<boolean> {
-    const base = this.baseUrl.replace(/\/+$/, '');
-    try {
-      const ctrl = new AbortController();
-      const timer = setTimeout(() => ctrl.abort(), 4000);
-      // 和 requestPairingCode 用同样的鉴权方式（原生 cookie 容器），
-      // 保持行为一致 —— 不额外维护一份 cookie 副本。
-      const res = await fetch(`${base}/mgw/devices`, {
-        method: 'GET',
-        credentials: 'include',
-        signal: ctrl.signal,
-      });
-      clearTimeout(timer);
-      // 任何 HTTP 状态码都说明「服务端可达」：
-      //   200 = 正常；401/403 = 服务端在，只是不认我们的凭据
-      return res.status > 0;
-    } catch {
-      // 网络层失败（连不上、超时、DNS）→ 不可达
-      return false;
-    }
+    // 绑定写失败也不阻塞连接，但它会让撤销退化成「身份无法确认」
+    // （404 不会被当成成功）—— 安全方向是对的，只是需要用户去电脑上确认。
+    await saveServerBinding({
+      baseUrl: this.baseUrl,
+      gatewayId: readGatewayId(frame),
+      deviceId: serverId,
+    }).catch(() => false);
   }
 
   /** 处理服务端帧 */
-  private handleFrame(raw: string): void {
-    let frame: Record<string, unknown>;
+  private handleFrame(raw: string): void {    let frame: Record<string, unknown>;
     try {
       frame = JSON.parse(raw) as Record<string, unknown>;
     } catch {
@@ -510,8 +885,26 @@ export class ApprovalGateway {
       const tok = String(frame.token ?? '');
       if (tok) {
         this.token = tok;
+        this.pairingAttempts = 0;
         void saveCredential(CredentialKey.gatewayToken, tok).catch(() => undefined);
       }
+      // 顺手记下**服务端**的 device id（UUID）。
+      //
+      // 真实插件的 paired 帧带 `device: { id, name, createdAt, ... }`，
+      // 这个 id 是服务端注册表的主键，撤销时必须用它。
+      //
+      // 之前没存，导致「撤销这台手机」只能拿客户端标识
+      // （dsh-outpost-xxx）去列表里找自己 —— 而列表不返回客户端标识，
+      // 于是永远找不到 → revokeOwnDevice 返回 already-gone →
+      // 上层当成撤销成功，实际服务端记录还在。
+      void this.rememberServerDevice(frame);
+      return;
+    }
+
+    if (kind === 'hello') {
+      // hello 也带 device.id（重连时不再发 paired，只有 hello）。
+      // 没有它，老用户重连后仍然不知道自己的服务端 id。
+      void this.rememberServerDevice(frame);
       return;
     }
 
@@ -572,7 +965,8 @@ export class ApprovalGateway {
   }
 
   /** 回答一个审批 */
-  respond(a: PendingApproval, outcome: ApprovalOutcome): boolean {    if (!this.ws || this.ws.readyState !== 1) return false;
+  respond(a: PendingApproval, outcome: ApprovalOutcome): boolean {
+    if (!this.ws || this.ws.readyState !== 1) return false;
     try {
       this.ws.send(
         JSON.stringify({
@@ -589,23 +983,61 @@ export class ApprovalGateway {
     }
   }
 
-  /** 主动断开，不再重连 */
+  /**
+   * 主动断开，不再重连。
+   *
+   * 注意：这是「本次不用了」，**不改变授权状态** ——
+   * 下次 connect() 仍然会用已保存的 token 连回来。
+   */
   disconnect(): void {
     this.closed = true;
+    // 代次 +1：让所有在途连接的回调失效
+    this.generation += 1;
+    // ⚠️ 必须放开在途标记。
+    //
+    // disconnect() 会让在途 connect() 的后续 stillValid() 全部失败并
+    // return，那个 connect 的 finally 也会把 connecting 置 false ——
+    // 但如果此刻正卡在 ensureDeviceId()/loadCredential() 的 await 里，
+    // 要等它醒来才放开。期间任何 connect()/reauthorize() 都会命中
+    // `if (this.connecting) return` **静默什么都不做**。
+    //
+    // 用户看到的就是：点「重新授权」→ 撤销标记已经清了 → 但永远连不上，
+    // 必须重开 App。这里提前放开，让新的调用能立刻开始。
+    this.connecting = false;
+    this.connectOwner = 0;
     if (this.retryTimer) {
       clearTimeout(this.retryTimer);
       this.retryTimer = undefined;
     }
+    const ws = this.ws;
+    this.ws = undefined;
     try {
-      this.ws?.close();
+      ws?.close();
     } catch {
       /* 已经关了 */
     }
-    this.ws = undefined;
+    // 等在途的帧请求失败收尾，避免调用方挂到超时
+    for (const [, list] of this.frameWaiters) {
+      for (const w of list) {
+        clearTimeout(w.timer);
+        w.reject(new Error('网关已断开'));
+      }
+    }
+    this.frameWaiters.clear();
   }
 
   get online(): boolean {
     return this.ws !== undefined && this.ws.readyState === 1;
+  }
+
+  /** 当前是否持有设备 token（测试与诊断用） */
+  get deviceToken(): string {
+    return this.token;
+  }
+
+  /** 连续握手失败次数（仅诊断） */
+  get failures(): number {
+    return this.consecutiveFailures;
   }
 }
 

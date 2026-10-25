@@ -24,8 +24,14 @@ import type { NoticeItem, NoticeKind } from '../components/NoticeHost';
 import {
   ApprovalGateway,
   type ApprovalOutcome,
+  type GatewayStatus,
   type PendingApproval,
 } from '../core/approvalGateway';
+import {
+  markApprovalRevoked,
+  type RevocationPersistResult,
+  type RevocationStatus,
+} from '../core/deviceRevocation';
 
 /** 已归档会话 id 的存储 key（DSH 不返回归档状态，只能客户端自己记） */
 const ARCHIVED_KEY = '@dsh/archivedSessions';
@@ -546,18 +552,70 @@ export class Store {
   /** 待审批列表，key 是 rpcId */
   pendingApprovals: PendingApproval[] = [];
   /** 网关连接状态 */
-  gatewayStatus: 'idle' | 'connecting' | 'online' | 'offline' = 'idle';
+  gatewayStatus: GatewayStatus = 'idle';
   /** 网关不可用时的原因（用于 UI 提示） */
   gatewayHint = '';
 
-  /** 连上审批网关。进聊天页时调用；已经有连接就复用。 */
+  /**
+   * 从持久化的撤销状态同步网关状态（App 启动时调用一次）。
+   *
+   * 为什么需要：`gatewayStatus` 是 UI 的唯一事实来源，但它是**内存**状态，
+   * 启动时是 'idle'。如果不先把存储里的状态灌进来：
+   *   · 界面上「已撤销授权」不显示，用户看不出需要手动重新授权
+   *   · 而且 connectApprovals 会先跑到 'offline'，再被网关内部的
+   *     撤销状态检查拦成 'revoked' —— 状态会闪一下
+   *
+   * ⚠️ 三态都要处理，不能只看「是否已撤销」：
+   *   revoked   → 'revoked'（等用户主动重新授权）
+   *   unknown   → 'unknown'（存储读不出来，同样禁止自动配对）
+   *   not-revoked → 保持原样（不动）
+   *
+   * 把 unknown 漏掉的话，启动瞬间界面显示「未连接」，而实际状态是
+   * 「不知道」—— 用户看不出区别，但程序行为上两者都禁止自动配对。
+   *
+   * 注意：这里**只改状态**，不建连接、不改凭据。
+   */
+  syncRevokedState(status: RevocationStatus): void {
+    if (status === 'revoked') {
+      this.gatewayStatus = 'revoked';
+      this.gatewayHint = '审批授权已撤销，需要重新授权';
+      this.emit();
+      return;
+    }
+    if (status === 'unknown') {
+      this.gatewayStatus = 'unknown';
+      this.gatewayHint = '授权状态暂时无法确认，不会自动连接审批';
+      this.emit();
+    }
+  }
+
+  /** 连上审批网关。App 挂载时调用；已经有连接就复用。 */
   connectApprovals(baseUrl: string, pairingCode?: string): void {
-    if (this.gateway && this.gatewayStatus !== 'offline') return;
+    // 已经在线 / 正在连 → 直接复用，不要重复建连接。
+    // 切前后台、store 重建、页面重进都会走到这里。
+    if (this.gateway && (this.gatewayStatus === 'online' || this.gatewayStatus === 'connecting')) {
+      return;
+    }
+    // 已撤销 / 状态未知：连也不连，直接保持明确的「未授权」，
+    // 由 UI 引导用户主动重新授权（unknown 时等存储恢复）。
+    // 见 core/deviceRevocation.ts 的三态说明。
+    if (
+      (this.gatewayStatus === 'revoked' || this.gatewayStatus === 'unknown') &&
+      !pairingCode
+    ) {
+      return;
+    }
+
     if (!this.gateway) {
       this.gateway = new ApprovalGateway(baseUrl, {
         onStatus: (s, detail) => {
           this.gatewayStatus = s;
           this.gatewayHint = detail ?? '';
+          if (s === 'revoked') {
+            // 服务端踢掉 / 用户撤销：立刻清空待审批，不给用户留可点按钮。
+            // （这些审批已经无法回答 —— 连接都没了。）
+            this.pendingApprovals = [];
+          }
           this.emit();
         },
         onApproval: (a) => {
@@ -580,6 +638,59 @@ export class Store {
       });
     }
     void this.gateway.connect(pairingCode);
+  }
+
+  /**
+   * 用户主动重新授权审批通道。
+   *
+   * 和 connectApprovals 的区别：这个会**先解掉「已撤销」标记**。
+   * 只应由用户点「重新授权」触发 —— 网络恢复、重连都不得调用。
+   *
+   * ⚠️ 如果网关实例已经存在但指向**别的地址**（用户改了服务地址），
+   * 必须重建 —— `ApprovalGateway.baseUrl` 是 readonly，改不了。
+   * 之前这里直接复用旧实例，会一直连老主机。
+   */
+  reauthorizeApprovals(baseUrl: string, pairingCode?: string): void {
+    const target = baseUrl.replace(/\/+$/, '');
+    if (this.gateway && this.gateway.serviceUrl !== target) {
+      // 地址变了：拆掉旧的，下面会按新地址重建
+      this.gateway.disconnect();
+      this.gateway = undefined;
+      this.gatewayStatus = 'idle';
+      this.gatewayHint = '';
+    }
+    if (!this.gateway) {
+      this.connectApprovals(baseUrl, pairingCode);
+      return;
+    }
+    void this.gateway.reauthorize(pairingCode);
+  }
+
+  /**
+   * 本机审批授权被撤销（用户主动撤销 / 服务端 4003 踢掉）。
+   *
+   * 三件事：
+   *   1. 断开网关（并禁止自动重连）
+   *   2. 清本地设备凭据 + 置撤销标记（deviceRevocation 里做）
+   *   3. 界面进入明确的「未授权」状态
+   *
+   * 注意**不动 Cookie**：聊天、看会话仍然正常，撤销的只是审批权限。
+   *
+   * @returns 撤销标记的**持久化结果**（P0-1）。
+   *
+   * 它以前是 `Promise<void>` —— 于是「标记没写进存储」这件事被完全吞掉。
+   * 调用方（尤其「退出并清除所有授权」）需要知道这一半成没成，
+   * 才能如实告诉用户「重启后可能失效」，而不是默认成功。
+   */
+  async revokeOwnApprovalAuthorization(
+    reason: 'self-revoked' | 'server-revoked' | 'cleared',
+  ): Promise<RevocationPersistResult> {
+    this.gateway?.disconnect();
+    this.pendingApprovals = [];
+    this.gatewayStatus = 'revoked';
+    this.gatewayHint = reason === 'cleared' ? '已清除所有授权' : '审批授权已撤销，需要重新授权';
+    this.emit();
+    return markApprovalRevoked(reason);
   }
 
   /** 回答一个审批 */
@@ -614,12 +725,22 @@ export class Store {
     }
   }
 
-  /** 断开网关（离开聊天页时调用） */
+  /** 断开网关（App 卸载 / 撤销授权时调用） */
   disconnectApprovals(): void {
     this.gateway?.disconnect();
     this.gateway = undefined;
     this.pendingApprovals = [];
-    this.gatewayStatus = 'idle';
+    // ⚠️ 'revoked' / 'unknown' 是**授权状态**，不是连接状态 ——
+    // 断开连接不能把它们抹成 'idle'。
+    //
+    // 抹掉的话「已撤销授权」在界面上会变回「未连接」，
+    // 用户看不出区别，也不知道需要手动重新授权；
+    // 'unknown' 被抹成 'idle' 更糟：界面会显示成正常待连接，
+    // 而实际程序是禁止自动配对的（状态与行为不一致）。
+    if (this.gatewayStatus !== 'revoked' && this.gatewayStatus !== 'unknown') {
+      this.gatewayStatus = 'idle';
+      this.gatewayHint = '';
+    }
     this.emit();
   }
 
