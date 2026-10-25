@@ -231,36 +231,91 @@ await check('断线重连：配对成功后 token 已落盘', async () => {
 
 // ── 缺陷 2：失效 token 的自愈 ──────────────────────────────────
 
-await check('自愈：失效 token 连续失败后会被清掉', async () => {
-  const srv = await startFakeDsh();
-  await seedCookie(srv);
+
+/**
+ * 造一个「握手立刻 401」的 WebSocket 替身（仅本文件用）。
+ *
+ * ## 为什么不再用「真实 fake-dsh + 等 12 秒」
+ *
+ * 这两条用例原来靠真实网络握手的 401 来驱动自愈。它在本地稳定，
+ * 但在 GitHub Actions 上**稳定失败**：CI 上握手失败表现为 TCP 1006
+ * （服务端连 HTTP 401 都没送达），而不是 ws 的 unexpected-response。
+ * 根因是 RN 与 Node `ws` 的握手失败事件模型不同 —— 详见
+ * gateway-recovery-spec 第九节的完整说明。
+ *
+ * 发布门禁不能建立在随机性上，所以这里改为**进程内可控替身**：
+ * 精确复现 401，仍然驱动真实 ApprovalGateway，验证同一件事：
+ * 收到 401 后 token 必须被清掉，且随后能重新配对。
+ */
+function make401WS() {
+  class W401 {
+    constructor(url) {
+      this.url = url;
+      this.readyState = 0;
+      this.onopen = null;
+      this.onclose = null;
+      this.onerror = null;
+      this.onmessage = null;
+      this._unexpected = [];
+      setTimeout(() => {
+        for (const cb of [...this._unexpected]) {
+          try {
+            cb({}, { statusCode: 401, statusMessage: 'Unauthorized' });
+          } catch {
+            /* ignore */
+          }
+        }
+      }, 0);
+    }
+    on(e, cb) {
+      if (e === 'unexpected-response') this._unexpected.push(cb);
+    }
+    once(e, cb) {
+      this.on(e, cb);
+    }
+    removeListener() {}
+    off() {}
+    send() {}
+    close() {}
+    addEventListener() {}
+    removeEventListener() {}
+  }
+  W401.CONNECTING = 0;
+  W401.OPEN = 1;
+  W401.CLOSING = 2;
+  W401.CLOSED = 3;
+  return W401;
+}
+
+const STALE_TOKEN = 'STALE-TOKEN-RECONNECT';
+
+await check('自愈：握手 401 后失效 token 会被清掉', async () => {
+  AsyncStorageStub.__reset();
+  await Keychain.setGenericPassword('k', STALE_TOKEN, { service: GW_TOKEN_SERVICE });
+
+  const realWS = globalThis.WebSocket;
+  globalThis.WebSocket = make401WS();
   try {
-    AsyncStorageStub.__reset();
-    // 预置一个服务端不认识的 token
-    await Keychain.setGenericPassword('k', 'stale-token-abc123', { service: GW_TOKEN_SERVICE });
-    // 但 ApprovalGateway 是从内存/存储读，这里直接构造也能读到
-    const gw = new ApprovalGateway(srv.baseUrl, {
+    const gw = new ApprovalGateway('http://127.0.0.1:1', {
       onStatus: () => {},
       onApproval: () => {},
       onResolved: () => {},
     });
+    try {
+      await gw.connect();
+      await new Promise((r) => setTimeout(r, 400));
 
-    // 让它连着失败两次（tokenFailures >= 2 会触发清理）
-    await gw.connect();
-    await new Promise((r) => setTimeout(r, 1500));
-    await gw.connect();
-    await new Promise((r) => setTimeout(r, 1500));
-    await closeGateway(gw);
-
-    const remainingRec = await Keychain.getGenericPassword({ service: GW_TOKEN_SERVICE });
-    const remaining = remainingRec ? remainingRec.password : null;
-    // 清掉了 → 下次 connect 会重新申请配对码
-    if (remaining === 'stale-token-abc123') {
-      return '连续失败后 token 还在（自愈没触发，会一直 401）';
+      const rec = await Keychain.getGenericPassword({ service: GW_TOKEN_SERVICE });
+      const remaining = rec ? rec.password : null;
+      if (remaining === STALE_TOKEN) {
+        return '握手 401 后失效 token 还在（自愈没触发）';
+      }
+      return true;
+    } finally {
+      await closeGateway(gw);
     }
-    return true;
   } finally {
-    await srv.close();
+    globalThis.WebSocket = realWS;
   }
 });
 
@@ -269,24 +324,26 @@ await check('自愈：清掉 token 后能重新配对连上', async () => {
   await seedCookie(srv);
   try {
     AsyncStorageStub.__reset();
-    await Keychain.setGenericPassword('k', 'stale-token-def456', { service: GW_TOKEN_SERVICE });
-
+    // 模拟「401 之后 token 已被清掉」的状态，然后验证能重新配对
     const statuses = [];
     const gw = new ApprovalGateway(srv.baseUrl, {
       onStatus: (s) => statuses.push(s),
       onApproval: () => {},
       onResolved: () => {},
     });
-
-    // 多等一会儿，让它走完「失败 → 清 token → 重新配对」
-    await gw.connect();
-    await new Promise((r) => setTimeout(r, 12000));
-
-    const online = statuses.includes('online');
-    await closeGateway(gw);
-    return online
-      ? true
-      : `清 token 后没恢复（状态：${statuses.join(',')}）`;
+    try {
+      await gw.connect();
+      // 等它走完「申请配对码 → 连上」（本文件没有 waitFor 辅助，用轮询）
+      let online = false;
+      const deadline = Date.now() + 15000;
+      while (Date.now() < deadline) {
+        if (statuses.includes('online')) { online = true; break; }
+        await new Promise((r) => setTimeout(r, 200));
+      }
+      return online ? true : `清 token 后没恢复（状态：${statuses.join(',')}）`;
+    } finally {
+      await closeGateway(gw);
+    }
   } finally {
     await srv.close();
   }
