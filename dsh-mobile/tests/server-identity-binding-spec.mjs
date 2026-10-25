@@ -196,6 +196,28 @@ async function learnServerId(srv) {
   return rec ? rec.password : undefined;
 }
 
+/**
+ * 模拟「用户把 App 指向另一台服务器」。
+ *
+ * ## 为什么必须清掉旧 token
+ *
+ * 真实 App 在用户改地址后，`connect()` 会**优先用已存的 gateway token**
+ * 去连新服务器。新服务器不认它 → 401 → 清 token → 重新配对。
+ *
+ * 这条「401 自愈」路径在 CI 上不稳定（详见 gateway-recovery-spec 第九节：
+ * Node `ws` 与 RN 的握手失败事件模型不同，CI 上常表现为 TCP 1006）。
+ * 让本文件的用例依赖它，等于把服务器切换测试也变成看运气。
+ *
+ * 这里显式清掉 token，模拟「用户已完成切换、正在重新配对」的状态，
+ * 让用例**只测它该测的东西**：UUID 是否串号、绑定是否正确更新。
+ * 401 自愈本身由 gateway-recovery-spec 的确定性用例覆盖。
+ */
+async function switchToServer(srv) {
+  await seedCookie(srv);
+  // 清掉上一台服务器留下的 gateway token（真实切换场景里 401 会清它）
+  ks().delete('com.dshpocket.credentials.dsh.gatewayToken');
+}
+
 // ══════════════════════════════════════════════════════════════
 // 一、纯函数：地址归一化 / 字段提取
 // ══════════════════════════════════════════════════════════════
@@ -458,7 +480,7 @@ await check('跨服务器：旧服务器的 UUID 不得用于新服务器', asyn
     if (!idA) return '前置条件不成立：A 上没学到 UUID';
 
     // 用户切到 B（B 上还没有这台设备）
-    await seedCookie(srvB);
+    await switchToServer(srvB);15423
     const idB = await learnServerId(srvB);
     if (!idB) return '前置条件不成立：B 上没学到 UUID';
 
@@ -692,7 +714,7 @@ await check('切换服务器：能正常重新配对，并建立新绑定', asyn
     if (bindA.gatewayId !== srvA.gatewayId) return 'A 的绑定不对';
 
     // 切到 B 并重新配对
-    await seedCookie(srvB);
+    await switchToServer(srvB);21994
     const idB = await learnServerId(srvB);
     if (!idB) return '在 B 上配对失败 —— 切换服务器后功能不可用';
     if (idB === idA) return 'B 复用了 A 的 UUID —— 设备身份串号了';
@@ -719,7 +741,7 @@ await check('切换服务器后：在 B 上撤销自己可以成功', async () =
   try {
     await seedCookie(srvA);
     if (!(await learnServerId(srvA))) return '前置条件不成立（A）';
-    await seedCookie(srvB);
+    await switchToServer(srvB);
     const idB = await learnServerId(srvB);
     if (!idB) return '前置条件不成立（B）';
 
