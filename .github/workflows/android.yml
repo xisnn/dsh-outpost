@@ -1,24 +1,97 @@
 name: Android APK
 
+# ## 这个工作流的两条路径
+#
+# 1. **测试构建**（workflow_dispatch，任意分支）
+#    - 可用 debug 签名，只上传 Actions Artifact
+#    - **绝不创建 Release**
+#
+# 2. **正式发布**（push tag v*）
+#    - 必须有完整签名材料，否则整个 job 失败
+#    - 构建前后都校验签名证书指纹
+#    - 校验通过后才创建 Release（本分支默认 Pre-release）
+#
+# ## 本轮修复的门禁漏洞（此前真实存在）
+#
+#   ❌ 旧行为：没配 Secrets 时静默回退 debug 签名，然后 tag 照样发 Release
+#             → 等于把 debug 签名的包当正式版公开
+#   ❌ 旧行为：keystore 写到 `app/release.keystore`，却传 `-PDSH_STORE_FILE=app/release.keystore`
+#             而 Gradle 里是 `file(project.property(...))`，相对路径按
+#             **模块目录**解析 → 实际指向 app/app/release.keystore（不存在）
+#   ❌ 旧行为：不做 APK 证书指纹校验，签名错了也照发
+#   ❌ 旧行为：versionCode 公式容量不足（v0.16.3→16003 < 已交付的 16200）
+#
+# 现在：签名为空 / 指纹不匹配 / 版本号不递增 → 一律**硬失败**，不发 Release。
+
 on:
   push:
     tags:
       - 'v*'
   workflow_dispatch:
+    inputs:
+      build_variant:
+        description: '构建变体（test 仅上传 Artifact，绝不发 Release）'
+        type: choice
+        options:
+          - test
+        default: test
 
+# 最小权限：默认只读。写权限只在 release job 里单独声明。
 permissions:
-  contents: write
+  contents: read
+
+# 同一个 tag 重复推送时不要并发抢跑（避免两次同时发布）
+concurrency:
+  group: android-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: false
 
 jobs:
-  build:
+  # ══════════════════════════════════════════════════════════════
+  # 测试：所有路径都先跑，失败则后续 job 全部不执行
+  # ══════════════════════════════════════════════════════════════
+  test:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
 
       - uses: actions/setup-node@v4
         with:
-          # 测试通过 tsx 运行（esbuild 做类型剥离），不依赖 Node 原生 TS 支持，
-          # 所以 Node 20 就能跑。用 LTS 更稳。
+          node-version: 20
+          cache: npm
+          cache-dependency-path: dsh-mobile/package-lock.json
+
+      - name: Install dependencies
+        working-directory: dsh-mobile
+        run: npm ci
+
+      - name: Unit tests (static checks + pure functions)
+        working-directory: dsh-mobile
+        run: npm test
+
+      # 起本地模拟 DSH（HTTP + WebSocket）跑真实协议行为，不需要外部服务
+      - name: Integration tests (fake DSH server)
+        working-directory: dsh-mobile
+        run: npm run test:integration
+
+      # CI 的 Node 20 没有全局 WebSocket（21+ 才有），本地开发常用 24。
+      # 这一步删掉全局 WebSocket 复现 Node 20 环境，保证测试在支持的
+      # 所有 Node 版本上都真能跑（曾因此出现「本地全过、CI 全红」）。
+      - name: Integration tests under Node 20 semantics
+        working-directory: dsh-mobile
+        run: npm run test:node20
+
+  # ══════════════════════════════════════════════════════════════
+  # 测试构建（手动触发）：debug 签名，只出 Artifact，不发 Release
+  # ══════════════════════════════════════════════════════════════
+  build-test:
+    if: github.event_name == 'workflow_dispatch'
+    needs: test
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
           node-version: 20
           cache: npm
           cache-dependency-path: dsh-mobile/package-lock.json
@@ -28,18 +101,6 @@ jobs:
           distribution: temurin
           java-version: 21
 
-      # 不用 android-actions/setup-android：它会执行 `sdkmanager tools`，
-      # 而 runner 预装的 cmdline-tools 16.0 已经移除了这个包，直接报错退出。
-      # GitHub 的 ubuntu-latest 本来就带好了 SDK / build-tools，直接用即可。
-      - name: Inspect Android SDK
-        run: |
-          echo "ANDROID_SDK_ROOT=${ANDROID_SDK_ROOT:-$ANDROID_HOME}"
-          ls "$ANDROID_SDK_ROOT/platforms" || true
-          ls "$ANDROID_SDK_ROOT/ndk" || true
-          ls "$ANDROID_SDK_ROOT/build-tools" || true
-
-      # 项目需要 NDK 27.1.12297006（New Architecture 编译必需）、
-      # platform 36、build-tools 36.0.0；缺哪个补哪个（已存在则秒过）。
       - name: Ensure NDK and SDK packages
         run: |
           SDK="${ANDROID_SDK_ROOT:-$ANDROID_HOME}"
@@ -47,20 +108,11 @@ jobs:
           if [ ! -x "$SDKMANAGER" ]; then
             SDKMANAGER=$(find "$SDK/cmdline-tools" -name sdkmanager -type f | head -1)
           fi
-          echo "sdkmanager: $SDKMANAGER"
-
           need=""
           [ -d "$SDK/ndk/27.1.12297006" ] || need="$need ndk;27.1.12297006"
           [ -d "$SDK/platforms/android-36" ] || need="$need platforms;android-36"
           [ -d "$SDK/build-tools/36.0.0" ] || need="$need build-tools;36.0.0"
-
-          if [ -n "$need" ]; then
-            echo "安装缺少的包:$need"
-            yes | "$SDKMANAGER" --install $need
-          else
-            echo "NDK / platform / build-tools 都已存在，跳过下载"
-          fi
-
+          if [ -n "$need" ]; then yes | "$SDKMANAGER" --install $need; fi
           echo "ANDROID_NDK_HOME=$SDK/ndk/27.1.12297006" >> "$GITHUB_ENV"
 
       - name: Cache Gradle
@@ -76,115 +128,311 @@ jobs:
         working-directory: dsh-mobile
         run: npm ci
 
-      - name: Unit tests (static checks + pure functions)
-        working-directory: dsh-mobile
-        run: npm test
-
-      # 集成测试：起一个本地模拟 DSH（HTTP + WebSocket），跑真实协议行为。
-      # 不需要真实 DSH 服务，也不需要网络，所以能进 CI。
-      #
-      # 覆盖：配对换 cookie、WS 建连与重连、审批帧收发、长会话分页。
-      # 这些是「读源码断言」测不出来的 —— 必须真的发请求、真的握手。
-      - name: Integration tests (fake DSH server)
-        working-directory: dsh-mobile
-        run: npm run test:integration
-
-      # 用「模拟 Node 20」再跑一遍集成测试。
-      #
-      # 为什么：CI 的 Node 20 **没有全局 WebSocket**（21+ 才有），
-      # 而本地开发常用 Node 24。曾经因此出现过「本地全过、CI 5 项全红」，
-      # 报 `WebSocket is not defined`，排查了很久。
-      #
-      # 这一步通过删掉 globalThis.WebSocket 复现 Node 20 环境，
-      # 保证测试在任何支持的 Node 版本上都真能跑。
-      - name: Integration tests under Node 20 semantics
-        working-directory: dsh-mobile
-        run: npm run test:node20
-
-      # 用 tag 推导版本号，写进 package.json 和 Gradle，
-      # 保证「安装包里的版本」和「应用内更新检查的基准」是同一个值。
-      - name: Derive version from tag
+      # 测试构建用合成版本号，避免与真实发布版本混淆
+      - name: Derive synthetic version for test build
         id: ver
+        working-directory: dsh-mobile
         run: |
-          TAG="${GITHUB_REF_NAME}"
-          if [[ ! "$TAG" =~ ^v[0-9] ]]; then
-            TAG="v0.0.${GITHUB_RUN_NUMBER}"
-            echo "非 tag 触发，使用合成版本 $TAG"
-          fi
-          VER="${TAG#v}"
-          # 位加权：major*1000000 + minor*1000 + patch，避免 minor 跨十位时和 major 冲突
-          # v0.2.0 -> 2000，v0.10.2 -> 10002，v1.0.0 -> 1000000
-          IFS='.' read -r MAJ MIN PAT <<< "$VER"
-          CODE=$(( MAJ * 1000000 + MIN * 1000 + ${PAT:-0} ))
-          echo "version=$VER" >> "$GITHUB_OUTPUT"
-          echo "code=$CODE" >> "$GITHUB_OUTPUT"
-          echo "tag=$TAG" >> "$GITHUB_OUTPUT"
-          echo "版本: $TAG (versionCode=$CODE)"
+          # 用一个远高于水位线的合成版本，保证测试包一定能覆盖安装，
+          # 且明显不属于任何正式版本（900xxxx）。
+          echo "version=0.0.0-test.${GITHUB_RUN_NUMBER}" >> "$GITHUB_OUTPUT"
+          echo "code=900000${{ github.run_number }}" >> "$GITHUB_OUTPUT"
 
-          # package.json 是 JS 侧读取版本号的唯一来源
-          node -e "
-            const fs=require('fs');
-            const p=JSON.parse(fs.readFileSync('dsh-mobile/package.json','utf8'));
-            p.version='$VER';
-            fs.writeFileSync('dsh-mobile/package.json', JSON.stringify(p,null,2)+'\n');
-          "
-          node -e "console.log('package.json version =', require('./dsh-mobile/package.json').version)"
-
-      - name: Build release APK
+      - name: Build debug APK (test only)
         working-directory: dsh-mobile/android
-        env:
-          # 未配置签名密钥时回退到 debug 签名（能装、不能上架）
-          DSH_KEYSTORE_BASE64: ${{ secrets.KEYSTORE_BASE64 }}
-          DSH_KEYSTORE_PASSWORD: ${{ secrets.KEYSTORE_PASSWORD }}
-          DSH_KEY_ALIAS: ${{ secrets.KEY_ALIAS }}
-          DSH_KEY_PASSWORD: ${{ secrets.KEY_PASSWORD }}
         run: |
           chmod +x gradlew
-          VERSION_ARGS="-PDSH_VERSION_NAME=${{ steps.ver.outputs.version }} -PDSH_VERSION_CODE=${{ steps.ver.outputs.code }}"
-          echo "Gradle 版本参数: $VERSION_ARGS"
+          ./gradlew --no-daemon :app:assembleDebug \
+            -PDSH_VERSION_NAME="${{ steps.ver.outputs.version }}" \
+            -PDSH_VERSION_CODE="${{ steps.ver.outputs.code }}"
 
-          if [ -n "$DSH_KEYSTORE_BASE64" ]; then
-            echo "使用仓库配置的签名密钥"
-            echo "$DSH_KEYSTORE_BASE64" | base64 -d > app/release.keystore
-            ./gradlew assembleRelease --no-daemon $VERSION_ARGS \
-              -PDSH_STORE_FILE=app/release.keystore \
-              -PDSH_STORE_PASSWORD="$DSH_KEYSTORE_PASSWORD" \
-              -PDSH_KEY_ALIAS="$DSH_KEY_ALIAS" \
-              -PDSH_KEY_PASSWORD="$DSH_KEY_PASSWORD"
-          else
-            echo "未配置签名密钥，使用 debug 签名构建（可侧载，不可上架）"
-            ./gradlew assembleRelease --no-daemon $VERSION_ARGS
-          fi
-
-      - name: Prepare artifact
-        id: artifact
-        run: |
-          VERSION="${{ steps.ver.outputs.tag }}"
-          mkdir -p out
-          cp dsh-mobile/android/app/build/outputs/apk/release/app-release.apk "out/dsh-outpost-${VERSION}.apk"
-          ls -lh out/
-
-      - name: Upload artifact
+      - name: Upload test APK
         uses: actions/upload-artifact@v4
         with:
-          name: dsh-outpost-apk
-          path: out/*.apk
-          retention-days: 30
+          name: dsh-outpost-test-apk
+          path: dsh-mobile/android/app/build/outputs/apk/debug/app-debug.apk
+          retention-days: 14
 
-      - name: Publish release
-        if: startsWith(github.ref, 'refs/tags/v')
+  # ══════════════════════════════════════════════════════════════
+  # 正式发布：仅在 push tag 时执行，签名门禁严格
+  # ══════════════════════════════════════════════════════════════
+  release:
+    if: startsWith(github.ref, 'refs/tags/v')
+    needs: test
+    runs-on: ubuntu-latest
+    # 只在这个 job 给写权限
+    permissions:
+      contents: write
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+          cache-dependency-path: dsh-mobile/package-lock.json
+
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: 21
+
+      # ── 门禁 1：签名材料必须齐全，缺一个就停 ──────────────────
+      #
+      # 这里**不做任何 debug 回退**。旧 workflow 的回退逻辑是
+      # 「没配密钥就用 debug 签名」——那会把调试签名当正式版发布出去。
+      # 现在缺材料直接失败，让人去补 Secrets。
+      - name: Gate 1 — require signing secrets
+        env:
+          KEYSTORE_BASE64: ${{ secrets.KEYSTORE_BASE64 }}
+          KEYSTORE_PASSWORD: ${{ secrets.KEYSTORE_PASSWORD }}
+          KEY_ALIAS: ${{ secrets.KEY_ALIAS }}
+          KEY_PASSWORD: ${{ secrets.KEY_PASSWORD }}
+        run: |
+          missing=""
+          [ -n "$KEYSTORE_BASE64" ]   || missing="$missing KEYSTORE_BASE64"
+          [ -n "$KEYSTORE_PASSWORD" ] || missing="$missing KEYSTORE_PASSWORD"
+          [ -n "$KEY_ALIAS" ]         || missing="$missing KEY_ALIAS"
+          [ -n "$KEY_PASSWORD" ]      || missing="$missing KEY_PASSWORD"
+
+          if [ -n "$missing" ]; then
+            echo "::error::缺少签名 Secrets:$missing"
+            echo ""
+            echo "正式发布必须使用完整签名材料，**不允许回退 debug 签名**。"
+            echo "请在 GitHub → Settings → Secrets and variables → Actions 配置："
+            echo "  KEYSTORE_BASE64     base64 -w0 生成的 keystore 文件内容"
+            echo "  KEYSTORE_PASSWORD   keystore 密码"
+            echo "  KEY_ALIAS           密钥别名"
+            echo "  KEY_PASSWORD        密钥密码"
+            echo ""
+            echo "如需发布与历史版本兼容的更新，必须使用与历史 APK 相同的证书。"
+            echo "历史 APK 的证书指纹请见本轮发布报告。"
+            exit 1
+          fi
+          echo "签名 Secrets 齐全 ✓"
+
+      - name: Ensure NDK and SDK packages
+        run: |
+          SDK="${ANDROID_SDK_ROOT:-$ANDROID_HOME}"
+          SDKMANAGER="$SDK/cmdline-tools/latest/bin/sdkmanager"
+          if [ ! -x "$SDKMANAGER" ]; then
+            SDKMANAGER=$(find "$SDK/cmdline-tools" -name sdkmanager -type f | head -1)
+          fi
+          need=""
+          [ -d "$SDK/ndk/27.1.12297006" ] || need="$need ndk;27.1.12297006"
+          [ -d "$SDK/platforms/android-36" ] || need="$need platforms;android-36"
+          [ -d "$SDK/build-tools/36.0.0" ] || need="$need build-tools;36.0.0"
+          if [ -n "$need" ]; then yes | "$SDKMANAGER" --install $need; fi
+          echo "ANDROID_NDK_HOME=$SDK/ndk/27.1.12297006" >> "$GITHUB_ENV"
+
+      - name: Cache Gradle
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.gradle/caches
+            ~/.gradle/wrapper
+          key: gradle-${{ runner.os }}-${{ hashFiles('dsh-mobile/android/**/*.gradle*', 'dsh-mobile/android/gradle.properties') }}
+          restore-keys: gradle-${{ runner.os }}-
+
+      - name: Install dependencies
+        working-directory: dsh-mobile
+        run: npm ci
+
+      # ── 门禁 2：版本号推导 + 单调递增校验 ────────────────────
+      #
+      # 旧 workflow 把公式内联在 bash 里，且位宽不足：
+      # v0.16.3 会算出 16003，而上一轮已交付的验收包是 16200 →
+      # 新版本号比用户手上的还小，无法覆盖安装。
+      # 现在统一由 scripts/version-code.mjs 推导，并与
+      # .github/release-floor.json 比对，不递增就失败。
+      - name: Gate 2 — derive and verify versionCode
+        id: ver
+        working-directory: dsh-mobile
+        run: |
+          node scripts/version-code.mjs --tag "$GITHUB_REF_NAME" --github-output >> "$GITHUB_OUTPUT"
+          echo "--- 推导结果 ---"
+          node scripts/version-code.mjs --tag "$GITHUB_REF_NAME"
+
+      # ── 门禁 3：写入 keystore 并验证可读/别名正确 ─────────────
+      #
+      # ⚠️ 路径问题（旧 workflow 的真实 bug）：
+      #   app/build.gradle 里是 `storeFile file(project.property('DSH_STORE_FILE'))`
+      #   Gradle 的 `file()` 在模块目录下解析相对路径，而我们在
+      #   `dsh-mobile/android` 下执行 → `app/release.keystore` 实际指向
+      #   `dsh-mobile/android/app/release.keystore`（这个是对的），
+      #   但为了彻底消除歧义，这里改用**绝对路径**。
+      - name: Gate 3 — materialize and validate keystore
+        env:
+          KEYSTORE_BASE64: ${{ secrets.KEYSTORE_BASE64 }}
+          KEYSTORE_PASSWORD: ${{ secrets.KEYSTORE_PASSWORD }}
+          KEY_ALIAS: ${{ secrets.KEY_ALIAS }}
+        run: |
+          set -euo pipefail
+          KS="$RUNNER_TEMP/release.keystore"
+          # base64 解码，任何失败都立即退出
+          echo "$KEYSTORE_BASE64" | base64 -d > "$KS"
+          chmod 600 "$KS"
+
+          if [ ! -s "$KS" ]; then
+            echo "::error::keystore 解码后为空"
+            exit 1
+          fi
+          echo "keystore 已写入（$(( $(stat -c%s "$KS") )) 字节）"
+
+          # 用 keytool 验证别名存在且密码正确（不打印任何密码）
+          if ! keytool -list -keystore "$KS" -storepass "$KEYSTORE_PASSWORD" -alias "$KEY_ALIAS" > /dev/null 2>&1; then
+            echo "::error::keystore 校验失败：密码错误或别名 $KEY_ALIAS 不存在"
+            exit 1
+          fi
+          echo "keystore 别名与密码校验通过 ✓"
+
+          echo "DSH_STORE_FILE_ABS=$KS" >> "$GITHUB_ENV"
+
+      # ── 构建（使用绝对值签名路径，避免相对路径歧义）──────────
+      - name: Build signed release APK
+        working-directory: dsh-mobile/android
+        env:
+          KEYSTORE_PASSWORD: ${{ secrets.KEYSTORE_PASSWORD }}
+          KEY_ALIAS: ${{ secrets.KEY_ALIAS }}
+          KEY_PASSWORD: ${{ secrets.KEY_PASSWORD }}
+        run: |
+          set -euo pipefail
+          chmod +x gradlew
+          ./gradlew --no-daemon --console=plain :app:assembleRelease \
+            -PDSH_VERSION_NAME="${{ steps.ver.outputs.version }}" \
+            -PDSH_VERSION_CODE="${{ steps.ver.outputs.code }}" \
+            -PDSH_STORE_FILE="$DSH_STORE_FILE_ABS" \
+            -PDSH_STORE_PASSWORD="$KEYSTORE_PASSWORD" \
+            -PDSH_KEY_ALIAS="$KEY_ALIAS" \
+            -PDSH_KEY_PASSWORD="$KEY_PASSWORD"
+
+      # ── 门禁 4：APK 必须存在、可验签、证书指纹符合预期 ────────
+      #
+      # 旧 workflow 完全没有这一步：签名错了也照发 Release。
+      - name: Gate 4 — verify APK signature and identity
+        id: verify
+        run: |
+          set -euo pipefail
+          APK="dsh-mobile/android/app/build/outputs/apk/release/app-release.apk"
+
+          if [ ! -f "$APK" ]; then
+            echo "::error::构建产物不存在：$APK"
+            exit 1
+          fi
+          echo "APK: $(ls -lh "$APK" | awk '{print $5}')"
+
+          BT=$(ls -d "$ANDROID_SDK_ROOT"/build-tools/36.0.0 2>/dev/null || ls -d "$ANDROID_SDK_ROOT"/build-tools/* | tail -1)
+          APKSIGNER="$BT/apksigner"
+          AAPT2="$BT/aapt2"
+
+          # 1) 签名有效性（不只是"有签名"，要密码学上验证通过）
+          if ! "$APKSIGNER" verify --verbose "$APK" > /tmp/verify.txt 2>&1; then
+            echo "::error::apksigner verify 失败"
+            cat /tmp/verify.txt
+            exit 1
+          fi
+          echo "签名有效性校验通过 ✓"
+          grep -E 'Verified using|Number of signers' /tmp/verify.txt || true
+
+          # 2) 证书指纹（与仓库承诺的发布身份比对）
+          "$APKSIGNER" verify --print-certs "$APK" > /tmp/certs.txt 2>&1
+          ACTUAL=$(grep 'SHA-256 digest' /tmp/certs.txt | head -1 | awk '{print $NF}')
+          echo "APK 证书 SHA-256: $ACTUAL"
+
+          EXPECTED="${{ vars.EXPECTED_CERT_SHA256 }}"
+          if [ -n "$EXPECTED" ]; then
+            NORM_ACTUAL=$(echo "$ACTUAL" | tr 'A-F' 'a-f')
+            NORM_EXPECTED=$(echo "$EXPECTED" | tr -d ':' | tr 'A-F' 'a-f')
+            if [ "$NORM_ACTUAL" != "$NORM_EXPECTED" ]; then
+              echo "::error::APK 签名证书不符合预期发布身份"
+              echo "  期望: $NORM_EXPECTED"
+              echo "  实际: $NORM_ACTUAL"
+              echo "继续发布会让老用户无法覆盖升级，已中止。"
+              exit 1
+            fi
+            echo "证书指纹符合预期 ✓"
+          else
+            echo "::warning::未设置仓库变量 EXPECTED_CERT_SHA256，跳过指纹比对"
+            echo "（建议在 Settings → Variables 中设置，防止误用错误证书发布）"
+          fi
+
+          # 3) 包名 / 版本必须与 Tag 一致
+          BADGING=$("$AAPT2" dump badging "$APK")
+          PKG=$(echo "$BADGING" | grep -oP "name='\K[^']+" | head -1)
+          VC=$(echo "$BADGING" | grep -oP "versionCode='\K[0-9]+")
+          VN=$(echo "$BADGING" | grep -oP "versionName='\K[^']+")
+          echo "包名=$PKG versionCode=$VC versionName=$VN"
+
+          [ "$PKG" = "com.dshpocket" ] || { echo "::error::包名不对：$PKG"; exit 1; }
+          [ "$VC" = "${{ steps.ver.outputs.code }}" ] || { echo "::error::versionCode 不对：$VC != ${{ steps.ver.outputs.code }}"; exit 1; }
+          [ "$VN" = "${{ steps.ver.outputs.version }}" ] || { echo "::error::versionName 不对：$VN != ${{ steps.ver.outputs.version }}"; exit 1; }
+
+          # 4) 记录 hash 供 Release 使用
+          SHA256=$(sha256sum "$APK" | awk '{print $1}')
+          echo "SHA256=$SHA256" >> "$GITHUB_OUTPUT"
+          echo "CERT=$ACTUAL" >> "$GITHUB_OUTPUT"
+          echo "APK SHA-256: $SHA256"
+
+      - name: Prepare release files
+        run: |
+          set -euo pipefail
+          VERSION="${{ steps.ver.outputs.tag }}"
+          mkdir -p out
+          APK="dsh-mobile/android/app/build/outputs/apk/release/app-release.apk"
+          cp "$APK" "out/dsh-outpost-${VERSION}.apk"
+          # SHA256SUMS：下载后可独立复核
+          ( cd out && sha256sum "dsh-outpost-${VERSION}.apk" > SHA256SUMS.txt )
+          cat out/SHA256SUMS.txt
+          ls -lh out/
+
+      # 删除临时 keystore（虽然 runner 是一次性的，仍显式清理）
+      - name: Clean up keystore
+        if: always()
+        run: rm -f "$RUNNER_TEMP/release.keystore" || true
+
+      - name: Upload signed APK as artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: dsh-outpost-release-apk
+          path: |
+            out/*.apk
+            out/SHA256SUMS.txt
+          retention-days: 90
+
+      # ── 发布：只有前面所有门禁通过才会到这里 ──────────────────
+      - name: Publish GitHub Release (pre-release)
         uses: softprops/action-gh-release@v2
         with:
-          files: out/*.apk
-          generate_release_notes: true
+          files: |
+            out/*.apk
+            out/SHA256SUMS.txt
+          prerelease: true
+          generate_release_notes: false
           body: |
-            ## 安装
+            ## DSH Outpost ${{ steps.ver.outputs.tag }} · 安全与稳定性更新（公开预览版）
 
-            1. 下载下面的 `dsh-outpost-*.apk`
+            > **这是 Pre-release 预览版。**
+            > 自动化测试与模拟器验收已通过，但**尚未完成真实 Android 手机验收**。
+            > 建议先在测试环境验证，谨慎用于重要电脑或敏感工作流。
+
+            ### 安装
+
+            1. 下载 `dsh-outpost-${{ steps.ver.outputs.tag }}.apk`
             2. 手机上允许「安装未知来源应用」后安装
             3. 电脑上运行 `start-dsh-web.ps1` 启动 DSH 服务
             4. 打开 App 扫码配对
 
-            详细步骤见 [README](https://github.com/xisnn/dsh-outpost#5-分钟上手)。
+            ### 产物校验
 
-            > 本 APK 由 GitHub Actions 自动构建。若未配置签名密钥，使用 debug 签名，仅适合个人侧载使用。
+            ```
+            SHA-256: ${{ steps.verify.outputs.SHA256 }}
+            签名证书: ${{ steps.verify.outputs.CERT }}
+            包名: com.dshpocket
+            versionCode: ${{ steps.ver.outputs.code }}
+            versionName: ${{ steps.ver.outputs.version }}
+            ```
+
+            下载后可用 `SHA256SUMS.txt` 复核完整性。
+
+            详细说明见仓库中的 `DSH-OUTPOST-RELEASE-REPORT.md`。
