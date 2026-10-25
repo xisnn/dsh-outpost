@@ -647,6 +647,50 @@ export class ApprovalGateway {
       this.events.onStatus?.('offline', '连接失败');
     };
 
+    // ── 握手被拒（401/403/404…）─────────────────────────────────
+    //
+    // ⚠️ 这是一个**真实的跨平台差异**，也是「失效 token 不自愈」的根因：
+    //
+    //   · RN 的 WebSocket（Android okhttp / iOS）→ 握手失败走 `onerror`，
+    //     message 里带 `Expected HTTP 101 response but was '401 Unauthorized'`
+    //   · Node 的 `ws` 库 → **既不触发 `error` 也不触发 `close`**，
+    //     而是发一个单独的 `unexpected-response` 事件
+    //
+    // 我们自己的测试跑在 Node 上（用 `ws` 做的替身）。如果只监听
+    // onerror/onclose，401 这条路径在测试里**永远不会触发**：
+    // `lastErrorText` 一直是空 → `isCredentialRejection('')` 为 false →
+    // 保留那个已经失效的 token → 反复重连 → 最终超时。
+    //
+    // 表现就是 `gateway-recovery-spec` 的「失效 token 自愈」偶发失败
+    // （本地 5 次中 1 次，CI 上更明显，因为时序更慢）。
+    //
+    // 所以这里显式处理 `unexpected-response`：把状态码/状态文本记成
+    // 错误线索，并**主动结束这条连接**，让 onclose 走正常的分支判断。
+    // 真机上没有这个事件，这段不会执行，不影响生产行为。
+    const wsWithUnexpected = ws as unknown as {
+      on?: (event: string, cb: (req: unknown, res: { statusCode?: number; statusMessage?: string }) => void) => void;
+      once?: (event: string, cb: (req: unknown, res: unknown) => void) => void;
+    };
+    wsWithUnexpected.on?.(
+      'unexpected-response',
+      (_req, res: { statusCode?: number; statusMessage?: string }) => {
+        if (!isCurrent()) return;
+        const code = typeof res?.statusCode === 'number' ? res.statusCode : 0;
+        const text = String(res?.statusMessage ?? '');
+        // 记成 `HTTP 401 Unauthorized` 这种形式，让 isCredentialRejection
+        // 的 401 数字判据和 unauthorized 词汇判据都能命中。
+        if (code) {
+          this.lastErrorText = redactUrl(`HTTP ${code}${text ? ` ${text}` : ''}`);
+        }
+        // 主动关闭，触发 onclose 统一处理（重连/清 token/退避都在那里）
+        try {
+          ws.close();
+        } catch {
+          // 关闭失败也无所谓：连接本来就已经不可用
+        }
+      },
+    );
+
     ws.onclose = (ev: { code?: number; reason?: string }) => {
       if (!isCurrent()) return; // 旧连接的迟到回调，忽略
       this.ws = undefined;
