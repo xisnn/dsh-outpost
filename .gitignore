@@ -2,6 +2,30 @@
 node_modules/
 package-lock.json.bak
 
+# 构建期沙箱用的可写 HOME 重定向目录（Gradle 缓存 / Android home / LOCALAPPDATA）
+#
+# 为什么需要：本仓库在受限沙箱里构建时，`C:\Users\<user>\.gradle` 等
+# 用户目录不可写，Gradle wrapper 会报
+#   FileNotFoundException: ...gradle-8.14.3-bin.zip.lck (拒绝访问)
+# 解决办法是把 GRADLE_USER_HOME / ANDROID_SDK_HOME / LOCALAPPDATA 指到
+# 工作区内。这三个目录合计约 4.6 GB，纯缓存，**绝不能提交**。
+# 在没有沙箱限制的机器上不需要它们。
+_gradle-home/
+_android-home/
+_localappdata/
+
+# Metro / Gradle 探针产物
+_cmake-probe*/
+_ninja-probe/
+_bundle-probe/
+_abi_probe.*
+_spawn-probe.cjs
+_build-debug.ps1
+
+# 模拟器运行日志（构建/验收证据，不入库）
+_emulator.log
+_emulator.log.err
+
 # React Native / Metro
 .metro-health-check*
 *.tsbuildinfo
@@ -106,3 +130,14 @@ dsh-outpost-desktop/node_modules/
 dsh-outpost-desktop/_build.bat
 dsh-outpost-desktop/_e.log
 dsh-outpost-desktop/_e.err
+
+# 本轮及后续构建/测试日志（本地证据，不入库）
+BUILD-LOG-*.txt
+TEST-LOG-*.txt
+_emu*.log
+_emu*.err
+_u*.xml
+_eslint*.json
+
+# 本地验收证据（ZIP/截图，体积大且含本机路径，不入库）
+_test-artifacts/
