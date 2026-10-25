@@ -822,6 +822,37 @@ await check('回归：握手 401 在 Node(ws) 下也能被识别为凭据拒绝'
   }
 });
 
+// ══════════════════════════════════════════════════════════════
+// 临时诊断：确认 CI 上 401 到底以什么形式到达（定位后删除）
+// ══════════════════════════════════════════════════════════════
+await check('[DIAG] 401 事件形态', async () => {
+  const srv = await startFakeDsh();
+  try {
+    const ws = new globalThis.WebSocket(
+      `ws://${srv.authority}/ws/mobile`,
+      ['dsh-mobile-v1', 'dsh-auth.DIAG-WRONG-TOKEN'],
+      { headers: { 'X-DSH-Device-ID': 'diag-probe' } },
+    );
+    const ev = [];
+    ws.onerror = (e) => ev.push('onerror:' + JSON.stringify(e ?? null).slice(0, 120));
+    ws.onclose = (e) =>
+      ev.push('onclose:' + JSON.stringify(e ?? null).slice(0, 120) + ' hasOn=' + typeof ws.on);
+    if (typeof ws.on === 'function') {
+      ws.on('unexpected-response', (_q, r) =>
+        ev.push('unexpected:' + (r && r.statusCode) + ' ' + (r && r.statusMessage)),
+      );
+    }
+    await new Promise((r) => setTimeout(r, 2500));
+    console.log('    [DIAG] node=' + process.version);
+    console.log('    [DIAG] WebSocket ctor=' + globalThis.WebSocket.name);
+    console.log('    [DIAG] hasOn=' + typeof ws.on);
+    console.log('    [DIAG] events=' + JSON.stringify(ev));
+    return true; // 诊断项恒通过，只为打印
+  } finally {
+    await srv.close();
+  }
+});
+
 console.log('');
 console.log(`结果：${pass} 通过，${fail} 失败`);
 process.exitCode = fail === 0 ? 0 : 1;
