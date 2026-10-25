@@ -743,6 +743,85 @@ await check('拿不到配对码：有限次重试后停下，不无限打服务�
   }
 });
 
+// ══════════════════════════════════════════════════════════════
+// 八、握手被拒的跨平台差异（真实缺陷的回归防线）
+// ══════════════════════════════════════════════════════════════
+
+/**
+ * 这个用例守的是一个**真实发生过**的缺陷。
+ *
+ * ## 背景
+ *
+ * 「失效 token 自愈」依赖 `isCredentialRejection(lastErrorText)` 判断
+ * 服务端是不是明确拒绝了我们的凭据。而 `lastErrorText` 只在 `onerror`
+ * 里被赋值。
+ *
+ * ## 问题
+ *
+ * 握手失败（401）在两个平台上的事件模型**完全不同**：
+ *
+ *   · RN（Android okhttp / iOS）→ 触发 `error`，message 里带
+ *     `Expected HTTP 101 response but was '401 Unauthorized'`
+ *   · Node `ws` 库 → **既不触发 `error` 也不触发 `close`**，
+ *     只发一个 `unexpected-response` 事件
+ *
+ * 我们的测试跑在 Node 上，所以只监听 onerror/onclose 时，401 路径
+ * **永远不触发**：`lastErrorText` 恒为空 → 判定为「不是凭据问题」→
+ * 保留失效 token → 反复重连 1006 → 最终超时。
+ *
+ * 表现为 `gateway-recovery-spec` 的「失效 token 自愈」偶发失败
+ * （本地 5 次中 1 次、CI 上更明显）。修复方式是显式处理
+ * `unexpected-response` 并主动 close，让 onclose 走正常分支。
+ *
+ * ## 断言
+ *
+ * 直接把「401 拒绝」这条链路单独跑一遍，并在**很短的超时**内要求
+ * 出现「重新配对」的迹象（不是靠 25 秒的宽松等待碰运气）。
+ */
+await check('回归：握手 401 在 Node(ws) 下也能被识别为凭据拒绝', async () => {
+  const srv = await startFakeDsh();
+  await seedCookie(srv);
+  try {
+    AsyncStorageStub.__reset();
+    ks().clear();
+    __resetRevocationCache();
+    // 预置一个服务端不认识的 token
+    ks().set(GW_TOKEN_SERVICE, { username: 'k', password: 'STALE-TOKEN-REGRESSION' });
+
+    const statuses = [];
+    const gw = new ApprovalGateway(srv.baseUrl, {
+      onStatus: (s, d) => statuses.push(`${s}:${d ?? ''}`),
+      onApproval: () => {},
+      onResolved: () => {},
+    });
+
+    try {
+      await gw.connect();
+      // 关键：必须出现「配对凭据已失效，正在重新配对」这条状态，
+      // 说明 401 被识别出来了（而不是被当成普通网络失败一直重试）。
+      const recognised = await waitFor(
+        () => statuses.some((s) => s.includes('凭据已失效')),
+        12000,
+        150,
+      );
+      if (!recognised) {
+        return `握手 401 没有被识别为凭据拒绝（状态链：${statuses.slice(-8).join(' | ')}）`;
+      }
+      // 而且最终要靠重新配对连上
+      const backOnline = await waitFor(
+        () => statuses.some((s) => s.startsWith('online')),
+        20000,
+        200,
+      );
+      return backOnline ? true : `识别到失效但没能自愈（${statuses.slice(-6).join(' | ')}）`;
+    } finally {
+      await closeGateway(gw);
+    }
+  } finally {
+    await srv.close();
+  }
+});
+
 console.log('');
 console.log(`结果：${pass} 通过，${fail} 失败`);
 process.exitCode = fail === 0 ? 0 : 1;
