@@ -26,8 +26,13 @@ async function refresh() {
   last = st;
 
   // DSH 服务
-  const dshOk = !st.serviceDown && st.dshRunning !== false;
-  setRow('rowDsh', dshOk ? 'ok' : 'bad', dshOk ? '运行中' : st.serviceDown ? '服务未启动' : '未运行');
+  //
+  // 优先用主进程自己探测的 portListening —— 它用 net 直接连端口，
+  // 毫秒级且可信。隧道服务的 dshRunning 曾经因为用 PowerShell 查端口
+  // 超时而误报「未启动」。
+  const dshOk = st.portListening === true || (!st.serviceDown && st.dshRunning === true);
+  setRow('rowDsh', dshOk ? 'ok' : 'bad', dshOk ? '运行中' : st.serviceDown ? '隧道服务未启动' : '未运行');
+  syncServiceButtons(dshOk);
 
   // 局域网
   const lanIp = st.lanIp || '';
@@ -62,6 +67,22 @@ async function refresh() {
   $('chkAutoLaunch').checked = Boolean(st.autoLaunch);
 
   setHint(st.serviceDown ? '隧道服务未启动，点「刷新」重试' : '');
+}
+
+/**
+ * 根据 DSH 是否在跑，切换两个按钮的可用状态。
+ *
+ * 设计意图：**没跑的时候「启动」最显眼，跑着的时候「停止」才有意义**。
+ * 不要让两个按钮看起来同样重要 —— 用户绝大多数时候是来启动的。
+ */
+function syncServiceButtons(running) {
+  const start = $('btnStartDsh');
+  const stop = $('btnStopDsh');
+  if (!start || !stop) return;
+  start.disabled = running;
+  stop.disabled = !running;
+  start.className = running ? 'btn' : 'btn primary';
+  stop.className = running ? 'btn' : 'btn ghost';
 }
 
 function shortUrl(u) {
@@ -158,6 +179,57 @@ $('btnRefresh').addEventListener('click', () => void refresh());
 
 $('btnHide').addEventListener('click', () => window.dsh.hide());
 $('btnQuit').addEventListener('click', () => window.dsh.quit());
+
+// ── DSH 服务启停 ────────────────────────────────────────────────
+//
+// 启动可能要等几十秒（DSH 起得慢），所以按钮状态要一直提示着，
+// 别让用户以为没点着。
+
+$('btnStartDsh').addEventListener('click', async () => {
+  const btn = $('btnStartDsh');
+  const original = btn.textContent;
+  btn.disabled = true;
+  btn.textContent = '启动中…';
+  setHint('正在启动 DSH 服务，通常需要 10-30 秒…');
+
+  try {
+    const r = await window.dsh.dsh('start');
+    if (r?.ok) {
+      setHint(r.message || 'DSH 已启动');
+      await refresh();
+    } else {
+      setHint('启动失败：' + (r?.error || '未知错误'), true);
+    }
+  } catch (e) {
+    setHint('启动出错：' + (e?.message || e), true);
+  } finally {
+    btn.textContent = original;
+    // refresh() 里的 syncServiceButtons 会按实际状态恢复 disabled
+    await refresh();
+  }
+});
+
+$('btnStopDsh').addEventListener('click', async () => {
+  const btn = $('btnStopDsh');
+  const original = btn.textContent;
+  btn.disabled = true;
+  btn.textContent = '停止中…';
+  setHint('正在停止 DSH 服务…');
+
+  try {
+    const r = await window.dsh.dsh('stop');
+    if (r?.ok) {
+      setHint(r.message || 'DSH 已停止');
+    } else {
+      setHint('停止失败：' + (r?.error || '未知错误'), true);
+    }
+  } catch (e) {
+    setHint('停止出错：' + (e?.message || e), true);
+  } finally {
+    btn.textContent = original;
+    await refresh();
+  }
+});
 
 $('btnStartTunnel').addEventListener('click', async () => {
   const btn = $('btnStartTunnel');

@@ -19,6 +19,9 @@ contextBridge.exposeInMainWorld('dsh', {
   /** 隧道操作：start / stop / repair */
   tunnel: (action) => ipcRenderer.invoke('tunnel:action', action),
 
+  /** DSH 服务本身：start / stop */
+  dsh: (action) => ipcRenderer.invoke('dsh:action', action),
+
   /** 已配对的设备列表 */
   listDevices: () => ipcRenderer.invoke('devices:list'),
 

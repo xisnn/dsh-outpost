@@ -1,24 +1,47 @@
-param([string]$Path)
+﻿param(
+    [string]$Path,
+    [switch]$Recurse,
+    [switch]$WhatIf
+)
 
 $ErrorActionPreference = 'Stop'
 
-# Node may inherit PowerShell 7's PSModulePath while starting Windows
-# PowerShell 5.1. Load this host's own security module by absolute path.
-try {
-    $securityModule = Join-Path $PSHOME 'Modules\Microsoft.PowerShell.Security\Microsoft.PowerShell.Security.psd1'
-    if (-not (Test-Path -LiteralPath $securityModule -PathType Leaf)) {
-        throw "Built-in security module was not found: $securityModule"
-    }
-    Import-Module -Name $securityModule -ErrorAction Stop
-} catch {
-    Write-Output "[ERROR] Could not load the built-in security module: $($_.Exception.Message)"
-    exit 1
-}
+# ═══════════════════════════════════════════════════════════════════
+#  修复 Windows「低完整性」标记
+#
+#  ## 为什么需要
+#
+#  如果程序装在一个继承了 Low 完整性标记的目录里，Windows 会把
+#  进程降级到 Low。Low 进程不能写 Medium 级别的文件 —— 而 Electron
+#  启动时要写缓存、crashpad、用户数据，于是一启动就崩，且：
+#
+#    · 没有窗口
+#    · 没有托盘
+#    · 没有崩溃日志（写日志本身就失败了）
+#
+#  ## 为什么只修 exe 不够（关键）
+#
+#  第一版只对 exe 执行 `icacls /setintegritylevel M`，结果还是打不开。
+#
+#  原因：**目录的完整性标记会传递给从它启动的进程**。
+#  exe 是 Medium 了，但它所在的目录还是 Low，进程仍然跑在 Low 下。
+#
+#  所以必须把**整条目录链**（从 exe 所在目录一直到盘符根）都提升到
+#  Medium —— 至少到 exe 的直接父目录。
+#
+#  ## 为什么不能只改 exe 的父目录
+#
+#  因为父目录的 Low 是从更上层继承来的。只改一层的话，下次有文件
+#  写进去（或者目录被重建）又会继承回 Low。
+#
+#  所以这里往上走到第一个「不是 Low」的目录为止。
+# ═══════════════════════════════════════════════════════════════════
 
-# Read only the mandatory integrity label; reading the audit SACL requires
-# privileges that an ordinary file owner does not need for this repair.
-if (-not ('DSHOutpostIntegrity' -as [type])) {
-    Add-Type -TypeDefinition @'
+function Get-IntegrityRid {
+    param([string]$Target)
+
+    if (-not ('DSHOutpostIntegrity' -as [type])) {
+        Add-Type -TypeDefinition @'
 using System;
 using System.ComponentModel;
 using System.Runtime.InteropServices;
@@ -60,13 +83,70 @@ public static class DSHOutpostIntegrity {
     }
 }
 '@
+    }
+
+    return [DSHOutpostIntegrity]::GetIntegrityRid($Target)
+}
+
+# 完整性 RID：0=Untrusted 4096=Low 8192=Medium 12288=High 16384=System
+function Test-IsLow {
+    param([int]$Rid)
+    return ($Rid -ge 0 -and $Rid -lt 8192)
+}
+
+function Get-LevelName {
+    param([int]$Rid)
+    if ($Rid -lt 0) { return 'none' }
+    if ($Rid -lt 4096) { return 'Untrusted' }
+    if ($Rid -lt 8192) { return 'Low' }
+    if ($Rid -lt 12288) { return 'Medium' }
+    return 'High+'
+}
+
+function Repair-Integrity {
+    param([string]$Target)
+
+    $rid = Get-IntegrityRid -Target $Target
+    $name = Get-LevelName -Rid $rid
+
+    if (-not (Test-IsLow -Rid $rid)) {
+        Write-Host "  [ok]   $name  $Target"
+        return $false
+    }
+
+    if ($WhatIf) {
+        Write-Host "  [low]  $name  $Target  (would repair)"
+        return $true
+    }
+
+    try {
+        $result = & "$env:SystemRoot\System32\icacls.exe" $Target /setintegritylevel M 2>&1
+        if ($LASTEXITCODE -ne 0) {
+            Write-Host "  [fail] $name  $Target"
+            Write-Host "         icacls: $($result -join ' ')"
+            return $false
+        }
+        $after = Get-IntegrityRid -Target $Target
+        $afterName = Get-LevelName -Rid $after
+        if (Test-IsLow -Rid $after) {
+            Write-Host "  [fail] $name -> $afterName  $Target  (still low)"
+            return $false
+        }
+        Write-Host "  [fixed] $name -> $afterName  $Target"
+        return $true
+    } catch {
+        Write-Host "  [fail] $name  $Target"
+        Write-Host "         $($_.Exception.Message)"
+        return $false
+    }
 }
 
 try {
     if (-not $Path) {
+        $here = $PSScriptRoot
         foreach ($candidate in @(
-            (Join-Path $PSScriptRoot 'win-unpacked\DSH Outpost.exe'),
-            (Join-Path $PSScriptRoot 'DSH Outpost.exe')
+            (Join-Path $here 'win-unpacked\DSH Outpost.exe'),
+            (Join-Path $here 'DSH Outpost.exe')
         )) {
             if (Test-Path -LiteralPath $candidate -PathType Leaf) {
                 $Path = $candidate
@@ -74,58 +154,75 @@ try {
             }
         }
     }
-    if (-not $Path) { throw 'Cannot find DSH Outpost.exe. Specify -Path to its executable.' }
-    $target = (Get-Item -LiteralPath $Path -Force).FullName
-    if (-not (Test-Path -LiteralPath $target -PathType Leaf) -or
-        [System.IO.Path]::GetExtension($target) -ine '.exe') {
-        throw 'The target must be one existing .exe file.'
+    if (-not $Path) {
+        throw 'Cannot find DSH Outpost.exe. Pass -Path to its location.'
     }
 
-    $rid = [DSHOutpostIntegrity]::GetIntegrityRid($target)
-    if ($rid -lt 0 -or $rid -ge 8192) {
-        Write-Output "[OK] Executable integrity is already suitable: $target"
-        exit 0
+    $exe = (Get-Item -LiteralPath $Path -Force).FullName
+    if (-not (Test-Path -LiteralPath $exe -PathType Leaf) -or
+        [System.IO.Path]::GetExtension($exe) -ine '.exe') {
+        throw "Not an .exe file: $exe"
     }
 
-    $originalAcl = Get-Acl -LiteralPath $target
-    $currentUser = [System.Security.Principal.WindowsIdentity]::GetCurrent().User
-    if ($originalAcl.GetOwner([System.Security.Principal.SecurityIdentifier]).Value -ne $currentUser.Value) {
-        throw 'The current user must own this executable. Run this repair as its owner.'
+    Write-Host 'Repairing Windows integrity labels'
+    Write-Host ''
+
+    $fixedCount = 0
+
+    # 1. exe 本身
+    if (Repair-Integrity -Target $exe) { $fixedCount++ }
+
+    # 2. 往上遍历目录链，直到遇到不是 Low 的目录为止。
+    #
+    # 为什么要往上走：Low 是「继承」来的，只改 exe 的父目录，
+    # 下次目录重建/文件写入还是会继承回 Low。
+    # 走到盘符根或者遇到第一个非 Low 的目录就停。
+    $dir = Split-Path -Parent $exe
+    $guard = 0
+    while ($dir -and $guard -lt 12) {
+        $guard++
+
+        # 到盘符根（D:\ 这种）就停 —— 不要改盘根
+        if ($dir -match '^[A-Za-z]:\\?$') {
+            Write-Host "  [skip] drive root  $dir"
+            break
+        }
+
+        $dirRid = Get-IntegrityRid -Target $dir
+        if (-not (Test-IsLow -Rid $dirRid)) {
+            Write-Host "  [stop] $(Get-LevelName -Rid $dirRid)  $dir  (already fine, stop walking up)"
+            break
+        }
+
+        if (Repair-Integrity -Target $dir) { $fixedCount++ }
+
+        $parent = Split-Path -Parent $dir
+        if ($parent -eq $dir) { break }
+        $dir = $parent
     }
-    $accessSection = [System.Security.AccessControl.AccessControlSections]::Access
-    $originalDacl = $originalAcl.GetSecurityDescriptorSddlForm($accessSection)
-    $temporaryAcl = Get-Acl -LiteralPath $target
-    $temporaryRule = [System.Security.AccessControl.FileSystemAccessRule]::new(
-        $currentUser,
-        [System.Security.AccessControl.FileSystemRights]::TakeOwnership,
-        [System.Security.AccessControl.InheritanceFlags]::None,
-        [System.Security.AccessControl.PropagationFlags]::None,
-        [System.Security.AccessControl.AccessControlType]::Allow
-    )
-    $temporaryAcl.AddAccessRule($temporaryRule)
-    $restoreRequired = $false
-    try {
-        $restoreRequired = $true
-        Set-Acl -LiteralPath $target -AclObject $temporaryAcl
-        $result = & "$env:SystemRoot\System32\icacls.exe" $target /setintegritylevel M 2>&1
-        if ($LASTEXITCODE -ne 0) {
-            throw "Could not set executable integrity to Medium: $($result -join ' ')"
-        }
-        $repairedRid = [DSHOutpostIntegrity]::GetIntegrityRid($target)
-        if ($repairedRid -ge 0 -and $repairedRid -lt 8192) {
-            throw 'The executable still has a Low integrity label after repair.'
-        }
-    } finally {
-        if ($restoreRequired) {
-            # Restore only the exact original DACL, preserving the new label.
-            $restoredAcl = Get-Acl -LiteralPath $target
-            $restoredAcl.SetSecurityDescriptorSddlForm($originalDacl, $accessSection)
-            Set-Acl -LiteralPath $target -AclObject $restoredAcl
+
+    # 3. -Recurse：把目录里所有文件也修一遍。
+    #
+    # 打包出来的目录里有几十个 dll / pak / dat，它们各自也可能带着
+    # Low 标记。Electron 加载 dll 时如果遇到 Low 依赖，同样会出问题。
+    if ($Recurse) {
+        Write-Host ''
+        Write-Host 'Repairing files inside the folder'
+        $folder = Split-Path -Parent $exe
+        $items = Get-ChildItem -LiteralPath $folder -Recurse -File -Force -ErrorAction SilentlyContinue
+        foreach ($item in $items) {
+            if (Repair-Integrity -Target $item.FullName) { $fixedCount++ }
         }
     }
-    Write-Output "[OK] Repaired Low integrity on this executable: $target"
+
+    Write-Host ''
+    if ($fixedCount -eq 0) {
+        Write-Host '[OK] Nothing to repair - integrity labels are already correct.'
+    } else {
+        Write-Host "[OK] Repaired $fixedCount item(s)."
+    }
     exit 0
 } catch {
-    Write-Output "[ERROR] Startup repair failed: $($_.Exception.Message)"
+    Write-Host "[ERROR] $($_.Exception.Message)"
     exit 1
 }

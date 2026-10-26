@@ -569,11 +569,23 @@ ipcMain.handle('status:get', async () => {
   const lanIp = primaryLanIp();
   const port = pairing?.port || 3095;
   const token = pairing?.token || '';
+
+  // 自己探一次端口 —— 不依赖隧道服务的判断。
+  //
+  // 隧道服务那边原来用 PowerShell 查端口，慢且会超时，导致
+  // 「DSH 明明在跑」被报成「服务未启动」。这里用 net 直接探，
+  // 毫秒级且可信。两个结果都带上，renderer 优先用自己的这个。
+  const portListening = await probePort(port);
+
   return {
     ...status,
     pairing,
     tunnelInfo,
     lanIp,
+    /** 我们自己探测的结果（比隧道服务的更可靠） */
+    portListening,
+    /** DSH 是否在跑：优先用本进程的探测 */
+    dshRunning: portListening || status?.dshRunning === true,
     // 现算的局域网二维码内容（pairing.json 里的可能是旧 IP）
     lanUrl: token && lanIp ? `http://${lanIp}:${port}/?token=${token}` : pairing?.url || '',
     pairUrl: token && lanIp ? `http://${lanIp}:${port}/?token=${token}` : pairing?.url || '',
@@ -584,6 +596,153 @@ ipcMain.handle('status:get', async () => {
 ipcMain.handle('tunnel:action', async (_e, action) => {
   if (!['start', 'stop', 'repair'].includes(action)) return { ok: false, error: 'bad action' };
   return tunnelAction(action);
+});
+
+// ── DSH 服务本身的启停 ────────────────────────────────────────────
+//
+// 为什么桌面助手要管这个：用户打开面板最常见的情形就是「手机连不上」，
+// 而相当一部分是 DSH 服务压根没开。让人再去开一个终端跑脚本太绕了。
+//
+// 复用仓库里现成的 start-dsh-web.ps1 —— 那里面已经处理了：
+//   · 端口占用
+//   · token 生成与日志位置
+//   · 绑定地址选择
+//   · 前台/后台模式
+// 不在主进程里重写一遍，行为才不会分叉。
+
+/** 定位启动脚本 */
+function findStartScript() {
+  const candidates = [
+    // 打包后 extraResources 拷过来的
+    process.resourcesPath ? path.join(process.resourcesPath, 'start-dsh-web.ps1') : '',
+    // 开发时：仓库根
+    path.join(REPO_ROOT, 'start-dsh-web.ps1'),
+    path.join(__dirname, '..', '..', '..', 'start-dsh-web.ps1'),
+  ].filter(Boolean);
+  for (const p of candidates) {
+    if (fs.existsSync(p)) return p;
+  }
+  return '';
+}
+
+/** 探测 DSH 端口是否在监听（毫秒级，不用 PowerShell） */
+function probePort(port, host = '127.0.0.1', timeoutMs = 500) {
+  return new Promise((resolve) => {
+    const socket = new (require('node:net').Socket)();
+    let settled = false;
+    const finish = (ok) => {
+      if (settled) return;
+      settled = true;
+      socket.destroy();
+      resolve(ok);
+    };
+    socket.setTimeout(timeoutMs);
+    socket.once('connect', () => finish(true));
+    socket.once('timeout', () => finish(false));
+    socket.once('error', () => finish(false));
+    try {
+      socket.connect(port, host);
+    } catch {
+      finish(false);
+    }
+  });
+}
+
+ipcMain.handle('dsh:action', async (_e, action) => {
+  if (!['start', 'stop'].includes(action)) return { ok: false, error: 'bad action' };
+
+  const pairing = readPairing();
+  const port = pairing?.port || 3095;
+
+  // 已在跑就不再启动，避免端口冲突
+  if (action === 'start') {
+    if (await probePort(port)) {
+      return { ok: true, already: true, message: 'DSH 已经在运行了' };
+    }
+  }
+
+  if (action === 'stop') {
+    // 停止只能杀进程 —— 我们没有 DSH 的优雅关闭通道。
+    // 只杀监听那个端口的进程，按 PID 精确处理，不按名字批量杀。
+    try {
+      const { execFile } = require('node:child_process');
+      const pids = await new Promise((resolve) => {
+        execFile(
+          'powershell.exe',
+          [
+            '-NoProfile',
+            '-Command',
+            `(Get-NetTCPConnection -LocalPort ${port} -State Listen -ErrorAction SilentlyContinue).OwningProcess | Sort-Object -Unique`,
+          ],
+          { timeout: 15000, windowsHide: true },
+          (err, stdout) => resolve(err ? [] : String(stdout).trim().split(/\s+/).filter(Boolean)),
+        );
+      });
+      if (pids.length === 0) return { ok: true, already: true, message: 'DSH 本来就没在跑' };
+      for (const pid of pids) {
+        try {
+          process.kill(Number(pid), 'SIGTERM');
+        } catch {
+          try {
+            const { execFileSync } = require('node:child_process');
+            execFileSync('taskkill', ['/PID', pid, '/T', '/F'], { stdio: 'ignore', windowsHide: true });
+          } catch {
+            /* 杀不掉就算了，下面会如实返回 */
+          }
+        }
+      }
+      // 等端口释放（最多 5 秒）
+      for (let i = 0; i < 25; i += 1) {
+        await new Promise((r) => setTimeout(r, 200));
+        if (!(await probePort(port))) {
+          return { ok: true, message: `已停止（PID ${pids.join(', ')}）` };
+        }
+      }
+      return { ok: false, error: `端口 ${port} 仍被占用，可能需要在任务管理器里手动结束` };
+    } catch (e) {
+      return { ok: false, error: e instanceof Error ? e.message : String(e) };
+    }
+  }
+
+  // 启动：跑 start-dsh-web.ps1
+  const script = findStartScript();
+  if (!script) {
+    return {
+      ok: false,
+      error: '找不到 start-dsh-web.ps1。请确认它和 exe 在同一目录，或仓库根目录存在。',
+    };
+  }
+
+  try {
+    const { spawn } = require('node:child_process');
+    // 用 PowerShell 起脚本。stdio ignore：脚本自己会写日志，
+    // 而且它会 fork 出 dsh 进程（不能等它退出）。
+    const child = spawn(
+      'powershell.exe',
+      ['-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', script, '-Port', String(port)],
+      {
+        cwd: path.dirname(script),
+        detached: true,
+        stdio: 'ignore',
+        windowsHide: true,
+      },
+    );
+    child.unref();
+
+    // 等端口起来（最多 90 秒 —— DSH 启动确实要一会儿）
+    for (let i = 0; i < 90; i += 1) {
+      await new Promise((r) => setTimeout(r, 1000));
+      if (await probePort(port)) {
+        return { ok: true, message: `DSH 已启动（端口 ${port}）` };
+      }
+    }
+    return {
+      ok: false,
+      error: `等了 90 秒还没起来。看看日志：%TEMP%\\dsh-web-${port}.log`,
+    };
+  } catch (e) {
+    return { ok: false, error: e instanceof Error ? e.message : String(e) };
+  }
 });
 
 ipcMain.handle('devices:list', async () => {

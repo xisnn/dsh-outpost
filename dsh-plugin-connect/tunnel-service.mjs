@@ -19,6 +19,7 @@
  */
 
 import http from 'node:http';
+import net from 'node:net';
 import os from 'node:os';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -129,23 +130,64 @@ function primaryLanIp() {
   return (priv || cands[0] || {}).ip || '';
 }
 
-/** DSH 当前绑在哪个地址上（查询端口监听） */
+/**
+ * DSH 是否在监听（以及绑在哪个地址）。
+ *
+ * ## 为什么改了实现
+ *
+ * 原来用 `execFileAsync('powershell.exe', ...)` 跑 Get-NetTCPConnection。
+ * 每次要启动一个 PowerShell 进程 —— 实测 1~3 秒，8 秒超时下经常超时返回空，
+ * 于是桌面助手把「DSH 明明在跑」误报成「服务未启动」。
+ *
+ * 现在直接用 Node 的 net 模块探 TCP：毫秒级，不依赖外部进程。
+ *
+ * ## 怎么判断「绑在哪个地址」
+ *
+ * 依次尝试 0.0.0.0（绑所有网卡）、局域网 IP、127.0.0.1。
+ * 第一个连得上的，就是 DSH 在监听的形态。
+ */
 async function dshListenIp() {
-  try {
-    const { stdout } = await execFileAsync(
-      'powershell.exe',
-      [
-        '-NoProfile',
-        '-Command',
-        `(Get-NetTCPConnection -LocalPort ${DSH_PORT} -State Listen -ErrorAction SilentlyContinue | Select-Object -First 1).LocalAddress`,
-      ],
-      { timeout: 8000, windowsHide: true },
-    );
-    const ip = stdout.trim();
-    return /^\d+\.\d+\.\d+\.\d+$/.test(ip) ? ip : '';
-  } catch {
-    return '';
+  const candidates = [
+    // DSH 默认绑 0.0.0.0（所有网卡）—— 这时用局域网 IP 连它
+    { host: primaryLanIp(), reported: primaryLanIp() },
+    // 可能只绑了回环
+    { host: '127.0.0.1', reported: '127.0.0.1' },
+  ].filter((c) => c.host);
+
+  for (const c of candidates) {
+    if (await canConnect(c.host, DSH_PORT, 600)) {
+      return c.reported;
+    }
   }
+  return '';
+}
+
+/**
+ * TCP 连通性探测。
+ *
+ * 超时给 600ms —— 本机回环/局域网，正常都是几毫秒。
+ * 超时短是为了不拖慢整体状态查询（面板每 5 秒刷一次）。
+ */
+function canConnect(host, port, timeoutMs) {
+  return new Promise((resolve) => {
+    const socket = new net.Socket();
+    let settled = false;
+    const finish = (ok) => {
+      if (settled) return;
+      settled = true;
+      socket.destroy();
+      resolve(ok);
+    };
+    socket.setTimeout(timeoutMs);
+    socket.once('connect', () => finish(true));
+    socket.once('timeout', () => finish(false));
+    socket.once('error', () => finish(false));
+    try {
+      socket.connect(port, host);
+    } catch {
+      finish(false);
+    }
+  });
 }
 
 /**
