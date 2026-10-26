@@ -717,9 +717,28 @@ ipcMain.handle('dsh:action', async (_e, action) => {
     const { spawn } = require('node:child_process');
     // 用 PowerShell 起脚本。stdio ignore：脚本自己会写日志，
     // 而且它会 fork 出 dsh 进程（不能等它退出）。
+    //
+    // 参数说明：
+    //   -Port     沿用 pairing.json 里的端口，保证二维码/已配对手机仍然有效
+    //   -Bind lan 强制绑局域网
+    //
+    // 为什么不用默认的 -Bind auto：auto 在装了 Tailscale 时会优先选
+    // tailnet IP。但桌面助手面板上展示的是局域网二维码，两者不一致
+    // 会让用户困惑（扫局域网码连到 tailnet 地址上，还得等 Tailscale 通）。
+    // 这个面板本身就是局域网场景，明确绑 lan 更符合预期。
     const child = spawn(
       'powershell.exe',
-      ['-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', script, '-Port', String(port)],
+      [
+        '-NoProfile',
+        '-ExecutionPolicy',
+        'Bypass',
+        '-File',
+        script,
+        '-Port',
+        String(port),
+        '-Bind',
+        'lan',
+      ],
       {
         cwd: path.dirname(script),
         detached: true,

@@ -31,6 +31,10 @@
     {
       "from": "../dsh-plugin-connect/tunnel-service.mjs",
       "to": "tunnel-service.mjs"
+    },
+    {
+      "from": "../start-dsh-web.ps1",
+      "to": "start-dsh-web.ps1"
     }
   ],
   "win": {
