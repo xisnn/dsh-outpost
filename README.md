@@ -58,6 +58,15 @@
 - 需要授权时手机弹出横幅，直接点「拒绝」/「允许一次」
 - 审批到达时推送通知 + 震动
 - 「我的 → 连接 → 审批通道」能看到连接状态和失败原因
+- **断网恢复后自动重连**，不需要重开 App
+
+### 凭据与设备管理
+
+- 凭据存在**系统级加密存储**（Android Keystore / iOS Keychain），不是明文
+- 「断开连接」和「退出并清除所有授权」是两个独立操作 ——
+  前者保留凭据下次自动恢复，后者彻底清除并**通知电脑撤销本设备**
+- **设备管理页**：列出所有配过对的手机（在线状态、最后活跃时间），
+  可以撤销任何一台。手机丢了、旧手机卖掉前，在这里把它踢掉
 
 ### 通知
 
@@ -295,6 +304,17 @@ https://xxx.trycloudflare ─┘
 - App 会**拒绝用明文 HTTP 连接公网地址**（只放行私有网段和 localhost）。
   公网访问请用 https（Cloudflare 隧道）或 Tailscale。
 
+### 凭据怎么保护的
+
+- **存在系统级加密存储里**（Android Keystore / iOS Keychain），不是明文。
+  仅本机、解锁后可读。
+- **两个操作分开了**：
+  - 「断开连接」—— 收起会话，凭据留着，下次自动恢复
+  - 「退出并清除所有授权」—— Cookie + 网关凭据 + 关联状态全清，
+    **同时通知电脑撤销这台设备**，不可恢复
+- **设备管理页**（我的 → 设备管理）能看到所有配过对的手机、撤销任何一台。
+  手机丢了或者旧手机卖掉前，在这里处理。
+
 > 完整的威胁模型、明文 HTTP 的取舍、token 保护措施见
 > [docs/security.md](docs/security.md)。
 
@@ -347,8 +367,8 @@ https://xxx.trycloudflare ─┘
 # 手机端
 cd dsh-mobile
 npm install
-npm test                  # 420 项静态检查 + 单测 + typecheck
-npm run test:integration  # 55 项集成测试（本地起模拟 DSH，不需要真服务）
+npm test                  # 770 项静态检查 + 单测 + typecheck
+npm run test:integration  # 61 项集成测试（本地起模拟 DSH，不需要真服务）
 npm run android           # 需要 Android SDK + JDK 21
 
 # 桌面端
@@ -363,7 +383,7 @@ npm run pack              # 打包成 zip
 
 | 层 | 数量 | 依赖 | 测什么 |
 |---|---|---|---|
-| **静态检查 + 单测** | 420 | 无 | 纯函数行为、配置正确性、危险写法 |
+| **静态检查 + 单测** | 770 | 无 | 纯函数行为、配置正确性、危险写法 |
 | **协议集成** | 39 | 本地端口 | 手搓请求，验证协议形状 |
 | **产品集成** | 16 | 本地端口 | **import 真实产品代码**，验证它能不能正确对接 |
 | **端到端** | 手工 | 真实 DSH | 完整链路 |
@@ -388,7 +408,7 @@ npm run pack              # 打包成 zip
 
 - 应用代码在 [`dsh-mobile/`](dsh-mobile/)，架构与实现细节见 [dsh-mobile/README.md](dsh-mobile/README.md)
 - DSH 内部协议（RPC 形状、投影字段、踩过的坑）见 [docs/protocol-notes.md](docs/protocol-notes.md)
-- **真机验证清单**（106 项 + 12 项快速回归）见 [docs/device-checklist.md](docs/device-checklist.md)
+- **真机验证清单**（124 项 + 16 项快速回归）见 [docs/device-checklist.md](docs/device-checklist.md)
 
 ### 目录
 
@@ -401,7 +421,7 @@ npm run pack              # 打包成 zip
 │   │   ├── screens/         # 页面
 │   │   ├── components/      # 组件
 │   │   └── design/          # 主题 token
-│   └── tests/               # Node 单测（420 项）
+│   └── tests/               # Node 单测（770 项）
 ├── dsh-outpost-desktop/     # Windows 桌面助手（Electron 托盘程序）
 ├── dsh-plugin-connect/      # 隧道服务 + 旧版网页插件
 ├── docs/                    # 协议笔记、安全模型、真机验证清单、截图
@@ -414,13 +434,20 @@ npm run pack              # 打包成 zip
 
 ## 版本
 
-当前 **v0.16.2**。完整变更见 [Releases](../../releases)。
+当前 **v0.16.3** —— 这是**预发布版**：自动化测试已通过，但**尚待真实手机验收**。
+完整变更见 [Releases](../../releases)。
+
+> 想要稳定版就装 **v0.16.2**；愿意帮忙测新功能就用 v0.16.3。
 
 最近的几个版本：
 
 | 版本 | 内容 |
 |---|---|
-| **v0.15.8** | **修复桌面助手无法启动** —— 根因是打包目录继承了 Windows「低完整性」标记 |
+| **v0.16.3** | 撤销状态持久化、清除授权的 fail-open 修复、CI 签名门禁强化 |
+| v0.16.2 | 设备管理页：查看所有已配对设备、撤销任意设备 |
+| v0.16.1 | 清除授权时同时**撤销服务端设备**（不只清本地） |
+| v0.16.0 | **凭据迁进 Android Keystore** + 断网不再误清 token |
+| v0.15.8 | **修复桌面助手无法启动** —— 根因是打包目录继承了 Windows「低完整性」标记 |
 | v0.15.7 | 桌面助手 bat 脚本改纯 ASCII（修 GBK 乱码）+ 自动清除 `ELECTRON_RUN_AS_NODE` |
 | v0.15.6 | 桌面助手启动诊断：崩溃日志多路径兜底、诊断脚本 |
 | v0.15.5 | 桌面助手包体积减半（260 → 112 MB）+ 分卷下载 |
