@@ -103,6 +103,24 @@ function nextRpcId(): string {
   return `r${Date.now().toString(36)}-${rpcCounter}`;
 }
 
+/**
+ * HTTP RPC 的默认超时。
+ *
+ * 为什么需要：之前完全没有超时。网络半死不活时（信号弱、切网、
+ * 服务端卡住），fetch 会永久挂起 —— 不报错、不返回、不重试。
+ * 用户看到的是「一直转圈」「连接状态卡在检测中」「发消息没反应」，
+ * 只能杀 App 重进。
+ *
+ * 30 秒的取值：
+ *   · 普通 RPC（列会话、发消息）正常 1 秒内返回，30 秒足够宽松
+ *   · 长会话分页可能要久一些，调用方可以用 __timeoutMs 覆盖
+ *   · 不能太长 —— 用户等 30 秒已经很难受了，再久不如早点报错重试
+ */
+const RPC_TIMEOUT_MS = 30_000;
+
+/** 探测类接口（ping / 兼容性检查）用更短的超时，避免拖住界面 */
+export const PROBE_TIMEOUT_MS = 8_000;
+
 /** 从 Set-Cookie 里提取 cookie 键值对（不含属性） */
 export function extractCookie(setCookieHeaders: string[] | null): string | undefined {
   if (!setCookieHeaders?.length) return undefined;
@@ -233,12 +251,24 @@ export class DshConnection {
   /** unary 调用：POST /api/<ns>/<method> */
   async call<T = unknown>(endpoint: string, args: Record<string, unknown>): Promise<T> {
     if (!this.cookie) throw new Error('not authenticated: call loginWithToken first');
+
+    // 超时控制。不同接口耗时差别大（列会话很快，长会话分页可能要久），
+    // 允许调用方通过 args.__timeoutMs 覆盖。
+    const override = Number(args.__timeoutMs ?? 0);
+    const timeoutMs = override > 0 ? override : RPC_TIMEOUT_MS;
+    // ⚠️ 必须把 __timeoutMs 从真实参数里摘掉，否则会被发给服务端，
+    // 有些接口对未知参数会直接报错。
+    const { __timeoutMs: _ignoredTimeout, ...realArgs } = args;
+    void _ignoredTimeout;
+
     const body: RpcEnvelope = {
       type: 'client-request',
       rpcId: nextRpcId(),
       method: endpoint,
-      payload: { args },
+      payload: { args: realArgs },
     };
+    const ctrl = new AbortController();
+    const timer = setTimeout(() => ctrl.abort(), timeoutMs);
     const url = `${this.baseUrl}/api/${endpoint}`;
     let res: Response;
     try {
@@ -249,10 +279,29 @@ export class DshConnection {
           Cookie: this.cookie,
         },
         body: JSON.stringify(body),
+        // ⚠️ 必须有超时。
+        //
+        // 之前没有 signal，一旦网络半死不活（信号弱、切网、服务端卡住），
+        // fetch 会**永久挂起** —— 不报错、不返回、也不重试。
+        // 表现就是：界面一直转圈、连接状态卡在「检测中」、发消息没反应。
+        // 手机关掉再开 WiFi 才恢复。
+        signal: ctrl.signal,
       });
+      clearTimeout(timer);
     } catch (e) {
+      clearTimeout(timer);
       const err = e as { name?: string; message?: string };
       if (__DEV__) console.log('[transport] fetch failed', url, err?.name, err?.message);
+      // 超时单独给一条提示：和「连不上」不是一回事，
+      // 用户能做的事也不同（等一下再试 vs 检查地址/网络）。
+      if (err?.name === 'AbortError') {
+        throw makeRpcError(
+          endpoint,
+          'network',
+          `请求超时（${Math.round(timeoutMs / 1000)} 秒无响应）`,
+          e,
+        );
+      }
       // 网络层的错误统一包一层可操作提示 —— 用户看到
       // 「Network request failed」是不知道该怎么做的。
       throw makeRpcError(endpoint, 'network', `${err?.name ?? ''}: ${err?.message ?? ''}`.trim(), e);
