@@ -224,6 +224,104 @@ check('打包配置了 electronDist（复用本地 Electron）', () => {
   return yml.includes('electronDist') ? true : '会去在线下载 Electron，容易失败';
 });
 
+// ── DSH 服务启停（用户要求「一键启动服务」）─────────────────────
+
+const preload = readFileSync('src/main/preload.js', 'utf8');
+const rendererApp = readFileSync('src/renderer/app.js', 'utf8');
+const rendererHtml = readFileSync('src/renderer/index.html', 'utf8');
+const tunnelSvc = readFileSync('../dsh-plugin-connect/tunnel-service.mjs', 'utf8');
+
+check('主进程有 dsh:action 处理器', () =>
+  MAIN.includes("ipcMain.handle('dsh:action'") ? true : '没有启动/停止 DSH 的能力',
+);
+
+check('dsh:action 校验 action 白名单', () => {
+  const i = MAIN.indexOf("ipcMain.handle('dsh:action'");
+  if (i < 0) return '找不到处理器';
+  const body = MAIN.slice(i, i + 400);
+  return /includes\(action\)/.test(body) ? true : 'action 没做白名单校验';
+});
+
+check('启动 DSH 复用仓库脚本，不重写逻辑', () =>
+  MAIN.includes('start-dsh-web.ps1') ? true : '自己实现了一遍启动逻辑，行为会和脚本分叉',
+);
+
+check('启动前先探测端口，避免重复启动', () => {
+  const i = MAIN.indexOf("if (action === 'start')");
+  if (i < 0) return '找不到 start 分支';
+  const body = MAIN.slice(i, i + 400);
+  return body.includes('probePort') ? true : '不检查端口就启动，容易冲突';
+});
+
+check('停止只杀监听该端口的进程（不按名字批量杀）', () => {
+  const i = MAIN.indexOf("if (action === 'stop')");
+  if (i < 0) return '找不到 stop 分支';
+  const body = MAIN.slice(i, i + 900);
+  if (/taskkill[\s\S]{0,80}\/IM/.test(body)) return '按映像名批量杀，会误伤别的 DSH 实例';
+  return body.includes('OwningProcess') ? true : '没有按 PID 精确定位';
+});
+
+check('主进程用 net 探端口（不用 PowerShell）', () => {
+  if (!MAIN.includes('function probePort')) return '没有 probePort';
+  // 端口探测不能用外部进程 —— 会慢且超时
+  const i = MAIN.indexOf('function probePort');
+  const body = MAIN.slice(i, i + 700);
+  return /require\('node:net'\)|from 'node:net'/.test(body) ? true : '还在用外部进程查端口';
+});
+
+check('status:get 带上自己探测的 portListening', () => {
+  const i = MAIN.indexOf("ipcMain.handle('status:get'");
+  if (i < 0) return '找不到';
+  const body = MAIN.slice(i, i + 900);
+  return body.includes('portListening') ? true : '状态里没带实时探测结果';
+});
+
+check('preload 暴露 dsh(action)', () =>
+  preload.includes('dsh:') && preload.includes("'dsh:action'")
+    ? true
+    : '渲染层拿不到启停能力',
+);
+
+check('界面有启动/停止按钮', () => {
+  if (!rendererHtml.includes('btnStartDsh')) return '没有启动按钮';
+  return rendererHtml.includes('btnStopDsh') ? true : '没有停止按钮';
+});
+
+check('按钮状态跟随服务状态（没跑时启动最显眼）', () => {
+  if (!rendererApp.includes('syncServiceButtons')) return '没有状态同步';
+  const i = rendererApp.indexOf('function syncServiceButtons');
+  const body = rendererApp.slice(i, i + 700);
+  if (!/start\.disabled\s*=\s*running/.test(body)) return '启动按钮没跟着禁用';
+  return /start\.className\s*=/.test(body) ? true : '启动按钮没做视觉强调';
+});
+
+check('渲染层优先用 portListening 判断（不用隧道服务的旧值）', () => {
+  const i = rendererApp.indexOf('const dshOk');
+  if (i < 0) return '找不到 dshOk';
+  const body = rendererApp.slice(i, i + 400);
+  return body.includes('portListening') ? true : '还在依赖隧道服务的 dshRunning（会误报）';
+});
+
+// ── 隧道服务的端口检测改法 ──────────────────────────────────────
+
+check('隧道服务用 net 探端口（不再 execFile PowerShell）', () => {
+  const i = tunnelSvc.indexOf('async function dshListenIp');
+  if (i < 0) return '找不到 dshListenIp';
+  const body = tunnelSvc.slice(i, i + 900);
+  if (/execFileAsync\(\s*'powershell\.exe'/.test(body)) {
+    return '还在用 PowerShell 查端口 —— 1-3 秒且会超时，导致误报「未启动」';
+  }
+  return body.includes('canConnect') ? true : '没有用 TCP 探测';
+});
+
+check('隧道服务的端口探测有超时保护', () => {
+  const i = tunnelSvc.indexOf('function canConnect');
+  if (i < 0) return '找不到 canConnect';
+  const body = tunnelSvc.slice(i, i + 800);
+  return /setTimeout\(/.test(body) ? true : '没有超时，可能挂住';
+});
+
+
 // ── 实际文件存在性 ──────────────────────────────────────────────
 check('托盘图标存在', () =>
   existsSync('assets/tray.png') ? true : '缺 assets/tray.png，托盘会没图标',
