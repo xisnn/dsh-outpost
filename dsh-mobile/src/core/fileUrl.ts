@@ -140,6 +140,46 @@ export function mimeOf(name: string): string {
       return 'image/webp';
     case 'txt':
       return 'text/plain';
+    // 下面这些之前落到 application/octet-stream —— 保存到手机后
+    // 系统不知道用什么打开，文件管理器里点它会提示「无法打开」。
+    case 'md':
+    case 'markdown':
+      return 'text/markdown';
+    case 'csv':
+      return 'text/csv';
+    case 'json':
+      return 'application/json';
+    case 'html':
+    case 'htm':
+      return 'text/html';
+    case 'xml':
+      return 'text/xml';
+    case 'log':
+      return 'text/plain';
+    case 'svg':
+      return 'image/svg+xml';
+    case 'bmp':
+      return 'image/bmp';
+    case 'heic':
+      return 'image/heic';
+    case 'mp3':
+      return 'audio/mpeg';
+    case 'wav':
+      return 'audio/wav';
+    case 'mp4':
+      return 'video/mp4';
+    case 'mov':
+      return 'video/quicktime';
+    case 'apk':
+      return 'application/vnd.android.package-archive';
+    case 'rar':
+      return 'application/vnd.rar';
+    case '7z':
+      return 'application/x-7z-compressed';
+    case 'tar':
+      return 'application/x-tar';
+    case 'gz':
+      return 'application/gzip';
     default:
       return 'application/octet-stream';
   }
