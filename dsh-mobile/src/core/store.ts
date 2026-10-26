@@ -9,6 +9,7 @@
 
 import AsyncStorage from '@react-native-async-storage/async-storage';
 import type { DshConnection, StreamHandle } from '../core/transport';
+import { PROBE_TIMEOUT_MS } from '../core/transport';
 import { SessionApi, groupByWorkspace, readStatus } from '../core/rpc/session';
 import { ModelApi } from '../core/rpc/model';
 import { AccountApi, type BalanceResult } from '../core/rpc/account';
@@ -39,6 +40,14 @@ import type { AttachRef, AgentTeam, EventRecord, PromptPart, SessionAddress, Ses
 
 /** 待发送附件：本地显示用 ref + 真正发出去的 part */
 /** Promise 超时包装：超过 ms 就抛 Error('timeout') */
+/**
+ * emit 的节流窗口（毫秒）。
+ *
+ * 60ms ≈ 16fps，人眼已经看不出延迟，但比「每个 token 都渲染」
+ * 少了一个数量级的重渲染。具体取舍见 emit() 的注释。
+ */
+const EMIT_THROTTLE_MS = 60;
+
 function withTimeout<T>(p: Promise<T>, ms: number): Promise<T> {
   return Promise.race([
     p,
@@ -141,6 +150,10 @@ export class Store {
   private chats = new Map<string, ChatState>();
   private streams = new Map<string, { handle: StreamHandle; cursor: number; records: Map<number, EventRecord>; snapshot: unknown }>();
   private listeners = new Set<() => void>();
+  /** 节流窗口的定时器（null 表示当前不在窗口内） */
+  private emitTimer: ReturnType<typeof setTimeout> | null = null;
+  /** 窗口内是否有未通知的更新 */
+  private emitPending = false;
 
   /**
    * 本 app 创建的会话 id。
@@ -827,7 +840,52 @@ export class Store {
     return () => { this.listeners.delete(fn); };
   }
 
+  /**
+   * 通知所有订阅者重新渲染。
+   *
+   * ## 为什么必须节流
+   *
+   * 流式输出时，服务端每个 token 都会推一个事件，每个事件都会走到
+   * 这里。一次快速回复能推几百次 —— 每次都同步跑一遍所有订阅者，
+   * 等于让整个界面树每毫秒重渲染一次。
+   *
+   * 手机上这个开销非常大，表现出来就是：
+   *   · 文字一个一个往外蹦，不是流式滚动
+   *   · 界面卡顿、滚动掉帧
+   *   · 用户感觉「回消息很慢」—— 其实模型早就答完了，是渲染跟不上
+   *
+   * ## 节流策略
+   *
+   * 用「尾随节流」（trailing throttle）：第一次立刻发，之后在窗口内
+   * 合并，窗口结束时补发一次。
+   *
+   * 为什么不只用 requestAnimationFrame：文本更新不需要跟帧同步，
+   * 60ms 一次（约 16fps）人眼已经完全看不出延迟，但比每 token
+   * 一次少了整整一个数量级。
+   *
+   * 为什么不能只在窗口结束时发（纯 debounce）：那样在持续输出时
+   * 会一直不刷新，看起来像是卡住。
+   */
   private emit(): void {
+    // 第一次调用：立刻通知，保证交互即时响应
+    if (this.emitTimer === null) {
+      this.flushEmit();
+      this.emitTimer = setTimeout(() => {
+        this.emitTimer = null;
+        // 窗口内还有未发出的更新 → 补发一次
+        if (this.emitPending) {
+          this.emitPending = false;
+          this.emit();
+        }
+      }, EMIT_THROTTLE_MS);
+      return;
+    }
+    // 窗口内：标记待发，不再重复通知
+    this.emitPending = true;
+  }
+
+  /** 立刻同步通知所有订阅者 */
+  private flushEmit(): void {
     for (const fn of this.listeners) {
       try { fn(); } catch { /* 单个订阅者失败不影响其它 */ }
     }
@@ -852,7 +910,14 @@ export class Store {
 
   async ping(): Promise<boolean> {
     try {
-      await this.api.list();
+      // 探测用硬上限，不能等满 RPC 的 30 秒。
+      //
+      // 「我的 → 连接状态」每次进页面都会调这个。如果网络半死不活、
+      // 底层 fetch 又没超时，界面就一直停在「检测中…」——
+      // 用户看到的就是截图里那个样子。
+      //
+      // 8 秒没响应就当连不上：给用户明确结论，别让他干等。
+      await withTimeout(this.api.list(), PROBE_TIMEOUT_MS);
       this.connection = 'connected';
       this.connectionError = undefined;
       this.connectionHint = undefined;
