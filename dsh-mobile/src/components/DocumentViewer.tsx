@@ -34,6 +34,7 @@ import ReactNativeBlobUtil from 'react-native-blob-util';
 
 import { useTheme } from '../design/theme';
 import { MarkdownView } from './MarkdownView';
+import { FileActionSheet, type MoreAction } from './FileActionSheet';
 
 export { docKindOf, canPreviewInside } from '../core/docx';
 import { docKindOf, canPreviewInside, docxHtmlToBlocks, type DocxBlock } from '../core/docx';
@@ -51,17 +52,25 @@ export function DocumentViewer({
   visible,
   file,
   onClose,
+  onShare,
+  onSave,
 }: {
   visible: boolean;
   /** 本地缓存路径（file:// 前缀可有可无）+ 文件名 */
   file: { uri: string; name: string } | null;
   onClose: () => void;
+  /** 转发（交给系统分享面板）。不传则不显示该项 */
+  onShare?: () => void;
+  /** 保存到手机。不传则不显示该项 */
+  onSave?: () => void;
 }) {
   const tv = useTheme();
   const insets = useSafeAreaInsets();
   const styles = useMemo(() => makeStyles(tv), [tv]);
   const [state, setState] = useState<LoadState>({ phase: 'loading' });
   const [sheetIndex, setSheetIndex] = useState(0);
+  /** 右上角三点菜单是否打开 */
+  const [menuOpen, setMenuOpen] = useState(false);
 
   const kind = file ? docKindOf(file.name) : 'unsupported';
   const fsPath = file?.uri.replace(/^file:\/\//, '') ?? '';
@@ -153,6 +162,31 @@ export function DocumentViewer({
 
   const title = file.name;
 
+  // 三点菜单的内容。
+  // 只有父组件传了回调才显示对应项 —— 避免点了没反应。
+  const menuActions: MoreAction[] = [
+    ...(onShare
+      ? [
+          {
+            key: 'share',
+            label: '转发',
+            hint: '发给微信好友、邮件，或用别的应用打开',
+            icon: '↗',
+          },
+        ]
+      : []),
+    ...(onSave
+      ? [
+          {
+            key: 'save',
+            label: '保存到手机',
+            hint: '存进「下载」目录，文件管理器里能找到',
+            icon: '⤓',
+          },
+        ]
+      : []),
+  ];
+
   return (
     <Modal visible={visible} animationType="slide" onRequestClose={onClose}>
       <View style={styles.root}>
@@ -164,7 +198,14 @@ export function DocumentViewer({
           <Text style={styles.title} numberOfLines={1}>
             {title}
           </Text>
-          <View style={styles.backBtn} />
+          {/* 右上角三点：转发 / 保存到手机，和微信看文件一致 */}
+          <Pressable
+            onPress={() => setMenuOpen(true)}
+            hitSlop={12}
+            style={styles.moreBtn}
+          >
+            <Text style={styles.moreText}>⋯</Text>
+          </Pressable>
         </View>
 
         {/* 内容 */}
@@ -196,6 +237,18 @@ export function DocumentViewer({
           />
         )}
       </View>
+
+      {/* 三点菜单 */}
+      <FileActionSheet
+        visible={menuOpen}
+        title={title}
+        actions={menuActions}
+        onPick={(key) => {
+          if (key === 'share') onShare?.();
+          else if (key === 'save') onSave?.();
+        }}
+        onClose={() => setMenuOpen(false)}
+      />
     </Modal>
   );
 }
@@ -365,6 +418,16 @@ function makeStyles(tv: ReturnType<typeof useTheme>) {
     },
     backBtn: { width: 40, height: 40, alignItems: 'center', justifyContent: 'center' },
     backText: { fontSize: 30, color: C.accent, lineHeight: 34 },
+    // 右上角三点。用文字符号而不是图标库 —— 少一个依赖，
+    // 而且在各字号下都比图片图标清晰。
+    moreBtn: { width: 40, height: 40, alignItems: 'center', justifyContent: 'center' },
+    moreText: {
+      fontSize: 22,
+      color: C.accent,
+      lineHeight: 24,
+      // ⋯ 本身偏上，压一点让它视觉居中
+      marginTop: -6,
+    },
     title: {
       flex: 1,
       textAlign: 'center',

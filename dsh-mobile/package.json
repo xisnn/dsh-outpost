@@ -1,6 +1,6 @@
 {
   "name": "dsh-outpost",
-  "version": "0.16.5",
+  "version": "0.16.6",
   "private": true,
   "description": "DSH 原生移动客户端：工作区 / 会话 / 聊天",
   "scripts": {
@@ -39,6 +39,7 @@
     "test:revocation": "tsx tests/device-revocation-spec.mjs",
     "test:devices": "tsx tests/device-manager-spec.mjs",
     "test:perf": "tsx tests/timeout-throttle-spec.mjs && tsx tests/throttle-behavior-spec.mjs",
+    "test:filesave": "tsx tests/file-save-share-spec.mjs",
     "test:devicestate": "tsx tests/device-list-state-spec.mjs",
     "test:recovery": "tsx tests/gateway-recovery-spec.mjs",
     "test:secreview": "tsx tests/security-review-fixes-spec.mjs",

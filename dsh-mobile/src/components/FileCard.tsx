@@ -12,6 +12,7 @@
 import React, { useEffect, useMemo, useState } from 'react';
 import {
   ActivityIndicator,
+  Alert,
   Dimensions,
   Image,
   Pressable,
@@ -178,6 +179,46 @@ export function FileCard({
     // 真正需要的只有 baseUrl 和 cookie —— 用它们的值做依赖。
   }, [image, absPath, path, sessionId, fileBaseUrl, fileCookie, gatewayChannel]);
 
+  /**
+   * 转发：交给系统分享面板。
+   *
+   * 和「用系统应用打开」的区别：
+   *   · 转发 → ACTION_SEND，微信/邮件能收到这个文件
+   *   · 打开 → ACTION_VIEW，用某个 App 显示它
+   * 微信接收分享走的是前者，所以「转发」必须用 SEND。
+   */
+  const doShare = async (f: RemoteFile) => {
+    try {
+      const { shareFile } = await import('../core/fileSave');
+      const r = await shareFile(f.fsPath, f.name);
+      if (!r.ok) {
+        Alert.alert('转发失败', r.reason, [{ text: '好' }]);
+      }
+    } catch (e) {
+      Alert.alert('转发失败', e instanceof Error ? e.message : String(e), [{ text: '好' }]);
+    }
+  };
+
+  /**
+   * 保存到手机下载目录。
+   *
+   * 成功后告诉用户存哪了 —— 「已保存」这种提示等于没说，
+   * 用户还是要自己去找。
+   */
+  const doSave = async (f: RemoteFile) => {
+    try {
+      const { saveToDownloads } = await import('../core/fileSave');
+      const r = await saveToDownloads(f.fsPath, f.name);
+      Alert.alert(
+        r.ok ? '已保存' : '保存失败',
+        r.ok ? `已存到${r.where}，文件名：${f.name}` : r.reason,
+        [{ text: '好' }],
+      );
+    } catch (e) {
+      Alert.alert('保存失败', e instanceof Error ? e.message : String(e), [{ text: '好' }]);
+    }
+  };
+
   /** 用户点卡片：图片进全屏查看器，文档进内置查看器，其余交给系统 */
   const onPress = async () => {
     if (busy) return;
@@ -254,10 +295,17 @@ export function FileCard({
           )}
         </Pressable>
 
-        {/* 全屏看图：缩放 / 拖动 / 下滑关闭 */}
+        {/* 全屏看图：缩放 / 拖动 / 下滑关闭 / 长按保存 */}
         <ImageViewer
           visible={viewerOpen}
-          images={[{ uri: local.uri, caption: alt || name }]}
+          images={[
+            {
+              uri: local.uri,
+              caption: alt || name,
+              // 长按保存用：本地缓存路径 + 文件名
+              save: { fsPath: local.fsPath, name: local.name },
+            },
+          ]}
           onClose={() => setViewerOpen(false)}
         />
       </>
@@ -294,6 +342,14 @@ export function FileCard({
           visible={docOpen}
           file={docFile}
           onClose={() => setDocOpen(false)}
+          onShare={() => {
+            if (!local) return;
+            void doShare(local);
+          }}
+          onSave={() => {
+            if (!local) return;
+            void doSave(local);
+          }}
         />
       ) : null}
     </>

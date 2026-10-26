@@ -18,6 +18,7 @@
 
 import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import {
+  Alert,
   Animated,
   Dimensions,
   Image,
@@ -29,6 +30,8 @@ import {
   View,
 } from 'react-native';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
+
+import { saveImageToGallery } from '../core/fileSave';
 
 const SCREEN = Dimensions.get('window');
 
@@ -45,6 +48,18 @@ export interface ViewerImage {
   uri: string;
   /** 显示在底部的说明 */
   caption?: string;
+  /**
+   * 长按保存用的信息。
+   *
+   * 不传则长按无反应 —— 有些场景（比如网络图、没有本地文件）
+   * 存不了，与其点了报错不如不提供。
+   */
+  save?: {
+    /** 本地文件路径（不带 file://） */
+    fsPath: string;
+    /** 保存用的文件名（含扩展名） */
+    name: string;
+  };
 }
 
 export function ImageViewer({
@@ -52,11 +67,19 @@ export function ImageViewer({
   images,
   initialIndex = 0,
   onClose,
+  onLongPress,
 }: {
   visible: boolean;
   images: ViewerImage[];
   initialIndex?: number;
   onClose: () => void;
+  /**
+   * 长按图片的回调。不传则用内置的「保存到相册」。
+   *
+   * 内置逻辑放在这里而不是让调用方实现：长按保存是图片查看器的
+   * 标准操作，每个调用点都重写一遍容易漏掉错误处理。
+   */
+  onLongPress?: (image: ViewerImage) => void;
 }) {
   const insets = useSafeAreaInsets();
   const [index, setIndex] = useState(initialIndex);
@@ -188,6 +211,36 @@ export function ImageViewer({
     [pan, scale, onClose, goTo, index, reset],
   );
 
+  /**
+   * 长按：保存到相册（或交给调用方处理）。
+   *
+   * 为什么要给振动反馈：长按的成功感全靠这一下，没有的话用户
+   * 不确定自己按到了没有，会重复按。
+   */
+  const handleLongPress = useCallback(
+    (img: ViewerImage) => {
+      // 有自定义处理就交给它
+      if (onLongPress) {
+        onLongPress(img);
+        return;
+      }
+      // 内置：保存到相册
+      const target = img.save;
+      if (!target) return; // 没有本地路径，静默不做（比如网络图）
+      void (async () => {
+        const outcome = await saveImageToGallery(target.fsPath, target.name);
+        Alert.alert(
+          outcome.ok ? '已保存' : '保存失败',
+          outcome.ok
+            ? `图片已存到${outcome.where}，去相册里看看。`
+            : outcome.reason,
+          [{ text: '好' }],
+        );
+      })();
+    },
+    [onLongPress],
+  );
+
   /** 双击：1x ↔ 2.5x */
   const lastTap = useRef(0);
   const onTap = useCallback(() => {
@@ -251,7 +304,7 @@ export function ImageViewer({
               ],
             }}
           >
-            <Pressable onPress={onTap}>
+            <Pressable onPress={onTap} onLongPress={() => handleLongPress(current)}>
               <Image
                 source={{ uri: current.uri }}
                 style={styles.img}

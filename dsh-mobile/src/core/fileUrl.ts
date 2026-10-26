@@ -110,7 +110,7 @@ export async function openLocalFile(file: RemoteFile): Promise<void> {
   await ReactNativeBlobUtil.android.actionViewIntent(file.fsPath, mime);
 }
 
-function mimeOf(name: string): string {
+export function mimeOf(name: string): string {
   const ext = name.toLowerCase().split('.').pop() ?? '';
   switch (ext) {
     case 'pdf':
