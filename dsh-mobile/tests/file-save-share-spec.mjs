@@ -225,6 +225,32 @@ check('FileCard 给图片传了保存信息', () => {
   return true;
 });
 
+// ── mime 映射完整性 ────────────────────────────────────────────
+
+check('常见文件类型都有正确的 mime（否则保存后打不开）', () => {
+  const urlSrc = readFileSync('src/core/fileUrl.ts', 'utf8');
+  const i = urlSrc.indexOf('export function mimeOf');
+  if (i < 0) return '找不到 mimeOf';
+  const body = urlSrc.slice(i, i + 3000);
+
+  // 这些类型如果落到 application/octet-stream，保存到手机后
+  // 系统不知道用什么打开，文件管理器里点它会提示「无法打开」
+  const required = {
+    md: 'text/markdown',
+    csv: 'text/csv',
+    json: 'application/json',
+    svg: 'image/svg+xml',
+    mp4: 'video/mp4',
+    heic: 'image/heic',
+  };
+  const missing = [];
+  for (const [ext, mime] of Object.entries(required)) {
+    if (!body.includes(`case '${ext}'`)) missing.push(`${ext}（缺 case）`);
+    else if (!body.includes(mime)) missing.push(`${ext}（mime 不对）`);
+  }
+  return missing.length === 0 ? true : `缺 ${missing.join('、')}`;
+});
+
 console.log('');
 console.log(`结果：${pass} 通过，${fail} 失败`);
 process.exitCode = fail === 0 ? 0 : 1;
