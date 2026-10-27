@@ -35,6 +35,10 @@
     {
       "from": "../start-dsh-web.ps1",
       "to": "start-dsh-web.ps1"
+    },
+    {
+      "from": "../start-tunnel.ps1",
+      "to": "start-tunnel.ps1"
     }
   ],
   "win": {
