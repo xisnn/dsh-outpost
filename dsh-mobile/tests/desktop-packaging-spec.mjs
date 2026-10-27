@@ -62,6 +62,62 @@ check(
 check(existsSync(path.join(repo, 'start-tunnel.ps1')), '仓库里存在 start-tunnel.ps1');
 check(existsSync(path.join(repo, 'start-dsh-web.ps1')), '仓库里存在 start-dsh-web.ps1');
 
+console.log('');
+console.log('── 打包必须带上 start-dsh-web.ps1 运行时依赖的目录 ──');
+
+// ## 为什么这条必须测
+//
+// start-dsh-web.ps1 在 `$PSScriptRoot` 下找两样东西：
+//   · scripts\gateway-patch-gate.ps1   （网关认证门禁，缺了会拒绝启动）
+//   · patches\mobile-gateway-mgmt-auth\apply.mjs（门禁要调的检查脚本）
+//
+// 开发时它们在仓库根，路径拼得对；但 electron-builder 的 extraResources
+// 是**白名单**——没列进去的文件不会进包。
+//
+// 真实踩到：把门禁抽成 scripts/gateway-patch-gate.ps1 后没同步更新
+// extraResources，结果打包版 resources/ 里只有 4 个文件，没有 scripts/，
+// 于是 start-dsh-web.ps1 一启动就报「缺少模块」并 exit 1 ——
+// 打包版彻底无法启动。而且这个缺陷在源码测试里完全看不出来。
+check(
+  /"from":\s*"\.\.\/scripts"/.test(builder),
+  'extraResources 包含 scripts/ 目录（网关门禁模块）',
+);
+check(
+  /"from":\s*"\.\.\/patches"/.test(builder),
+  'extraResources 包含 patches/ 目录（apply.mjs 检查脚本）',
+);
+
+// 目录确实存在且包含关键文件
+{
+  const scriptsDir = path.join(repo, 'scripts');
+  const patchesDir = path.join(repo, 'patches');
+  check(existsSync(scriptsDir), '仓库里存在 scripts/ 目录');
+  check(existsSync(patchesDir), '仓库里存在 patches/ 目录');
+  check(
+    existsSync(path.join(scriptsDir, 'gateway-patch-gate.ps1')),
+    'scripts/gateway-patch-gate.ps1 存在',
+  );
+  check(
+    existsSync(path.join(patchesDir, 'mobile-gateway-mgmt-auth', 'apply.mjs')),
+    'patches/mobile-gateway-mgmt-auth/apply.mjs 存在',
+  );
+}
+
+// start-dsh-web.ps1 用到的每个 $PSScriptRoot 相对路径，都必须能在打包布局下命中
+{
+  const startSrc = read('start-dsh-web.ps1');
+  const required = [...startSrc.matchAll(/Join-Path \$PSScriptRoot '([^']+)'/g)].map((m) => m[1]);
+  // 归一化成相对仓库根的路径（替换反斜杠）
+  const needDirs = required.map((r) => r.split('\\')[0]);
+  const uniq = [...new Set(needDirs)];
+  check(uniq.length > 0, `start-dsh-web.ps1 声明了 ${uniq.length} 个运行时依赖目录`, uniq.join(', '));
+  // 每个依赖目录的第一级，要么是已经打包的单文件，要么必须是 extraResources 里的目录项
+  for (const d of uniq) {
+    const isBundledDir = new RegExp(`"from":\\s*"\\.\\.\\/${d}"`).test(builder);
+    check(isBundledDir, `依赖目录 "${d}/" 已加入 extraResources`);
+  }
+}
+
 const tunnelSvc = read('dsh-plugin-connect/tunnel-service.mjs');
 check(/function findScript\(name\)/.test(tunnelSvc), 'tunnel-service 有 findScript 多路径探测');
 check(
