@@ -524,3 +524,48 @@ npx react-native start --port 8081
 
 *报告生成时间：2026-10-27*
 *APK：Debug / versionCode 160701 / versionName 0.16.7-emu*
+
+---
+
+# 补充：第二轮验收（2026-10-27 晚）
+
+## 新增发现：登录认证绕过
+
+上一轮的「401 误判」修复引入了新问题 —— `loginWithToken()` 改成
+「先看 cookie jar」之后，**没有清空 jar**。
+
+后果：jar 里的历史 cookie 会让**任何 token 都通过认证**。
+
+已修复（提交 `f15555c`），新增 8 项安全回归测试，
+覆盖错误 token / 过期 cookie / 错误服务端 / 跨服务端复用等边界。
+
+## AbortError 风暴：根因确认
+
+**不是客户端缺陷。** 实测 DSH 服务端：
+
+| 指标 | 实测 |
+|---|---|
+| 进程 | 存活 |
+| 端口 | 仍在监听 |
+| 线程 | 14 个全部 Wait |
+| CPU 5 秒增量 | 0 秒 |
+| 日志 | 4 小时未更新 |
+| HTTP | 100% 超时 |
+
+**DSH 事件循环假死，重启前不会自愈。**
+
+客户端侧确认无请求风暴（`sessionsLoading` 守卫生效），
+AbortController 也正常工作（whatwg-fetch 支持 xhr.abort）。
+错误提示已改进为可操作的中文建议。
+
+## 独立 Release AVD
+
+已创建 `dsh_release`（干净环境，30 秒启动），
+可安装正式签名 APK 而不影响现有 Debug 包的配对数据。
+
+## 干净环境二次验证
+
+在 `dsh_release` 上全新安装 Debug 包 → 首次启动**直接进入配对页**，
+白屏缺陷确认修复。
+
+*详见 `DSH-OUTPOST-RELEASE-DEVICE-READINESS.md`*
