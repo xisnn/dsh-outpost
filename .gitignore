@@ -61,6 +61,10 @@ Thumbs.db
 # 含本机真实数据的截图，不发布（仅本地参考）
 docs/screenshots-local/
 
+# 内部研究 / 对标报告：仅本地参考，不入库
+# （曾因 `git add -A` 被误提交，见 075eec3 / d4c6a12 的历史重写）
+docs/research/
+
 # 编辑器
 .vscode/
 .idea/
