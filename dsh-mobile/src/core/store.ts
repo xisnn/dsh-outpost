@@ -1382,11 +1382,33 @@ export class Store {
    * - `ref`：本地乐观显示用（图片有 localUri，立刻能出缩略图）
    * - `part`：真正发给 Host 的 content 片段
    */
+  /**
+   * 发一条用户消息。
+   *
+   * @param requestId 幂等键。**重试同一条消息必须传同一个值**。
+   *
+   * 为什么这很关键：DSH 服务端在 `sessionController.prompt` 里做了去重 ——
+   *
+   *     if (hasPromptRequest(agent, request.requestId)) return { accepted: true }
+   *
+   * `hasPromptRequest` 同时检查「已排队」（inbox.nextTurn / nextStep）和
+   * 「已执行」（session.snapshotEvents 里的 user/message.rpcId）。
+   *
+   * 也就是说：**只要 requestId 相同，重复提交是安全的**，服务端直接
+   * 返回 accepted 而不会再入队一次。
+   *
+   * 反过来，如果每次重试都换新的 requestId，服务端就当成两条不同的
+   * 消息 —— 任务是**真的会重复执行**的（有副作用的工具调用尤其危险）。
+   *
+   * 所以调用方（ChatScreen）要在失败后保留同一个 requestId 用于重试。
+   * 不传时这里生成一个，只适合「一次性、不重试」的注入消息。
+   */
   async send(
     sessionId: string,
     text: string,
     attachments: OutgoingAttachment[] = [],
     mode: 'queue' | 'steer' = 'queue',
+    requestId?: string,
   ): Promise<void> {
     const cur = this.getChat(sessionId);
     const parts = attachments.map((a) => a.part);
@@ -1435,7 +1457,10 @@ export class Store {
     }
 
     try {
-      await this.api.prompt({ sessionId, text, parts: content, mode });
+      // 把 requestId 透传下去 —— 服务端靠它做幂等去重。
+      // 不传的话 SessionApi.prompt 会自己生成一个随机的，
+      // 那样重试就变成了「新消息」，会重复执行任务。
+      await this.api.prompt({ sessionId, text, parts: content, mode, requestId });
     } catch (e) {
       const c = this.getChat(sessionId);
       this.chats.set(sessionId, {
