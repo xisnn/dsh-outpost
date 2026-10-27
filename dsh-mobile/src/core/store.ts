@@ -55,6 +55,52 @@ function withTimeout<T>(p: Promise<T>, ms: number): Promise<T> {
   ]);
 }
 
+/**
+ * 把「拉列表失败」翻译成用户能照做的话。
+ *
+ * ## 为什么需要
+ *
+ * 实测遇到过一个很典型的状态：电脑上的 DSH 进程还活着、端口还在监听，
+ * 但事件循环卡死了 —— 任何请求都超时，重启前不会自愈。
+ *
+ * 这种情况下界面上如果只显示
+ * `session/list: TypeError: Network request failed`，
+ * 用户完全不知道该干什么：是手机网断了？密码不对？还是电脑坏了？
+ *
+ * 所以按错误类型给出不同建议，每种都指向一个**具体动作**。
+ */
+function describeLoadError(e: unknown): string {
+  const raw = e instanceof Error ? e.message : String(e);
+
+  // 超时 / 网络层失败：最可能是电脑那边没响应
+  if (/AbortError|timeout|请求超时|Network request failed/i.test(raw)) {
+    return (
+      '连不上电脑上的 DSH。\n\n' +
+      '可能的原因：\n' +
+      '· DSH 服务已停止或卡死（最常见）\n' +
+      '· 手机和电脑不在同一个网络\n' +
+      '· 电脑防火墙拦了端口\n\n' +
+      '请先在电脑上确认 DSH 还在正常运行；如果是卡住了，重启 DSH 服务后再点「重试」。'
+    );
+  }
+
+  // 凭据失效：要去重新配对
+  if (/401|403|unauthorized|forbidden|not authenticated/i.test(raw)) {
+    return (
+      '登录凭据已失效。\n\n' +
+      '请在电脑上重新获取带 token 的链接，回到配对页重新连接。'
+    );
+  }
+
+  // 服务端明确说网关没开
+  if (/gateway\/not-found|not-found/i.test(raw)) {
+    return '电脑上的 DSH 没有开启这个接口。\n\n请确认 DSH 版本和移动网关插件都正常。';
+  }
+
+  // 兜底：仍然给出原始信息，方便用户反馈
+  return `加载失败：${raw}`;
+}
+
 export interface OutgoingAttachment {
   ref: AttachRef;
   part: PromptPart;
@@ -1050,8 +1096,18 @@ export class Store {
       const items = await this.api.list();
       this.sessions = items;
       this.workspaces = groupByWorkspace(this.visibleSessions(items));
+      this.sessionsError = undefined;
     } catch (e) {
-      this.sessionsError = e instanceof Error ? e.message : String(e);
+      // 用户看到的是这句话，所以要用人话。
+      //
+      // RpcError 有两个字段：
+      //   message   —— 开发格式（`session/list: TypeError: Network request failed`）
+      //   userHint  —— 给用户看的中文
+      //
+      // 之前这里存的是 message，于是服务端假死时用户看到一串英文。
+      // 实测场景：DSH 进程还活着、端口还在监听，但事件循环卡死，
+      // 任何请求都 30 秒超时 —— 这时候最需要说清楚「是电脑那边的问题」。
+      this.sessionsError = describeLoadError(e);
     } finally {
       this.sessionsLoading = false;
       this.emit();
