@@ -100,7 +100,20 @@ android {
             keyAlias 'androiddebugkey'
             keyPassword 'android'
         }
-        // CI 里通过 -P 参数注入正式签名；本地不传就回退到 debug 签名（能装，不能上架）
+        // CI 里通过 -P 参数注入正式签名。
+        //
+        // ⚠️ 这里**不再回退到 debug 签名**。
+        //
+        // 旧行为：本地 `assembleRelease` 没传 DSH_STORE_FILE 时，release 变体
+        // 静默用 debug.keystore 签名。后果有两个：
+        //   1. 产出的包看起来是「release」，实际是公开的 Android Debug 证书，
+        //      任何人都能用同一把（仓库里就有的）密钥伪造一个 Android 会接受的更新
+        //   2. 用户装了 debug 签名的包之后，将来正确签名的正式包**装不上去**
+        //      （签名不一致，必须卸载重装，聊天记录/配对全丢）
+        //
+        // 现在：release 变体缺少正式签名材料就**直接构建失败**，并在错误里
+        // 说明怎么补。想让 release 变异用 debug 签名做冒烟测试，显式传
+        // -PDSH_ALLOW_DEBUG_RELEASE_SIGNING=true（CI 永不传）。
         release {
             if (project.hasProperty('DSH_STORE_FILE')) {
                 storeFile file(project.property('DSH_STORE_FILE'))
@@ -115,10 +128,78 @@ android {
             signingConfig signingConfigs.debug
         }
         release {
-            signingConfig project.hasProperty('DSH_STORE_FILE') ? signingConfigs.release : signingConfigs.debug
+            def allowDebugSigning =
+                (project.findProperty('DSH_ALLOW_DEBUG_RELEASE_SIGNING') ?: 'false')
+                    .toString().toBoolean()
+            // ⚠️ 这里**不能** throw。
+            //
+            // `android { buildTypes { release { } } }` 是**配置阶段**求值的：
+            // 即使你只是跑 `assembleDebug` 或 `tasks`，Gradle 也会把每个
+            // buildType 的 DSL 都执行一遍。第一轮把 GradleException 放在这里，
+            // 结果 `assembleDebug` 直接挂掉、CI 的 build-test job 永远红 ——
+            // 这是真实的回归，已由 `gradlew :app:assembleDebug -m` 复现。
+            //
+            // 正确做法：配置阶段只**记录**签名缺失这件事，把失败推迟到
+            // 真正构建 release 产物时（见文件末尾的 gradle.taskGraph 钩子）。
+            if (project.hasProperty('DSH_STORE_FILE')) {
+                signingConfig signingConfigs.release
+            } else if (allowDebugSigning) {
+                logger.warn(
+                    '⚠️ release 变体正在使用 debug 签名（DSH_ALLOW_DEBUG_RELEASE_SIGNING=true）。' +
+                    ' 这个包**不能**作为正式发布包，也不应交给用户。'
+                )
+                signingConfig signingConfigs.debug
+            } else {
+                // 不在这里失败，但签名必须是「有值」的，否则 AGP 自己会报
+                // 一个很晦涩的错。指向 debug 只是让 DSL 合法，真正的拦截
+                // 在 taskGraph 钩子里（那里会 fail 掉任何 release 产物任务）。
+                signingConfig signingConfigs.debug
+            }
             minifyEnabled enableProguardInReleaseBuilds
             proguardFiles getDefaultProguardFile("proguard-android.txt"), "proguard-rules.pro"
         }
+    }
+}
+
+// ── release 签名强制检查（执行阶段）────────────────────────────────
+//
+// 只在「任务图里真的要构建 release 产物」时才检查签名材料。
+// 这样 `assembleDebug` / `tasks` / IDE 同步都不受影响，而任何
+// `assembleRelease` / `bundleRelease` / `packageRelease*` 在没有正式
+// 签名时会**在任务开始前就失败**，不会产出 debug 签名的假 release 包。
+//
+// 没有这一层时，release 变体会退回 signingConfigs.debug（见上面注释）——
+// 那正是我们要禁止的。
+gradle.taskGraph.whenReady { graph ->
+    def releaseArtifactTasks = graph.allTasks.findAll { t ->
+        def n = t.name
+        // assembleRelease / bundleRelease / packageRelease* / signRelease*
+        (n == 'assembleRelease' || n == 'bundleRelease'
+            || n.startsWith('packageRelease') || n.startsWith('signRelease'))
+    }
+    if (releaseArtifactTasks.isEmpty()) return
+
+    def hasStoreFile = project.hasProperty('DSH_STORE_FILE')
+    def allowDebugSigning =
+        (project.findProperty('DSH_ALLOW_DEBUG_RELEASE_SIGNING') ?: 'false')
+            .toString().toBoolean()
+
+    if (!hasStoreFile && !allowDebugSigning) {
+        throw new GradleException(
+            '\n\n' +
+            'release 构建缺少正式签名材料 —— 已拒绝构建。\n' +
+            '\n' +
+            '  必须提供：-PDSH_STORE_FILE / -PDSH_STORE_PASSWORD /\n' +
+            '            -PDSH_KEY_ALIAS  / -PDSH_KEY_PASSWORD\n' +
+            '\n' +
+            '  为什么会这样：不允许用仓库里公开的 debug.keystore 签「正式包」。\n' +
+            '  用公开密钥签出来的包，任何拿到仓库的人都能伪造一个 Android 会接受的更新。\n' +
+            '\n' +
+            '  只想做一次冒烟构建（产物不可发布）：\n' +
+            '    -PDSH_ALLOW_DEBUG_RELEASE_SIGNING=true\n' +
+            '\n' +
+            '  只想跑日常开发/测试：改用 assembleDebug（不受影响）。\n\n'
+        )
     }
 }
 
