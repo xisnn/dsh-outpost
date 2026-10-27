@@ -1,0 +1,728 @@
+name: Signing Verification (no publish)
+
+# ══════════════════════════════════════════════════════════════════════
+# 用途：**只验证正式签名配置是否可用**，不发布任何东西。
+#
+# 与 android.yml 的区别（这是本工作流存在的理由）：
+#
+#   android.yml 的 release job 需要：
+#     · 一个 v* tag（push 触发，不可手动跑）
+#     · contents: write 权限
+#     · 会创建 GitHub Release
+#    → 想验证签名就得先打 tag = 可能误发布，风险太高。
+#
+#   本工作流：
+#     · 只能 workflow_dispatch 手动触发
+#     · permissions 只读（contents: read），**物理上无法**创建 Release
+#     · 没有任何 tag / release / upload-to-release 步骤
+#     · 产物只作为 Actions Artifact 保存（私有，需登录仓库才能下载）
+#     · 默认 retention 1 天，进一步降低产物滞留风险
+#
+# 它验证的是：
+#   1. Secrets 齐全且能解开 keystore
+#   2. 别名 / 密码正确
+#   3. 用**正式签名**构建 release APK（绝不回退 debug）
+#   4. APK 证书指纹 == EXPECTED_CERT_SHA256
+#   5. APK 证书**不是**公开 AOSP debug 证书
+#   6. 包名 / versionCode / versionName 正确
+#   7. 签名方案（v1/v2/v3）覆盖情况
+#   8. 更新完整性校验（SHA256SUMS 生成 + 解析 + 校验逻辑走通）
+#   9. debug 构建同时可用（证明 release 门禁没有误伤日常构建）
+#
+# ══════════════════════════════════════════════════════════════════════
+
+on:
+  workflow_dispatch:
+    inputs:
+      verify_debug_too:
+        description: '同时构建 debug APK（验证 release 门禁没有误伤 debug）'
+        type: boolean
+        default: true
+
+# 只读！没有任何 job 声明写权限，因此不可能发布。
+permissions:
+  contents: read
+
+# 同一时间只跑一个，避免并发消耗
+concurrency:
+  group: signing-verify-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  verify-signing:
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+          cache-dependency-path: dsh-mobile/package-lock.json
+
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: 21
+
+      # ── 前置：Secrets 必须齐全 ──────────────────────────────────
+      #
+      # 这里只检查「非空」，绝不回显任何值。
+      - name: Check signing secrets are present
+        id: precheck
+        env:
+          KEYSTORE_BASE64: ${{ secrets.KEYSTORE_BASE64 }}
+          KEYSTORE_PASSWORD: ${{ secrets.KEYSTORE_PASSWORD }}
+          KEY_ALIAS: ${{ secrets.KEY_ALIAS }}
+          KEY_PASSWORD: ${{ secrets.KEY_PASSWORD }}
+          EXPECTED_CERT_SHA256: ${{ vars.EXPECTED_CERT_SHA256 }}
+        run: |
+          set -euo pipefail
+          missing=""
+          [ -n "$KEYSTORE_BASE64" ]   || missing="$missing KEYSTORE_BASE64"
+          [ -n "$KEYSTORE_PASSWORD" ] || missing="$missing KEYSTORE_PASSWORD"
+          [ -n "$KEY_ALIAS" ]         || missing="$missing KEY_ALIAS"
+          [ -n "$KEY_PASSWORD" ]      || missing="$missing KEY_PASSWORD"
+          [ -n "$EXPECTED_CERT_SHA256" ] || missing="$missing EXPECTED_CERT_SHA256(variable)"
+          if [ -n "$missing" ]; then
+            echo "::error::缺少签名配置：$missing"
+            exit 1
+          fi
+          # 别名应符合预期（正式证书用 dsh-release）
+          echo "KEY_ALIAS 长度=${#KEY_ALIAS}（不打印内容）"
+          echo "签名配置齐全 ✓"
+
+      - name: Ensure NDK and SDK packages
+        run: |
+          SDK="${ANDROID_SDK_ROOT:-$ANDROID_HOME}"
+          SDKMANAGER="$SDK/cmdline-tools/latest/bin/sdkmanager"
+          if [ ! -x "$SDKMANAGER" ]; then
+            SDKMANAGER=$(find "$SDK/cmdline-tools" -name sdkmanager -type f | head -1)
+          fi
+          need=""
+          [ -d "$SDK/ndk/27.1.12297006" ] || need="$need ndk;27.1.12297006"
+          [ -d "$SDK/platforms/android-36" ] || need="$need platforms;android-36"
+          [ -d "$SDK/build-tools/36.0.0" ] || need="$need build-tools;36.0.0"
+          if [ -n "$need" ]; then yes | "$SDKMANAGER" --install $need; fi
+          echo "ANDROID_NDK_HOME=$SDK/ndk/27.1.12297006" >> "$GITHUB_ENV"
+
+      - name: Cache Gradle
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.gradle/caches
+            ~/.gradle/wrapper
+          key: gradle-verify-${{ runner.os }}-${{ hashFiles('dsh-mobile/android/**/*.gradle*', 'dsh-mobile/android/gradle.properties') }}
+          restore-keys: gradle-verify-${{ runner.os }}-
+
+      - name: Install dependencies
+        working-directory: dsh-mobile
+        run: npm ci
+
+      # ── 单元 + 集成测试（签名验证不能脱离功能正确性）──────────
+      - name: Unit tests
+        working-directory: dsh-mobile
+        run: npm test
+
+      - name: Integration tests
+        working-directory: dsh-mobile
+        run: npm run test:integration
+
+      # ── 材料化 keystore（不打印任何密码）──────────────────────
+      - name: Materialize keystore
+        id: keystore
+        env:
+          KEYSTORE_BASE64: ${{ secrets.KEYSTORE_BASE64 }}
+          KEYSTORE_PASSWORD: ${{ secrets.KEYSTORE_PASSWORD }}
+          KEY_ALIAS: ${{ secrets.KEY_ALIAS }}
+        run: |
+          set -euo pipefail
+          KS="$RUNNER_TEMP/release.keystore"
+          # umask 保证文件从创建起就只有本用户可读
+          umask 077
+          printf '%s' "$KEYSTORE_BASE64" | base64 -d > "$KS"
+          chmod 600 "$KS"
+
+          if [ ! -s "$KS" ]; then
+            echo "::error::keystore 解码后为空"
+            exit 1
+          fi
+          echo "keystore 已写入（$(stat -c%s "$KS") 字节）"
+
+          # 校验别名与密码；keytool 输出全部丢弃，只留退出码
+          if ! keytool -list -keystore "$KS" -storepass "$KEYSTORE_PASSWORD" -alias "$KEY_ALIAS" > /dev/null 2>&1; then
+            echo "::error::keystore 校验失败：密码错误或别名 $KEY_ALIAS 不存在"
+            exit 1
+          fi
+          echo "keystore 别名与密码校验通过 ✓"
+
+          # 记录证书指纹供后续比对（这是**公钥**信息，不是秘密）
+          keytool -list -v -keystore "$KS" -storepass "$KEYSTORE_PASSWORD" -alias "$KEY_ALIAS" \
+            | grep -E 'SHA256:|Signature algorithm|Key Algorithm|Subject Public Key' \
+            | sed 's/^ *//' > "$RUNNER_TEMP/keystore-info.txt" || true
+          echo "keystore 摘要已记录"
+
+          echo "DSH_STORE_FILE_ABS=$KS" >> "$GITHUB_ENV"
+
+      # ── 推导版本号（签名验证需要一个合法的 versionCode）────────
+      #
+      # 本工作流不依赖 tag，所以用一个「合成版本」：明显高于水位线，
+      # 且版本号里带 `-verify` 字样，一眼能看出不是正式版本。
+      - name: Derive synthetic version for verification
+        id: ver
+        working-directory: dsh-mobile
+        run: |
+          set -euo pipefail
+
+          # ⚠️ 不能用 `require('../../.github/release-floor.json')`：
+          #    cwd 是 dsh-mobile，`../../` 会跑到仓库外，文件不存在。
+          #
+          # 正确做法：复用仓库自己的 version-code.mjs —— 它的 FLOOR_FILE
+          # 是按 `__dirname`（= dsh-mobile/scripts）解析的，与 cwd 无关。
+          # 这样水位线的读取方式与正式发布流程**完全一致**，不会两边分叉。
+          FLOOR=$(node -e "import('./scripts/version-code.mjs').then(m => console.log(m.readFloor().minVersionCode))")
+
+          # 防御：读不到或不是正整数就立刻失败，绝不静默用默认值
+          case "$FLOOR" in
+            ''|*[!0-9]*)
+              echo "::error::读取 release-floor.json 的 minVersionCode 失败（得到 '$FLOOR'）"
+              exit 1
+              ;;
+          esac
+          if [ "$FLOOR" -le 0 ]; then
+            echo "::error::minVersionCode 不是正数：$FLOOR"
+            exit 1
+          fi
+          echo "已读取水位线 minVersionCode=$FLOOR ✓"
+
+          # 合成版本：远高于水位线，且与正式版本号不会撞
+          CODE=$(( FLOOR + 900000 + GITHUB_RUN_NUMBER ))
+          echo "code=$CODE" >> "$GITHUB_OUTPUT"
+          echo "version=0.0.0-verify.${GITHUB_RUN_NUMBER}" >> "$GITHUB_OUTPUT"
+          echo "合成 versionCode=$CODE（水位线 $FLOOR）"
+
+      # ── 构建正式签名的 release APK ────────────────────────────
+      - name: Build release APK with REAL signing
+        id: build
+        working-directory: dsh-mobile/android
+        env:
+          KEYSTORE_PASSWORD: ${{ secrets.KEYSTORE_PASSWORD }}
+          KEY_ALIAS: ${{ secrets.KEY_ALIAS }}
+          KEY_PASSWORD: ${{ secrets.KEY_PASSWORD }}
+        run: |
+          set -euo pipefail
+          chmod +x gradlew
+          # 注意：**不传** DSH_ALLOW_DEBUG_RELEASE_SIGNING。
+          # 如果 gradle 门禁正常，缺签名会在这里硬失败；
+          # 我们传了完整签名材料，所以应当成功。
+          ./gradlew --no-daemon --console=plain :app:assembleRelease \
+            -PDSH_VERSION_NAME="${{ steps.ver.outputs.version }}" \
+            -PDSH_VERSION_CODE="${{ steps.ver.outputs.code }}" \
+            -PDSH_STORE_FILE="$DSH_STORE_FILE_ABS" \
+            -PDSH_STORE_PASSWORD="$KEYSTORE_PASSWORD" \
+            -PDSH_KEY_ALIAS="$KEY_ALIAS" \
+            -PDSH_KEY_PASSWORD="$KEY_PASSWORD"
+
+      # ── 验证 1：签名有效性 + 证书身份 ─────────────────────────
+      - name: Verify APK signature and certificate identity
+        id: cert
+        run: |
+          set -euo pipefail
+          APK="dsh-mobile/android/app/build/outputs/apk/release/app-release.apk"
+          [ -f "$APK" ] || { echo "::error::构建产物不存在"; exit 1; }
+
+          BT=$(ls -d "$ANDROID_SDK_ROOT"/build-tools/36.0.0 2>/dev/null || ls -d "$ANDROID_SDK_ROOT"/build-tools/* | tail -1)
+          APKSIGNER="$BT/apksigner"
+
+          # 1) 密码学验证签名有效
+          "$APKSIGNER" verify --verbose "$APK" > "$RUNNER_TEMP/verify.txt" 2>&1 \
+            || { echo "::error::apksigner verify 失败"; cat "$RUNNER_TEMP/verify.txt"; exit 1; }
+          echo "签名有效 ✓"
+          grep -E 'Verified using v[123]' "$RUNNER_TEMP/verify.txt" || true
+
+          # 2) 提取证书指纹（公钥信息）
+          "$APKSIGNER" verify --print-certs "$APK" > "$RUNNER_TEMP/certs.txt" 2>&1
+          ACTUAL=$(grep 'SHA-256 digest' "$RUNNER_TEMP/certs.txt" | head -1 | awk '{print $NF}')
+          DN=$(grep 'certificate DN' "$RUNNER_TEMP/certs.txt" | head -1 | sed 's/.*certificate DN: //')
+          echo "APK 证书 DN: $DN"
+          echo "APK 证书 SHA-256: $ACTUAL"
+
+          NORM_ACTUAL=$(echo "$ACTUAL" | tr -d ':' | tr 'A-F' 'a-f')
+
+          # 3) 绝不能是公开 AOSP debug 证书
+          DEBUG_CERT="fac61745dc0903786fb9ede62a962b399f7348f0bb6f899b8332667591033b9c"
+          if [ "$NORM_ACTUAL" = "$DEBUG_CERT" ]; then
+            echo "::error::APK 使用了公开的 AOSP debug 证书 —— 正式签名配置没有生效"
+            exit 1
+          fi
+          echo "不是公开 debug 证书 ✓"
+
+          # 4) 必须等于仓库配置的期望指纹
+          NORM_EXPECTED=$(echo "${{ vars.EXPECTED_CERT_SHA256 }}" | tr -d ':' | tr 'A-F' 'a-f')
+          if [ "$NORM_EXPECTED" = "$DEBUG_CERT" ]; then
+            echo "::error::EXPECTED_CERT_SHA256 被设成了公开 debug 证书指纹"
+            exit 1
+          fi
+          if [ "$NORM_ACTUAL" != "$NORM_EXPECTED" ]; then
+            echo "::error::证书指纹与 EXPECTED_CERT_SHA256 不一致"
+            echo "  期望: $NORM_EXPECTED"
+            echo "  实际: $NORM_ACTUAL"
+            exit 1
+          fi
+          echo "证书指纹与 EXPECTED_CERT_SHA256 一致 ✓"
+
+          echo "cert=$NORM_ACTUAL" >> "$GITHUB_OUTPUT"
+          echo "dn=$DN" >> "$GITHUB_OUTPUT"
+
+      # ── 验证 2：包名 / 版本 / 签名方案 ────────────────────────
+      - name: Verify package identity and signing schemes
+        id: pkg
+        run: |
+          set -euo pipefail
+          APK="dsh-mobile/android/app/build/outputs/apk/release/app-release.apk"
+          BT=$(ls -d "$ANDROID_SDK_ROOT"/build-tools/36.0.0 2>/dev/null || ls -d "$ANDROID_SDK_ROOT"/build-tools/* | tail -1)
+          AAPT2="$BT/aapt2"
+
+          BADGING=$("$AAPT2" dump badging "$APK")
+          PKG=$(echo "$BADGING" | grep -oP "name='\K[^']+" | head -1)
+          VC=$(echo "$BADGING" | grep -oP "versionCode='\K[0-9]+")
+          VN=$(echo "$BADGING" | grep -oP "versionName='\K[^']+")
+          echo "包名=$PKG versionCode=$VC versionName=$VN"
+
+          [ "$PKG" = "com.dshpocket" ] || { echo "::error::包名不对：$PKG"; exit 1; }
+          [ "$VC" = "${{ steps.ver.outputs.code }}" ] || { echo "::error::versionCode 不符"; exit 1; }
+          [ "$VN" = "${{ steps.ver.outputs.version }}" ] || { echo "::error::versionName 不符"; exit 1; }
+          echo "包名与版本正确 ✓"
+
+          # 签名方案：至少要有 v2（Android 7+ 强制），最好有 v3
+          #
+          # ⚠️ 必须匹配行尾的 `: true`，不能只 grep 'Verified using v2'。
+          #
+          # apksigner 的实际输出是：
+          #   Verified using v1 scheme (JAR signing): false
+          #   Verified using v2 scheme (APK Signature Scheme v2): true
+          #   Verified using v3 scheme (APK Signature Scheme v3): false
+          #
+          # 也就是说**每个方案都会打印一行**，没签名的那行是 `false`。
+          # 旧的 `grep -q 'Verified using v2'` 会匹配到 `...: false` 行，
+          # 于是「没有 v2 签名的包」也会被判成「有 v2 签名」——
+          # 这个门禁等于形同虚设。
+          if grep -qE '^Verified using v2 scheme .*: true$' "$RUNNER_TEMP/verify.txt"; then
+            echo "签名方案 v2 = true ✓"
+          else
+            echo "::error::APK 没有有效的 v2 签名（Android 7+ 无法安装）"
+            grep -E '^Verified using ' "$RUNNER_TEMP/verify.txt" || true
+            exit 1
+          fi
+
+          # v3 是可选方案：明确区分 true / false，不把 false 当成功
+          V3_LINE=$(grep -E '^Verified using v3 scheme ' "$RUNNER_TEMP/verify.txt" || true)
+          case "$V3_LINE" in
+            *': true')
+              echo "签名方案 v3 = true ✓"
+              echo "v3=true" >> "$GITHUB_OUTPUT"
+              ;;
+            *': false')
+              echo "::warning::签名方案 v3 = false（可选，不影响 Android 7+ 安装）"
+              echo "v3=false" >> "$GITHUB_OUTPUT"
+              ;;
+            *)
+              echo "::warning::未找到 v3 方案行（apksigner 版本差异，按 false 处理）"
+              echo "v3=false" >> "$GITHUB_OUTPUT"
+              ;;
+          esac
+
+      # ── 验证 3：更新完整性校验链路 ────────────────────────────
+      #
+      # 复刻 release 时生成 SHA256SUMS 的动作，并用**产品里真实的解析逻辑**
+      # 校验它 —— 证明「客户端能不能正确验证我们发布的哈希」。
+      - name: Verify update-integrity chain
+        id: sums
+        working-directory: dsh-mobile
+        run: |
+          set -euo pipefail
+          # working-directory 已经是 dsh-mobile，直接用相对它的路径。
+          # （之前写成 ../dsh-mobile/android/... 虽然绕回来也对，但极易看错。）
+          APK="android/app/build/outputs/apk/release/app-release.apk"
+          [ -f "$APK" ] || { echo "::error::找不到 release APK：$APK"; exit 1; }
+          OUT="$RUNNER_TEMP/out"
+          mkdir -p "$OUT"
+          cp "$APK" "$OUT/dsh-outpost-verify.apk"
+          ( cd "$OUT" && sha256sum "dsh-outpost-verify.apk" > SHA256SUMS.txt )
+
+          echo "--- SHA256SUMS.txt ---"
+          cat "$OUT/SHA256SUMS.txt"
+
+          # 用**产品代码自己的**解析器验证这份 sums。
+          #
+          # ⚠️ 用 tsx 而不是 `node --experimental-strip-types`：
+          # 后者是 Node 22.6+ 才有，而本项目统一在 Node 20 上跑
+          # （engines: >=20，CI 三个 job 都是 node-version: 20，
+          #  package.json 里 45 个 test:* 脚本用 tsx）。
+          # 在这里用 22+ 的特性会与其它 workflow 不一致，且本地无法复现。
+          npx tsx scripts/verify-sums-integration.mjs "$OUT/SHA256SUMS.txt" dsh-outpost-verify.apk
+
+      # ── 验证 4：debug 构建仍然可用（证明 release 门禁没误伤）──
+      #
+      # 第二轮修过一个真实回归：签名检查放在配置期，导致 assembleDebug 全挂。
+      # 这一步就是那个回归的线上护栏。
+      - name: Verify debug build still works
+        id: debugbuild
+        if: ${{ inputs.verify_debug_too }}
+        working-directory: dsh-mobile/android
+        run: |
+          set -euo pipefail
+          chmod +x gradlew
+          # 不传任何签名参数 —— debug 变体本来就用 debug.keystore
+          ./gradlew --no-daemon --console=plain :app:assembleDebug
+          APK="app/build/outputs/apk/debug/app-debug.apk"
+          [ -f "$APK" ] || { echo "::error::debug APK 未生成"; exit 1; }
+          echo "debug 构建正常 ✓（release 门禁没有误伤日常构建）"
+          ls -lh "$APK"
+
+      # ── 负向验证：没签名材料时 release 必须被拒 ───────────────
+      - name: Negative test - release must fail without signing material
+        id: negative
+        working-directory: dsh-mobile/android
+        run: |
+          set -euo pipefail
+          chmod +x gradlew
+          # 故意不传 DSH_STORE_FILE，期望构建失败
+          if ./gradlew --no-daemon --console=plain :app:assembleRelease -m \
+               -PDSH_VERSION_NAME=0.0.0 -PDSH_VERSION_CODE=1 > /dev/null 2>&1; then
+            echo "::error::缺少签名材料时 release 构建竟然成功了 —— 门禁失效"
+            exit 1
+          fi
+          echo "缺签名材料时 release 被正确拒绝 ✓"
+
+      # ── 产出：校验证据（不含 APK）────────────────────────────
+      - name: Upload verification evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: signing-verification-evidence
+          path: |
+            ${{ runner.temp }}/out/SHA256SUMS.txt
+            ${{ runner.temp }}/verify.txt
+            ${{ runner.temp }}/certs.txt
+            ${{ runner.temp }}/keystore-info.txt
+          retention-days: 1
+          if-no-files-found: warn
+
+      # ── 仓库可见性判定：决定「能不能上传真实签名 APK」─────────
+      #
+      # ## 为什么必须先判可见性
+      #
+      # GitHub Actions 的 Artifact **访问控制粒度是整个仓库**，不是单个
+      # Artifact，也没有「只给某些人下载」的开关：
+      #
+      #   · 私有仓库 → Artifact 仅拥有仓库读权限者（协作者）可见
+      #   · 公开仓库 → Artifact **对任何 GitHub 用户可见并可下载**
+      #
+      # 也就是说，在公开仓库里上传一个**用正式密钥签名**的 APK，
+      # 等于把它公开给全世界。文件名写 `NOT-FOR-RELEASE` 只是**提示**，
+      # 不是权限隔离 —— 拿到文件的人照样能装、能改、能重新分发。
+      #
+      # 所以这里做硬判定：
+      #   · 私有仓库 → 允许上传（仅协作者可见）
+      #   · 公开仓库/无法判定 → **不上传**，只给出本地构建指引
+      #
+      # 取不到值时按「不能上传」处理（fail-closed），宁可少一个便利，
+      # 也不让正式签名的包意外公开。
+      - name: Resolve repository visibility
+        id: vis
+        env:
+          REPO_PRIVATE: ${{ github.event.repository.private }}
+        run: |
+          set -uo pipefail
+          case "${REPO_PRIVATE:-}" in
+            true)
+              echo "仓库为私有：验收 APK 仅协作者可见，允许上传"
+              echo "can_upload=true" >> "$GITHUB_OUTPUT"
+              echo "visibility=private" >> "$GITHUB_OUTPUT"
+              ;;
+            false)
+              echo "仓库为公开：**拒绝上传**真实签名 APK（Artifact 会对所有人可见）"
+              echo "can_upload=false" >> "$GITHUB_OUTPUT"
+              echo "visibility=public" >> "$GITHUB_OUTPUT"
+              ;;
+            *)
+              echo "::warning::无法判定仓库可见性（得到 '${REPO_PRIVATE:-<空>}'），按不可上传处理"
+              echo "can_upload=false" >> "$GITHUB_OUTPUT"
+              echo "visibility=unknown" >> "$GITHUB_OUTPUT"
+              ;;
+          esac
+
+      # ── 产出：供真机验收的**非正式**构建包 ────────────────────
+      #
+      # 只有在**私有仓库**里才暂存并上传。
+      #
+      # 层层标记只用于「降低误用概率」，不承担权限隔离职责：
+      #   1. 文件名 `NOT-FOR-RELEASE-` 前缀
+      #   2. versionName 是合成值 `0.0.0-verify.<run>`
+      #   3. versionCode 是 `水位线 + 900000 + run`（见 §4 的副作用说明）
+      #   4. Artifact 名带 `NOT-FOR-RELEASE`，仅保留 3 天
+      #
+      # 真正的隔离靠上面那一步的可见性判定 —— 公开仓库根本不产生这个包。
+      - name: Stage non-release APK for device acceptance
+        id: stage
+        if: ${{ steps.cert.outcome == 'success' && steps.vis.outputs.can_upload == 'true' }}
+        run: |
+          set -euo pipefail
+          APK="dsh-mobile/android/app/build/outputs/apk/release/app-release.apk"
+          OUT="$RUNNER_TEMP/out"
+          mkdir -p "$OUT"
+
+          DEST="$OUT/NOT-FOR-RELEASE-dsh-outpost-verify-${{ steps.ver.outputs.version }}.apk"
+          cp "$APK" "$DEST"
+
+          # 生成配套校验文件，文件名与新产物一致
+          ( cd "$OUT" && sha256sum "$(basename "$DEST")" > SHA256SUMS-not-for-release.txt )
+          cat "$OUT/SHA256SUMS-not-for-release.txt"
+
+          SIZE=$(stat -c%s "$DEST")
+          echo "已暂存非正式验收包（$(( SIZE / 1024 / 1024 )) MB）"
+          echo "artifact_apk=$(basename "$DEST")" >> "$GITHUB_OUTPUT"
+
+      - name: Upload non-release APK for manual device acceptance
+        if: ${{ steps.stage.outcome == 'success' }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: NOT-FOR-RELEASE-signing-verify-apk
+          path: ${{ runner.temp }}/out/NOT-FOR-RELEASE-*.apk
+          # 3 天足够完成真机验收，又不会长期滞留
+          retention-days: 3
+          if-no-files-found: error
+
+      # ── 汇总：**按真实步骤结果**输出 PASS / FAIL / NOT RUN ────
+      #
+      # ⚠️ 这里以前是无条件写「一致 / 已排除」，等于失败时也显示成功。
+      # 现在每一项都读对应步骤的 conclusion，绝不硬编码结论。
+      - name: Summary
+        if: always()
+        env:
+          # 各步骤的真实结论：success / failure / cancelled / skipped / ''
+          S_SECRETS: ${{ steps.precheck.outcome }}
+          S_KEYSTORE: ${{ steps.keystore.outcome }}
+          S_VERSION: ${{ steps.ver.outcome }}
+          S_BUILD: ${{ steps.build.outcome }}
+          S_CERT: ${{ steps.cert.outcome }}
+          S_PKG: ${{ steps.pkg.outcome }}
+          S_SUMS: ${{ steps.sums.outcome }}
+          S_DEBUG: ${{ steps.debugbuild.outcome }}
+          S_NEG: ${{ steps.negative.outcome }}
+          S_STAGE: ${{ steps.stage.outcome }}
+          # 用户是否勾选了「同时构建 debug」——决定 debug 行是「未启用」还是「必须通过」
+          DEBUG_ENABLED: ${{ inputs.verify_debug_too }}
+          # 是否允许上传真实签名 APK（仅私有仓库为 true）
+          CAN_UPLOAD_APK: ${{ steps.vis.outputs.can_upload }}
+          REPO_VISIBILITY: ${{ steps.vis.outputs.visibility }}
+          CERT_SHA: ${{ steps.cert.outputs.cert }}
+          CERT_DN: ${{ steps.cert.outputs.dn }}
+          APK_NAME: ${{ steps.stage.outputs.artifact_apk }}
+        run: |
+          set -uo pipefail
+
+          # 把 steps.<id>.outcome 映射成三态：PASS / FAIL / NOT RUN
+          #
+          # outcome 的取值语义：
+          #   success   -> PASS
+          #   failure   -> FAIL
+          #   cancelled -> NOT RUN（前置失败导致没跑）
+          #   skipped   -> NOT RUN
+          #   ''        -> NOT RUN（步骤压根没执行，例如 job 提前中断）
+          verdict() {
+            case "${1:-}" in
+              success) echo "✅ PASS" ;;
+              failure) echo "❌ FAIL" ;;
+              skipped) echo "⏭️ NOT RUN（跳过）" ;;
+              cancelled) echo "⏭️ NOT RUN（被取消）" ;;
+              '') echo "⏭️ NOT RUN（未执行）" ;;
+              *) echo "⏭️ NOT RUN（$1）" ;;
+            esac
+          }
+
+          fmt_or_none() {
+            if [ -z "${1:-}" ]; then echo "无"; else echo "\`$1\`"; fi
+          }
+
+          # ── 总体结论：所有**必需**门禁都必须 success ──────────────
+          #
+          # ⚠️ 这里以前只检查 S_CERT / S_BUILD，于是「包名版本不对」
+          # 「没有 v2 签名」「更新完整性挂了」「负向测试没通过」
+          # 「验收包没生成」全都不会影响总体结论 —— 门禁形同虚设。
+          #
+          # 规则：
+          #   · REQUIRED 里的每一项必须 success，否则总体 = 失败
+          #   · debugbuild 是**可选**项（受 inputs.verify_debug_too 控制）：
+          #       - 用户启用了：必须 success，否则失败
+          #       - 用户没启用：显示 NOT RUN，**不影响**总体结论
+          failed=""
+          check_required() {
+            # $1=显示名 $2=outcome
+            if [ "${2:-}" != "success" ]; then
+              failed="$failed\n  - $1: ${2:-未执行}"
+            fi
+          }
+          check_required "Secrets 齐全"            "$S_SECRETS"
+          check_required "keystore 可用"           "$S_KEYSTORE"
+          check_required "水位线/版本推导"         "$S_VERSION"
+          check_required "正式签名 release 构建"   "$S_BUILD"
+          check_required "证书身份"                "$S_CERT"
+          check_required "包名/版本/签名方案"      "$S_PKG"
+          check_required "更新完整性链路"          "$S_SUMS"
+          check_required "缺签名负向测试"          "$S_NEG"
+
+          # 验收包：仅在**允许上传**（私有仓库）时才要求生成。
+          # 公开仓库下 stage 会被故意跳过，那是正确行为，不该算失败。
+          if [ "$CAN_UPLOAD_APK" = "true" ]; then
+            check_required "验收包生成"            "$S_STAGE"
+          fi
+
+          # 可选门禁：只有用户启用时才纳入判定
+          if [ "$DEBUG_ENABLED" = "true" ]; then
+            check_required "debug 构建（已启用）" "$S_DEBUG"
+          fi
+
+          if [ -z "$failed" ]; then
+            OVERALL="✅ 全部必需门禁通过"
+          else
+            OVERALL="❌ **验证失败 — 不可据此发布**"
+          fi
+
+          {
+            echo "## 签名验证结果"
+            echo ""
+            echo "**总体：${OVERALL}**"
+            if [ -n "$failed" ]; then
+              echo ""
+              echo "未通过的必需门禁："
+              echo -e "$failed"
+            fi
+            echo ""
+            echo "| 验证项 | 结果 | 类别 |"
+            echo "|---|---|---|"
+            echo "| Secrets 齐全 | $(verdict "$S_SECRETS") | 必需 |"
+            echo "| keystore 可解 / 别名正确 | $(verdict "$S_KEYSTORE") | 必需 |"
+            echo "| 水位线可读 + 合成版本推导 | $(verdict "$S_VERSION") | 必需 |"
+            echo "| 正式签名 release 构建 | $(verdict "$S_BUILD") | 必需 |"
+            echo "| 证书身份（非 debug + 匹配 EXPECTED） | $(verdict "$S_CERT") | 必需 |"
+            echo "| 包名 / 版本 / 签名方案（v2=true） | $(verdict "$S_PKG") | 必需 |"
+            echo "| 更新完整性链路 | $(verdict "$S_SUMS") | 必需 |"
+            echo "| 负向：缺签名必须被拒 | $(verdict "$S_NEG") | 必需 |"
+            if [ "$CAN_UPLOAD_APK" = "true" ]; then
+              echo "| 真机验收包暂存 | $(verdict "$S_STAGE") | 必需（私有仓库） |"
+            else
+              echo "| 真机验收包暂存 | ⏭️ 未上传（仓库 ${REPO_VISIBILITY}，不可用 Artifact 交付） | 已禁用 |"
+            fi
+            # debug 构建是可选门禁：未启用时显示「未启用（可选）」而不是 FAIL/NOT RUN
+            if [ "$DEBUG_ENABLED" = "true" ]; then
+              echo "| debug 构建未受影响 | $(verdict "$S_DEBUG") | 已启用 |"
+            else
+              echo "| debug 构建未受影响 | ⏭️ 未启用（可选，不计入总体） | 可选 |"
+            fi
+            echo ""
+            echo "**证书信息**（仅在证书步骤成功时有值）"
+            echo ""
+            echo "| 项 | 值 |"
+            echo "|---|---|"
+            echo "| 证书 SHA-256 | $(fmt_or_none "$CERT_SHA") |"
+            echo "| 证书 DN | $(fmt_or_none "$CERT_DN") |"
+            echo "| 是否为公开 AOSP debug 证书 | $([ "$S_CERT" = "success" ] && echo '否（已排除）' || echo '未判定') |"
+            echo "| 是否匹配 EXPECTED_CERT_SHA256 | $([ "$S_CERT" = "success" ] && echo '是' || echo '未判定') |"
+            echo ""
+            echo "**真机验收包**"
+            echo ""
+            if [ "$S_STAGE" = "success" ]; then
+              echo "文件名：\`$(fmt_or_none "$APK_NAME")\`"
+              echo ""
+              echo "Artifact：\`NOT-FOR-RELEASE-signing-verify-apk\`（3 天后自动过期，仅协作者可见）"
+              echo ""
+              echo "> ⚠️ **这不是发布包。** versionName 是 \`0.0.0-verify.*\`，versionCode 是合成值。"
+              echo "> **禁止分发给用户。**"
+              echo ">"
+              echo "> ⚠️ **真机验完必须卸载它**：它的 versionCode 高于正式版本，"
+              echo "> 会让后续正式版 APK 无法直接覆盖安装（详见验收报告 §4）。"
+            elif [ "$CAN_UPLOAD_APK" != "true" ]; then
+              echo "**本轮故意不上传 APK。**"
+              echo ""
+              echo "仓库可见性：\`${REPO_VISIBILITY}\`。"
+              echo ""
+              echo "GitHub Actions Artifact 的访问粒度是**整个仓库**，不是单个 Artifact："
+              echo "公开仓库下任何人（登录后）都能下载。给文件加 \`NOT-FOR-RELEASE\` 前缀"
+              echo "只是命名提示，**不构成权限隔离**。因此公开仓库一律不上传真实签名包。"
+              echo ""
+              echo "真机验收请由管理员**本地构建**（使用同一份 keystore），"
+              echo "构建命令见验收报告 §9。"
+            else
+              echo "本轮没有产出验收包（证书验证未通过，见上表）。"
+            fi
+            echo ""
+            echo "---"
+            echo ""
+            echo "本工作流**不发布任何东西**：无 tag、无 Release、只读权限、Artifact 短期过期。"
+            echo ""
+            echo "> 上表的 PASS/FAIL 直接取自各步骤的真实结论（\`steps.<id>.outcome\`），"
+            echo "> 不是硬编码的。任一关键步骤失败时总体结论会显示为失败。"
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      # ── 兜底：关键步骤失败时让 job 明确失败 ────────────────────
+      #
+      # Summary 是 always() 跑的，本身不会让 job 变红；这里显式检查，
+      # 保证「门禁没通过」不会因为某步被跳过而蒙混成绿色。
+      - name: Enforce gate result
+        if: always()
+        env:
+          S_SECRETS: ${{ steps.precheck.outcome }}
+          S_KEYSTORE: ${{ steps.keystore.outcome }}
+          S_VERSION: ${{ steps.ver.outcome }}
+          S_BUILD: ${{ steps.build.outcome }}
+          S_CERT: ${{ steps.cert.outcome }}
+          S_PKG: ${{ steps.pkg.outcome }}
+          S_SUMS: ${{ steps.sums.outcome }}
+          S_NEG: ${{ steps.negative.outcome }}
+          S_STAGE: ${{ steps.stage.outcome }}
+          S_DEBUG: ${{ steps.debugbuild.outcome }}
+          DEBUG_ENABLED: ${{ inputs.verify_debug_too }}
+          CAN_UPLOAD_APK: ${{ steps.vis.outputs.can_upload }}
+        run: |
+          set -uo pipefail
+          bad=""
+
+          # 必需门禁：任一非 success 即失败
+          add_bad() {
+            if [ "${2:-}" != "success" ]; then
+              bad="$bad\n  - $1: ${2:-未执行}"
+            fi
+          }
+          add_bad "Secrets齐全"      "$S_SECRETS"
+          add_bad "keystore"         "$S_KEYSTORE"
+          add_bad "版本水位线"       "$S_VERSION"
+          add_bad "正式签名构建"     "$S_BUILD"
+          add_bad "证书身份"         "$S_CERT"
+          add_bad "包名版本签名方案" "$S_PKG"
+          add_bad "更新完整性"       "$S_SUMS"
+          add_bad "缺签名负向"       "$S_NEG"
+
+          # 验收包：只在允许上传（私有仓库）时要求成功
+          if [ "$CAN_UPLOAD_APK" = "true" ]; then
+            add_bad "验收包生成"     "$S_STAGE"
+          fi
+
+          # 可选门禁：仅在用户启用时纳入
+          if [ "$DEBUG_ENABLED" = "true" ]; then
+            add_bad "debug构建(已启用)" "$S_DEBUG"
+          fi
+
+          if [ -n "$bad" ]; then
+            echo "::error::签名验证未通过，以下关键步骤没有成功：$bad"
+            exit 1
+          fi
+          echo "所有必需门禁均通过 ✓"
+
+      # ── 清理：无论成败都删掉 keystore ──────────────────────────
+      - name: Clean up keystore
+        if: always()
+        run: rm -f "$RUNNER_TEMP/release.keystore" || true
