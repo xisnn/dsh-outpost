@@ -144,3 +144,6 @@ _test-artifacts/
 
 # 提交信息临时文件
 _m*.txt
+
+# 真机验收构建产物（含签名 APK，不应入库）
+_acceptance-apk/
