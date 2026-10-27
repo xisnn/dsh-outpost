@@ -11,6 +11,8 @@
  * 缓存按「路径 + mtime 近似」存：同一个文件多次渲染不会重复下载。
  */
 import ReactNativeBlobUtil from 'react-native-blob-util';
+import { assertSecureUrl } from './net-security';
+import { isInstallablePackage } from './installable';
 
 /** 把路径转成一个安全的本地文件名（避免中文/冒号在文件系统里出问题） */
 function cacheName(path: string): string {
@@ -44,6 +46,9 @@ export async function fetchRemoteFile(
   const dir = ReactNativeBlobUtil.fs.dirs.CacheDir;
   const name = cacheName(remotePath);
   const fsPath = `${dir}/${name}`;
+  // 这条路径直接用 blob-util 发（不经过 DshConnection.call），带的是 Cookie，
+  // 所以出口校验要自己补一次。
+  assertSecureUrl(baseUrl, '文件地址');
   const url = `${baseUrl}/api/file?${new URLSearchParams({ path: remotePath }).toString()}`;
 
   // 缓存校验：存在**且非空**才算命中。
@@ -104,8 +109,39 @@ export async function fetchRemoteFile(
   return { uri: `file://${fsPath}`, fsPath, name: displayName };
 }
 
-/** 用系统应用打开已下载的文件（PDF / docx / 图片等） */
+/**
+ * 是否是可安装的 Android 包。
+ *
+ * ## 为什么需要单独判断
+ *
+ * 聊天附件里的文件会走 `openLocalFile` → `actionViewIntent`，而
+ * `mimeOf('.apk')` 返回 `application/vnd.android.package-archive`。
+ * 也就是说：**对方（或 agent）发一个 APK 到聊天里，点一下就进系统安装器**。
+ *
+ * 这条路径完全不经过 `updater.ts` 的 SHA-256 校验 —— 是一个「第二条安装路径」。
+ * 在签名密钥是公开 debug 证书的情况下，任何能往会话里丢文件的人都能投递
+ * 一个 Android 会接受的更新（私钥修好后这条风险自动消失，但校验缺失本身
+ * 仍然应该被堵）。
+ *
+ * 处理：不在 App 内直接安装附件里的 APK。用户想装就自己去文件管理器装 ——
+ * 那至少是用户显式、脱离 App 语境的主动决定，而不是「点开一个附件」。
+ *
+ * 实现见 `installable.ts`（纯逻辑，可单测）；这里转出保持调用方不变。
+ */
+export { isInstallablePackage } from './installable';
+
+/**
+ * 用系统应用打开已下载的文件（PDF / docx / 图片等）。
+ *
+ * ⚠️ 拒绝安装 APK 类文件 —— 见 `isInstallablePackage` 的说明。
+ */
 export async function openLocalFile(file: RemoteFile): Promise<void> {
+  if (isInstallablePackage(file.name)) {
+    throw new Error(
+      '出于安全考虑，不能在 App 内直接安装附件里的安装包。\n' +
+        '请到「保存到手机」后用文件管理器手动安装。',
+    );
+  }
   const mime = mimeOf(file.name);
   await ReactNativeBlobUtil.android.actionViewIntent(file.fsPath, mime);
 }

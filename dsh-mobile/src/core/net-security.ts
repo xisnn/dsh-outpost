@@ -124,6 +124,35 @@ export function isPublicHost(baseUrl: string): boolean {
 }
 
 /**
+ * 发请求前的强制校验：不合格就抛错，请求根本不发出去。
+ *
+ * ## 为什么需要这个（而不只是 `checkBaseUrlSecurity`）
+ *
+ * `checkBaseUrlSecurity()` 只在**两个入口**被调用过：
+ *   · `DshConnection.loginWithToken()`（配对时）
+ *   · `PairScreen`（用户填地址时）
+ *
+ * 但真正带凭据发请求的地方远不止这两处：
+ *   · `DshConnection.call()` —— 所有 HTTP RPC，带 Cookie
+ *   · `DshConnection.ensureSocket()` —— 会话流 WS
+ *   · `UploadApi` / `fileUrl` —— 带 Cookie 上传和下载
+ *   · `deviceAuth` / `serverIdentity` —— 带 Cookie 查设备和撤销
+ *   · `ApprovalGateway.requestPairingCode()` —— 带 Cookie 换配对码
+ *
+ * 于是「明文只发私有网段」这条规则实际上是**入参时刻的策略**，不是
+ * **出口时刻的强制**。任何一条新加的裸 fetch、或者一个由旧版本/备份写进
+ * `@dsh/baseUrl` 的公网 `http://` 地址，都会绕过它 —— 正是这条规则要防的场景。
+ *
+ * 这个函数就是出口时刻的那道闸：所有发请求的地方都调它。
+ */
+export function assertSecureUrl(url: string, what = '请求'): void {
+  const insecure = checkBaseUrlSecurity(url);
+  if (insecure) {
+    throw new Error(`${what}被拒绝：${insecure}`);
+  }
+}
+
+/**
  * 把可能含敏感信息的 URL 变成可安全显示/记录的文本。
  *
  * 用于错误提示和日志：`http://ip:3095/?token=xxx` → `http://ip:3095/?token=***`

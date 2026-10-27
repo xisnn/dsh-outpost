@@ -54,6 +54,11 @@ param(
   [switch]$NoQr,
   # 局域网模式下自动添加防火墙放行规则（需要管理员权限）
   [switch]$AllowFirewall,
+# 跳过「网关管理接口认证补丁」完整性检查。
+#
+# 默认会检查：插件已安装时，补丁必须处于已应用状态，否则拒绝启动。
+# 只有在你确认不用手机审批（不需要 /mgw/* 管理接口）时才该跳过。
+[switch]$SkipGatewayPatchCheck,
 [switch]$Foreground
 )
 
@@ -92,6 +97,57 @@ if (-not $dsh) {
   exit 1
 }
 Write-Host "DSH: $dsh" -ForegroundColor DarkGray
+
+# ---- 网关管理接口认证补丁完整性门禁 ----
+#
+# 为什么放在这里（而不是只在 setup-gateway.ps1 里查）：
+#
+# `/mgw/*` 管理接口（含能铸造配对码的 POST /mgw/pair）的访问控制，
+# 依赖 patches/mobile-gateway-mgmt-auth/ 这个补丁。而补丁是打在
+# ~/.dsh/profiles/web/node_modules/dsh-plugin-mobile-gateway/lib/index.mjs
+# 上的 —— 一次插件升级或 npm install 就会把它抹掉。
+#
+# 如果只在 setup-gateway.ps1 里检查，那么：
+#   用户装好一切 -> 上游插件更新 -> 用户只是正常重启 DSH ->
+#   补丁已经没了，但 adminLoopbackOnly 仍是 false（配置还在）
+#   -> 管理接口无认证地暴露在局域网上，而没人会察觉。
+#
+# 所以日常启动路径也必须查。查不到时：
+#   - 默认拒绝启动（fail-closed）：宁可不能用，也不能裸奔
+#   - 用 -SkipGatewayPatchCheck 可显式跳过（仅用于你确认不用手机审批时）
+$patchScript = Join-Path $PSScriptRoot 'patches\mobile-gateway-mgmt-auth\apply.mjs'
+$gatewayInstalled = Test-Path (Join-Path $env:USERPROFILE '.dsh\profiles\web\node_modules\dsh-plugin-mobile-gateway\package.json')
+
+if (-not $SkipGatewayPatchCheck -and $gatewayInstalled -and (Test-Path $patchScript)) {
+    # 两个坑必须一起避开：
+    #   1. 脚本全局设了 ErrorActionPreference='Stop'，node 往 stderr 写东西时
+    #      会被当成终止错误直接抛出，导致下面的 if 根本执行不到。
+    #   2. 因此必须临时改回 Continue，并用 LASTEXITCODE 判断。
+    $prevEap = $ErrorActionPreference
+    $ErrorActionPreference = 'Continue'
+    try {
+        $patchOut = (& node $patchScript --check 2>&1 | Out-String)
+        $patchExit = $LASTEXITCODE
+    } finally {
+        $ErrorActionPreference = $prevEap
+    }
+
+    if ($patchExit -ne 0) {
+        Write-Host ''
+        Write-Host '[!] 网关管理接口认证补丁未生效 —— 拒绝启动。' -ForegroundColor Red
+        Write-Host $patchOut.Trim() -ForegroundColor DarkGray
+        Write-Host ''
+        Write-Host '    原因：插件可能刚被升级/重装，补丁被覆盖掉了。' -ForegroundColor Yellow
+        Write-Host '    此时 /mgw/* 管理接口没有认证，配对码铸造对同网段可达。' -ForegroundColor Yellow
+        Write-Host ''
+        Write-Host '    修复：node patches\mobile-gateway-mgmt-auth\apply.mjs --apply' -ForegroundColor Cyan
+        Write-Host '    或重跑：.\setup-gateway.ps1' -ForegroundColor Cyan
+        Write-Host ''
+        Write-Host '    确认不需要手机审批、想强行启动：加 -SkipGatewayPatchCheck' -ForegroundColor DarkGray
+        exit 1
+    }
+    Write-Host '网关认证补丁：已生效' -ForegroundColor DarkGray
+}
 
 # ---- 选绑定地址 ----
 function Get-TailnetIp {

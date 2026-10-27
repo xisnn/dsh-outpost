@@ -17,6 +17,7 @@
  * 不把文件读进 JS 内存（手机上的原图可能十几 MB）。
  */
 import ReactNativeBlobUtil from 'react-native-blob-util';
+import { assertSecureUrl } from '../net-security';
 import type { DshConnection } from '../transport';
 
 export interface UploadedFileRef {
@@ -42,6 +43,9 @@ export class UploadApi {
   async uploadBinary(sessionId: string, filePath: string, name: string): Promise<UploadReceipt> {
     const cookie = this.conn.currentCookie;
     if (!cookie) throw new Error('未登录，无法上传');
+    // 这条路径直接用 blob-util 发，不经过 DshConnection.call，
+    // 所以出口校验要自己补一次（带的是 Cookie，泄漏后果同等严重）。
+    assertSecureUrl(this.conn.baseUrl, '上传地址');
     const url =
       `${this.conn.baseUrl}/api/session/uploadFileBinary` +
       `?sessionId=${encodeURIComponent(sessionId)}&name=${encodeURIComponent(name)}`;

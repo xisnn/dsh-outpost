@@ -17,6 +17,7 @@ import { SafeAreaProvider } from 'react-native-safe-area-context';
 import AsyncStorage from '@react-native-async-storage/async-storage';
 
 import { DshConnection } from './core/transport';
+import { checkBaseUrlSecurity } from './core/net-security';
 import { Store } from './core/store';
 import {
   CredentialKey,
@@ -529,7 +530,21 @@ export default function App() {
         // Cookie 已迁到 Keystore（见 core/secureStore.ts）。
         const savedCookie = lastCookie;
         setHasLastPairing(!!lastCookie);
-        if (savedBase) setBaseUrlState(savedBase);
+        // ⚠️ 从存储里读回来的地址要**重新校验**再用。
+        //
+        // 这个值可能是旧版本写的（当时规则更松）、也可能是备份/迁移带来的。
+        // 不校验就直接 setBaseUrlState，等于把「明文只发私有网段」这条规则
+        // 交给了写入时的那个版本 —— 而 DshConnection 的构造期校验是最后一道，
+        // 这里提前拦掉可以给出更清楚的提示，而不是让用户面对一个构造异常。
+        const savedBaseInsecure = savedBase ? checkBaseUrlSecurity(savedBase) : null;
+        if (savedBase && !savedBaseInsecure) {
+          setBaseUrlState(savedBase);
+        } else if (savedBaseInsecure) {
+          // 不安全：不恢复地址，也不自动登录（cookie 留着，用户可重新扫码）
+          setSecureStorageError(
+            `已保存的服务地址不再允许使用：${savedBaseInsecure}\n请重新扫码配对。`,
+          );
+        }
 
         // ── 要不要自动登录 ────────────────────────────────────────
         //
@@ -567,10 +582,12 @@ export default function App() {
 
         const autoResume =
           intentAllowsAutoLogin && !migration.fromLastCookie && !exitIntentLost;
-        if (savedBase && savedCookie && autoResume) {
+        // 用校验过的地址决定要不要自动登录 —— 地址不安全时绝不自动连。
+        const usableBase = savedBaseInsecure ? null : savedBase;
+        if (usableBase && savedCookie && autoResume) {
           setCookie(savedCookie);
           setAuthed(true);
-        } else if (savedCookie && savedBase && !autoResume) {
+        } else if (savedCookie && usableBase && !autoResume) {
           // 用户主动断开过（或意图读不出来）：停在配对页，
           // 「直接继续」入口由 hasLastPairing 控制。
           // 这里**不清凭据** —— 用户点一下就能恢复。

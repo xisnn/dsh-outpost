@@ -20,6 +20,28 @@ function Line($ok, $label, $detail) {
     if ($detail) { Write-Host "  $detail" -ForegroundColor DarkGray } else { Write-Host '' }
 }
 
+<#
+.SYNOPSIS
+    把 URL 里的凭据打码，让输出可以安全地贴进 issue / 聊天窗口。
+
+.DESCRIPTION
+    这个脚本的用途就是把环境状态贴给别人看，但它原来会原样打印
+    pairing.json / tunnel.json 里的 url —— 那些 url 带 `?token=<43 字符>`，
+    等于把「能操作这台电脑 DSH 的钥匙」直接写给对方。
+
+    这里只保留「地址 + 端口」，token 一律替换成 `***`：
+        http://192.168.1.5:3095/?token=abc...  ->  http://192.168.1.5:3095/?token=***
+#>
+function Redact-Url($url) {
+    if (-not $url) { return $url }
+    $s = [string]$url
+    # ?token= / &token= / key= / secret= / code= 之类的查询参数
+    $s = [regex]::Replace($s, '([?&](?:token|key|secret|password|auth|code)=)[^&\s''"<>]+', '$1***', 'IgnoreCase')
+    # 裸的长 token（43+ 位 base64url），避免漏掉非 URL 形态的输出
+    $s = [regex]::Replace($s, '\b[A-Za-z0-9_-]{43,}\b', '***')
+    return $s
+}
+
 Write-Host ''
 Write-Host ('=' * 62) -ForegroundColor DarkCyan
 Write-Host '  DSH Outpost 环境自检' -ForegroundColor Cyan
@@ -161,7 +183,7 @@ $tun = Join-Path $stateDir 'tunnel.json'
 if (Test-Path $pair) {
     try {
         $j = Get-Content $pair -Raw -Encoding UTF8 | ConvertFrom-Json
-        Line $true 'pairing.json' $j.url
+        Line $true 'pairing.json' (Redact-Url $j.url)
     } catch {
         Line 'warn' 'pairing.json' '存在但解析失败'
     }
@@ -173,7 +195,7 @@ if (Test-Path $tun) {
         $j = Get-Content $tun -Raw -Encoding UTF8 | ConvertFrom-Json
         $alive = $false
         if ($j.pid) { $alive = [bool](Get-Process -Id $j.pid -ErrorAction SilentlyContinue) }
-        Line ([bool]$alive) 'tunnel.json' "$($j.url)$(if(-not $alive){'（进程已退出）'})"
+        Line ([bool]$alive) 'tunnel.json' "$(Redact-Url $j.url)$(if(-not $alive){'（进程已退出）'})"
     } catch {
         Line 'warn' 'tunnel.json' '存在但解析失败'
     }
@@ -198,7 +220,8 @@ if (-not $dsh) {
     if (Test-Path $pair) {
         try {
             $j = Get-Content $pair -Raw -Encoding UTF8 | ConvertFrom-Json
-            Write-Host "     配对地址：$($j.url)" -ForegroundColor Yellow
+            Write-Host "     配对地址：$(Redact-Url $j.url)" -ForegroundColor Yellow
+            Write-Host "     （token 已打码；完整地址见 start-dsh-web.ps1 的输出或 pairing.json）" -ForegroundColor DarkGray
         } catch {}
     }
 }
