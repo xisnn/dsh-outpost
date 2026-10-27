@@ -20,7 +20,8 @@
 
 import { readFileSync } from 'node:fs';
 import path from 'node:path';
-import { execFileSync } from 'node:child_process';
+
+import { parsePowerShellFile, runPowerShellFile } from './support/powershell.mjs';
 
 let pass = 0;
 let fail = 0;
@@ -281,19 +282,26 @@ check(shouldReject.length === 2 && privOk.length === 4, '校验用例集完备')
 
 console.log('');
 console.log('── P1-10 doctor.ps1 脱敏 ──');
-try {
-  const out = execFileSync(
-    'powershell',
-    ['-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', path.join(repo, 'doctor.ps1')],
-    { cwd: repo, encoding: 'utf8', timeout: 120000 },
-  );
-  const longTokens = out.match(/\b[A-Za-z0-9_-]{43,}\b/g) || [];
-  check(longTokens.length === 0, 'doctor.ps1 输出不含 43+ 位 token');
-  const tokenParams = out.match(/[?&]token=([^&\s"']*)/g) || [];
-  const leaked = tokenParams.filter((t) => !/^[?&]token=\*\*\*$/.test(t));
-  check(leaked.length === 0, 'token 参数全部打码');
-} catch (e) {
-  check(true, 'doctor.ps1 执行（非零退出属正常自检结论）');
+//
+// ⚠️ 这里以前是 `catch { check(true, '...') }` —— 无条件 PASS。
+// 那意味着「PowerShell 不存在」「脚本语法错误」「执行超时」全都被
+// 判成通过，等于这两个脱敏断言从来没真正生效过。改成三态处理：
+{
+  const doc = runPowerShellFile(path.join(repo, 'doctor.ps1'), { cwd: repo });
+  if (doc.status === 'missing') {
+    if (process.env.CI) bad(`doctor.ps1 无法验证（CI 必须有 PowerShell）：${doc.detail}`);
+    else console.log('  SKIP  doctor.ps1 脱敏行为（本机无 PowerShell）');
+  } else if (doc.status === 'error') {
+    bad(`doctor.ps1 执行异常：${doc.detail}`);
+  } else {
+    // 脚本跑了（退出码非 0 是自检结论，不影响输出解析）
+    ok(`doctor.ps1 执行并产生输出（${doc.output.length} 字节）`);
+    const longTokens = doc.output.match(/\b[A-Za-z0-9_-]{43,}\b/g) || [];
+    check(longTokens.length === 0, 'doctor.ps1 输出不含 43+ 位 token');
+    const tokenParams = doc.output.match(/[?&]token=([^&\s"']*)/g) || [];
+    const leaked = tokenParams.filter((t) => !/^[?&]token=\*\*\*$/.test(t));
+    check(leaked.length === 0, 'token 参数全部打码');
+  }
 }
 
 console.log('');
@@ -326,21 +334,23 @@ check(
   'danger-full-access 时打印警告',
 );
 
-// PowerShell 语法必须可解析
+// PowerShell 语法必须可解析（跨平台：Windows 用 powershell，Linux CI 用 pwsh）
 for (const f of ['start-tunnel.ps1', 'doctor.ps1', 'setup-gateway.ps1']) {
-  try {
-    const script = `
-      $err = $null
-      $null = [System.Management.Automation.Language.Parser]::ParseFile('${path.join(repo, f)}', [ref]$null, [ref]$err)
-      if ($err -and $err.Count -gt 0) { Write-Output 'PARSE_FAIL'; exit 1 } else { Write-Output 'PARSE_OK' }
-    `;
-    const res = execFileSync('powershell', ['-NoProfile', '-Command', script], {
-      encoding: 'utf8',
-      timeout: 60000,
-    });
-    check(/PARSE_OK/.test(res), `${f} 语法可解析`);
-  } catch {
-    bad(`${f} 语法解析失败`);
+  const r = parsePowerShellFile(path.join(repo, f));
+  if (r.status === 'ok') {
+    ok(`${f} 语法可解析`);
+  } else if (r.status === 'missing') {
+    // 环境里根本没有 PowerShell：这是**环境问题，不是代码问题**。
+    // 但不能静默算通过 —— CI 上必须失败，本地明确标注 SKIP。
+    if (process.env.CI) {
+      bad(`${f} 无法验证：${r.detail}`);
+    } else {
+      console.log(`  SKIP  ${f} 语法检查（本机无 PowerShell）`);
+    }
+  } else if (r.status === 'parse') {
+    bad(`${f} 语法解析失败：${r.detail}`);
+  } else {
+    bad(`${f} 执行异常（非语法问题）：${r.detail}`);
   }
 }
 

@@ -121,6 +121,28 @@ jobs:
         working-directory: dsh-mobile
         run: npm ci
 
+      # ── PowerShell 可用性（部分测试会真跑 .ps1）────────────────
+      #
+      # `npm test` 里有测试会用 PowerShell 解析/执行 .ps1
+      # （tests/support/powershell.mjs 负责跨平台挑可执行文件）。
+      #
+      # Linux 上可执行文件叫 `pwsh`，**没有** `powershell`。
+      # ubuntu-24.04 镜像预装了 PowerShell 7，但这里**显式检查**而不是
+      # 依赖「镜像应该有」—— 镜像变更是会发生的，而失败时的报错必须直接
+      # 指向真正原因（缺 pwsh），而不是让测试报一句含糊的「语法解析失败」。
+      - name: Verify PowerShell availability
+        run: |
+          set -euo pipefail
+          if ! command -v pwsh >/dev/null 2>&1; then
+            echo "::error::找不到 pwsh —— 部分单元测试需要 PowerShell 来校验 .ps1"
+            echo "  ubuntu 镜像通常自带 PowerShell 7；若被移除，请在此 workflow 里加："
+            echo "    - uses: actions/checkout@... （已有）"
+            echo "    然后安装 pwsh，或改用 windows runner。"
+            exit 1
+          fi
+          echo "pwsh: $(command -v pwsh)"
+          pwsh -NoProfile -Command '$PSVersionTable.PSVersion.ToString()'
+
       # ── 单元 + 集成测试（签名验证不能脱离功能正确性）──────────
       - name: Unit tests
         working-directory: dsh-mobile

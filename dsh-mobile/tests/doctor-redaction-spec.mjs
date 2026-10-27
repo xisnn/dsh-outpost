@@ -19,9 +19,10 @@
  * 静态检查是看不出来的。
  */
 
-import { execFileSync } from 'node:child_process';
 import { readFileSync } from 'node:fs';
 import path from 'node:path';
+
+import { runPowerShellFile } from './support/powershell.mjs';
 
 let pass = 0;
 let fail = 0;
@@ -76,21 +77,24 @@ for (const [label, re] of [
 }
 
 // ── 第二步：行为验证（真跑脚本）────────────────────────────────
+//
+// 跨平台：Windows 用 powershell.exe，Linux CI 用 pwsh（见 support/powershell.mjs）。
+// 原先硬编码 'powershell' 在 ubuntu 上直接 ENOENT。
 
-let output = '';
-try {
-  output = execFileSync(
-    'powershell',
-    ['-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', doctorPath],
-    { cwd: repoRoot, encoding: 'utf8', timeout: 120000 },
-  );
-} catch (e) {
-  // doctor.ps1 用 exit code 表示自检结论，非 0 也可能有正常输出
-  output = String(e.stdout || '') + String(e.stderr || '');
-}
+const docRun = runPowerShellFile(doctorPath, { cwd: repoRoot });
+const output = docRun.output;
 
-if (output.length > 0) {
-  ok('doctor.ps1 能执行并产生输出');
+if (docRun.status === 'missing') {
+  // 环境里没有 PowerShell —— 不能静默算通过（那会让脱敏断言永远不生效）
+  if (process.env.CI) {
+    bad(`无法执行 doctor.ps1（CI 必须有 PowerShell）：${docRun.detail}`);
+  } else {
+    console.log('  SKIP  doctor.ps1 行为验证（本机无 PowerShell）');
+  }
+} else if (docRun.status === 'error') {
+  bad(`doctor.ps1 执行异常：${docRun.detail}`);
+} else if (output.length > 0) {
+  ok(`doctor.ps1 能执行并产生输出（${output.length} 字节）`);
 } else {
   bad('doctor.ps1 没有产生任何输出');
 }
