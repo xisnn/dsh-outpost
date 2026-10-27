@@ -2465,20 +2465,21 @@ var qrcode = function() {
           .then((st) => {
             if (!alive) return;
 
-            let tok = (st && st.token) || '';
-            if (!tok) {
-              try {
-                const u = new URL(window.location.href);
-                tok = u.searchParams.get('token') || '';
-              } catch {
-                /* ignore */
-              }
+            // ⚠️ /tunnel/status 不再返回 token（见 tunnel-service.mjs 的说明）。
+            // token 从当前页面 URL 取 —— 打开 DSH 时它就在 `?token=` 里，
+            // 这是本页面自己的凭据，不需要服务端再回传一遍。
+            let tok = '';
+            try {
+              const u = new URL(window.location.href);
+              tok = u.searchParams.get('token') || '';
+            } catch {
+              /* ignore */
             }
             setToken(tok);
 
-            // 局域网地址：服务给了就用，否则用当前 origin
+            // 服务给的是「不含凭据」的地址，token 由前端补上
             if (st && st.lanUrl) {
-              setLanUrl(st.lanUrl);
+              setLanUrl(withToken(st.lanUrl, tok));
             } else {
               setLanUrl(withToken(origin, tok));
             }

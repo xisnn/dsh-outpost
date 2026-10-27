@@ -25,7 +25,7 @@ import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { execFile } from 'node:child_process';
 import { readFile } from 'node:fs/promises';
-import { mkdirSync } from 'node:fs';
+import { mkdirSync, existsSync } from 'node:fs';
 import { promisify } from 'node:util';
 
 const execFileAsync = promisify(execFile);
@@ -46,6 +46,43 @@ const PORT = Number(process.env.DSH_TUNNEL_PORT || 3199);
 const HERE = path.dirname(fileURLToPath(import.meta.url));
 const REPO_ROOT = process.env.DSH_POCKET_ROOT || path.resolve(HERE, '..');
 
+/**
+ * 找一个 PowerShell 脚本的实际路径。
+ *
+ * ## 为什么不能只拼 REPO_ROOT（这是 P1-11 的根因）
+ *
+ * 这个服务有两种运行形态，脚本落点不同：
+ *
+ *   · **开发/插件**：本文件在 `dsh-plugin-connect/`，脚本在仓库根
+ *     → `REPO_ROOT/start-tunnel.ps1` 成立
+ *   · **打包的桌面助手**：本文件被 electron-builder 拷到
+ *     `resources/tunnel-service.mjs`，两个 .ps1 也在 `resources/` 下
+ *     （见 electron-builder.yml 的 extraResources）。
+ *     此时 `REPO_ROOT` = `resources/..` = 安装根，拼出来是
+ *     `<安装根>/start-tunnel.ps1` —— **不存在**。
+ *
+ * 结果是打包版面板上的「启动隧道 / 停止隧道 / 一键修复」全是死按钮。
+ *
+ * 现在按「最可能的位置」依次探测，返回第一个存在的；都不存在时返回
+ * 首选路径，让报错信息能指出期望位置。
+ */
+function findScript(name) {
+  const candidates = [
+    path.join(REPO_ROOT, name), // 开发：仓库根
+    path.join(HERE, name), // 打包：与本文件同目录（resources/）
+    path.resolve(HERE, '..', name),
+    path.resolve(HERE, '..', '..', name),
+  ];
+  for (const p of candidates) {
+    try {
+      if (existsSync(p)) return p;
+    } catch {
+      /* ignore */
+    }
+  }
+  return candidates[0];
+}
+
 /** 状态目录：存 tunnel.json / pairing.json / 日志 */
 const STATE_DIR =
   process.env.DSH_STATE_DIR ||
@@ -58,29 +95,82 @@ try {
   /* 建不了就算了，后面写文件时会报具体错 */
 }
 
-const TUNNEL_SCRIPT = path.join(REPO_ROOT, 'start-tunnel.ps1');
-const DSH_SCRIPT = path.join(REPO_ROOT, 'start-dsh-web.ps1');
+const TUNNEL_SCRIPT = findScript('start-tunnel.ps1');
+const DSH_SCRIPT = findScript('start-dsh-web.ps1');
 const TUNNEL_STATE = path.join(STATE_DIR, 'tunnel.json');
 const PAIRING_FILE = path.join(STATE_DIR, 'pairing.json');
 
 /** DSH Web 的端口 */
 const DSH_PORT = Number(process.env.DSH_WEB_PORT || 3095);
 
-/** 只允许这些来源访问（本机页面） */
-const ALLOWED_ORIGIN =
-  /^https?:\/\/(127\.0\.0\.1|localhost|\[::1\]|172\.\d+\.\d+\.\d+|192\.168\.\d+\.\d+|10\.\d+\.\d+\.\d+)(:\d+)?$/;
+/**
+ * 允许的来源（本机页面）。
+ *
+ * ## 为什么不能放行整段私网
+ *
+ * 旧实现把 `10/8`、`172.16/12`、`192.168/16` 里**任意** origin 都当自己人，
+ * 并且把这个 origin 回显到 `Access-Control-Allow-Origin`。而这个服务的
+ * `GET /tunnel/status` 会返回**明文 DSH token**（能操作整台电脑的钥匙）。
+ *
+ * 于是同网段内任何网页（被入侵的 IoT、同事本机起在 0.0.0.0 的 dev server、
+ * NAS 管理页）都能用一条 fetch 把 token 读走 —— 这不是理论问题，是可以
+ * 直接复现的。
+ *
+ * ## 判据
+ *
+ * 只认「DSH 自己的页面」：回环地址，以及 pairing.json 里记录的这台机器的
+ * 局域网地址。两者都必须是 DSH 的端口。
+ */
+function allowedOrigins() {
+  const port = DSH_PORT;
+  const list = new Set([
+    `http://127.0.0.1:${port}`,
+    `http://localhost:${port}`,
+    `http://[::1]:${port}`,
+  ]);
+  // pairing.json 记录的地址 = DSH 正在绑的那个地址（DSH 只接受具体 IP，不接受 0.0.0.0）
+  const host = (cachedPairing && cachedPairing.host) || '';
+  if (host) list.add(`http://${host}:${port}`);
+  // 兜底：pairing.json 还没生成时，用当前网卡地址，否则 DSH 自己的页面会被挡掉
+  const lan = primaryLanIp();
+  if (lan) list.add(`http://${lan}:${port}`);
+  return list;
+}
+
+/** 每 5 秒刷新一次的 pairing 缓存，避免每个请求都读磁盘 */
+let cachedPairing = null;
+let pairingReadAt = 0;
+async function refreshPairingCache() {
+  const now = Date.now();
+  if (now - pairingReadAt < 5000 && pairingReadAt !== 0) return;
+  pairingReadAt = now;
+  cachedPairing = await readJson(PAIRING_FILE);
+}
+
+/**
+ * 这个 origin 是否受信任。
+ *
+ * 注意：这里返回 false 的浏览器请求会在**执行任何动作之前**被 403 掉，
+ * 所以它同时挡住了「跨站读取 token」和「跨站触发 start/stop/repair」
+ * （后者是 CSRF：简单请求不触发预检，服务端仍会执行）。
+ */
+function isAllowedOrigin(origin) {
+  if (!origin) return false;
+  return allowedOrigins().has(origin);
+}
 
 /** 虚拟网卡，检测 IP 时要跳过 */
 const VIRTUAL_NIC =
   /vEthernet|VMware|VirtualBox|Hyper-V|Loopback|Mihomo|Clash|TUN|TAP|Tailscale|ZeroTier|WSL|Bluetooth|蓝牙|Npcap/i;
 
 function corsHeaders(origin) {
-  const ok = origin && ALLOWED_ORIGIN.test(origin);
+  const ok = isAllowedOrigin(origin);
   return {
     'Access-Control-Allow-Origin': ok ? origin : 'null',
     'Access-Control-Allow-Methods': 'GET, POST, OPTIONS',
     'Access-Control-Allow-Headers': 'Content-Type',
     'Access-Control-Max-Age': '600',
+    'Vary': 'Origin',
   };
 }
 
@@ -222,8 +312,20 @@ async function getStatus() {
     ipChanged,
     dshRunning: Boolean(dshIp),
     dshPort: DSH_PORT,
-    lanUrl: pair?.url || (dshIp ? `http://${dshIp}:${DSH_PORT}` : ''),
-    token: pair?.token || '',
+    // ⚠️ 这里**不再返回明文 token**。
+    //
+    // 第一轮把 CORS 收紧到「只认 DSH 自己的 origin」，挡住了跨站读取；
+    // 但 token 一旦出现在响应体里，浏览器的同源策略就是唯一防线 ——
+    // 任何同源 XSS、或将来放松 CORS 的改动，都会直接泄漏这把「能操作
+    // 整台电脑的钥匙」。
+    //
+    // 需要 token 的调用方本来就能自己拿到：
+    //   · 网页插件：当前页面 URL 里就有 `?token=`（DSH 打开时就带着）
+    //   · 桌面助手：直接读 pairing.json（它本来就在读）
+    //
+    // 所以这里只给「不含凭据」的地址，token 由调用方各自解决。
+    lanUrl: dshIp ? `http://${dshIp}:${DSH_PORT}` : '',
+    recordedUrl: pair?.url ? stripTokenFromUrl(pair.url) : '',
   };
 
   if (!tun || !tun.url) return { ...base, running: false };
@@ -233,12 +335,32 @@ async function getStatus() {
     running: true,
     url: tun.url,
     domain: tun.domain,
-    pairUrl: tun.pairUrl || tun.url,
-    token: tun.token || pair?.token || '',
+    // pairUrl 同样去掉 token
+    pairUrl: stripTokenFromUrl(tun.pairUrl || tun.url),
     startedAt: tun.startedAt,
     // 隧道指向的地址和当前 IP 不一致，说明隧道也失效了
     tunnelStale: Boolean(currentIp && tun.target && !tun.target.includes(currentIp)),
   };
+}
+
+/**
+ * 去掉 URL 里的凭据查询参数。
+ *
+ * 只保留协议/主机/端口/路径。用于 `/tunnel/status` 这类可能被浏览器
+ * 读到的地方 —— 地址本身（用于判断 IP 是否变了）不是秘密，token 是。
+ */
+export function stripTokenFromUrl(raw) {
+  if (!raw) return '';
+  try {
+    const u = new URL(String(raw));
+    for (const k of [...u.searchParams.keys()]) {
+      if (/^(token|key|secret|password|auth|code)$/i.test(k)) u.searchParams.delete(k);
+    }
+    return u.toString();
+  } catch {
+    // 不是合法 URL：按字符串粗剥一层，避免原样回传
+    return String(raw).replace(/([?&](?:token|key|secret|password|auth|code)=)[^&\s]+/gi, '$1***');
+  }
 }
 
 /** 跑 PowerShell 脚本 */
@@ -262,18 +384,30 @@ async function runScript(script, args, timeoutMs) {
 
 const server = http.createServer(async (req, res) => {
   const origin = req.headers.origin || '';
+
+  // 先把 pairing.json 读进缓存 —— 允许的 origin 里要包含这台机器的局域网地址
+  await refreshPairingCache();
+
   const headers = { 'Content-Type': 'application/json; charset=utf-8', ...corsHeaders(origin) };
+
+  // ── 来源判定 ────────────────────────────────────────────────────
+  //
+  // ⚠️ 顺序很重要：必须在**执行任何动作之前**拒绝，否则 POST /tunnel/stop
+  // 这类简单请求（不触发预检）会被跨站页面直接触发 —— 那是 CSRF，
+  // 浏览器拦不住，只有服务端能拦。
+  //
+  // 有 Origin = 浏览器发起，只认 DSH 自己的页面。
+  // 无 Origin = 本机进程（curl / 插件 / 桌面助手），服务只绑 127.0.0.1，
+  //            能连上它的本来就只有本机进程，放行。
+  if (origin && !isAllowedOrigin(origin)) {
+    res.writeHead(403, headers);
+    res.end(JSON.stringify({ ok: false, error: 'origin not allowed' }));
+    return;
+  }
 
   if (req.method === 'OPTIONS') {
     res.writeHead(204, headers);
     res.end();
-    return;
-  }
-
-  // 浏览器请求必须是本机页面；非浏览器（无 Origin）放行
-  if (origin && !ALLOWED_ORIGIN.test(origin)) {
-    res.writeHead(403, headers);
-    res.end(JSON.stringify({ ok: false, error: 'origin not allowed' }));
     return;
   }
 

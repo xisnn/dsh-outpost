@@ -611,13 +611,21 @@ ipcMain.handle('tunnel:action', async (_e, action) => {
 // 不在主进程里重写一遍，行为才不会分叉。
 
 /** 定位启动脚本 */
-function findStartScript() {
+/**
+ * 定位一个随包分发的 PowerShell 脚本。
+ *
+ * 打包后脚本在 `process.resourcesPath` 下（见 electron-builder.yml 的
+ * extraResources）；开发时在仓库根。
+ *
+ * @param {string} [name] 脚本文件名，默认 `start-dsh-web.ps1`
+ */
+function findStartScript(name = 'start-dsh-web.ps1') {
   const candidates = [
     // 打包后 extraResources 拷过来的
-    process.resourcesPath ? path.join(process.resourcesPath, 'start-dsh-web.ps1') : '',
+    process.resourcesPath ? path.join(process.resourcesPath, name) : '',
     // 开发时：仓库根
-    path.join(REPO_ROOT, 'start-dsh-web.ps1'),
-    path.join(__dirname, '..', '..', '..', 'start-dsh-web.ps1'),
+    path.join(REPO_ROOT, name),
+    path.join(__dirname, '..', '..', '..', name),
   ].filter(Boolean);
   for (const p of candidates) {
     if (fs.existsSync(p)) return p;
@@ -764,16 +772,79 @@ ipcMain.handle('dsh:action', async (_e, action) => {
   }
 });
 
+/**
+ * 取一个可用的 DSH 会话 cookie，用于访问受认证保护的 /mgw/* 管理接口。
+ *
+ * ## 为什么需要
+ *
+ * 管理接口补丁（patches/mobile-gateway-mgmt-auth/）把 /mgw/* 的访问控制
+ * 交给 DSH 自己的会话认证。桌面助手原来用裸 fetch 调 /mgw/devices，
+ * 不带任何凭据 —— 打补丁后会被 401 拦下。
+ *
+ * ## 怎么拿
+ *
+ * pairing.json 里有 DSH 的配对 token，而 `GET /?token=...` 会以
+ * `Set-Cookie` 下发 dsh-auth-* 会话 cookie（这也是手机 App 的做法）。
+ * 这里做同样的事，并把 cookie 缓存在内存里（有效期短，不做持久化：
+ * 它和 token 是同一把钥匙，没必要多存一份）。
+ *
+ * @returns cookie 字符串（`name=value`），拿不到返回空串
+ */
+let cachedDshCookie = null;
+let cachedDshCookieAt = 0;
+const DSH_COOKIE_TTL_MS = 5 * 60 * 1000;
+
+async function getDshSessionCookie(pairing) {
+  if (!pairing?.host || !pairing?.port || !pairing?.token) return '';
+  if (cachedDshCookie && Date.now() - cachedDshCookieAt < DSH_COOKIE_TTL_MS) {
+    return cachedDshCookie;
+  }
+  try {
+    const ctrl = new AbortController();
+    const t = setTimeout(() => ctrl.abort(), 5000);
+    const res = await fetch(
+      `http://${pairing.host}:${pairing.port}/?token=${encodeURIComponent(pairing.token)}`,
+      { signal: ctrl.signal, redirect: 'manual' },
+    );
+    clearTimeout(t);
+    // Node 的 fetch 支持 getSetCookie()
+    const raw = typeof res.headers.getSetCookie === 'function'
+      ? res.headers.getSetCookie()
+      : [res.headers.get('set-cookie')].filter(Boolean);
+    const parts = raw
+      .map((c) => String(c).split(';')[0].trim())
+      .filter((c) => c.startsWith('dsh-auth'));
+    if (parts.length === 0) return '';
+    cachedDshCookie = parts.join('; ');
+    cachedDshCookieAt = Date.now();
+    return cachedDshCookie;
+  } catch {
+    return '';
+  }
+}
+
 ipcMain.handle('devices:list', async () => {
   const pairing = readPairing();
   if (!pairing?.host) return { ok: false, devices: [] };
   try {
+    const cookie = await getDshSessionCookie(pairing);
     const ctrl = new AbortController();
     const t = setTimeout(() => ctrl.abort(), 4000);
     const res = await fetch(`http://${pairing.host}:${pairing.port}/mgw/devices`, {
       signal: ctrl.signal,
+      headers: cookie ? { Cookie: cookie } : {},
     });
     clearTimeout(t);
+    if (res.status === 401) {
+      // 补丁生效后这是「没带有效会话凭据」的预期结果。
+      // 设备列表只是面板上的附加信息，不阻塞主流程。
+      return {
+        ok: false,
+        devices: [],
+        error: '需要 DSH 会话凭据（管理接口已启用认证）',
+        authRequired: true,
+      };
+    }
     if (!res.ok) return { ok: false, devices: [], error: `HTTP ${res.status}` };
     const json = await res.json();
     return { ok: true, devices: json?.payload?.devices ?? json?.devices ?? [] };
@@ -922,19 +993,89 @@ app.whenReady().then(async () => {
   }
 });
 
+/**
+ * 退出前把隧道停掉。
+ *
+ * ## 为什么必须做（P1-12）
+ *
+ * cloudflared 不是这个进程的**直接**子进程 —— 它是 `start-tunnel.ps1`
+ * 拉起来的孙子进程，不在同一个 job object 里。所以 `serviceProc.kill()`
+ * 杀不到它。
+ *
+ * 后果：用户在面板上看到隧道在跑，点「退出」，以为关干净了 ——
+ * 实际公网域名仍然指向这台机器，token 也还有效。**机器继续暴露在公网**。
+ *
+ * 这里在退出前显式调 `start-tunnel.ps1 -Stop`（它会按 pid 文件杀掉
+ * cloudflared）。失败不阻塞退出，只记日志 —— 退出流程不能因为隧道
+ * 出问题而挂住。
+ *
+ * @returns {Promise<void>} 无论成败都 resolve
+ */
+async function stopTunnelOnQuit() {
+  try {
+    // 只在我们自己知道隧道在跑时才去停，避免每次退出都拉一个 PowerShell
+    const tun = readTunnel();
+    if (!tun || !tun.url) return;
+
+    const script = findStartScript('start-tunnel.ps1');
+    if (!script) {
+      writeCrashLog('stopTunnelOnQuit', new Error('找不到 start-tunnel.ps1'));
+      return;
+    }
+    await new Promise((resolve) => {
+      const child = spawn(
+        'powershell.exe',
+        ['-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', script, '-Stop'],
+        { cwd: path.dirname(script), windowsHide: true, stdio: 'ignore' },
+      );
+      // 最多等 8 秒；超时就放弃（不能让退出卡住）
+      const timer = setTimeout(() => {
+        try {
+          child.kill();
+        } catch {
+          /* ignore */
+        }
+        resolve();
+      }, 8000);
+      child.on('exit', () => {
+        clearTimeout(timer);
+        resolve();
+      });
+      child.on('error', () => {
+        clearTimeout(timer);
+        resolve();
+      });
+    });
+  } catch (e) {
+    writeCrashLog('stopTunnelOnQuit', e);
+  }
+}
+
 // 全部窗口关闭也不退出（托盘程序）
 app.on('window-all-closed', () => {
   /* 什么都不做，靠托盘「退出」 */
 });
 
-app.on('before-quit', () => {
+let quitCleanupDone = false;
+app.on('before-quit', (event) => {
   quitting = true;
-  // 顺手把我们自己拉起来的服务关掉（复用别人起的不动）
-  if (serviceProc) {
-    try {
-      serviceProc.kill();
-    } catch {
-      /* ignore */
-    }
+
+  // 隧道清理是异步的：先拦一次退出，清理完再真的退。
+  // 只拦一次 —— 否则 afterQuitCleanup 里的 app.quit() 会被再次拦下。
+  if (!quitCleanupDone) {
+    event.preventDefault();
+    quitCleanupDone = true;
+    void (async () => {
+      await stopTunnelOnQuit();
+      // 顺手把我们自己拉起来的服务关掉（复用别人起的不动）
+      if (serviceProc) {
+        try {
+          serviceProc.kill();
+        } catch {
+          /* ignore */
+        }
+      }
+      app.quit();
+    })();
   }
 });
