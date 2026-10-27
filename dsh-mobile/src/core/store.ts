@@ -1400,6 +1400,13 @@ export class Store {
     // 不做乐观插入，否则会在聊天里闪一条「用户消息」。
     const injected = text.trim() ? isInjectedMessage(text) : false;
 
+    // 记录乐观插入那条消息的 key —— 发送失败时要把**它自己**删掉。
+    //
+    // ⚠️ 为什么必须删：失败时如果不删，本地就留下一条「幽灵消息」。
+    // 用户看到它以为已经发出去了，点重试又插一条，聊天区就出现两条
+    // 一模一样的内容。实测（模拟器断网重试）能稳定复现。
+    let optimisticKey: string | undefined;
+
     if (!injected) {
       // 乐观插入：本地先显示，等真实事件回来再被 fold 覆盖。
       // 注意剥掉尾部的模式标记，否则会闪一下 〔模式:计划〕。
@@ -1408,6 +1415,7 @@ export class Store {
       // 之前只插入消息不设 running，界面要等下一次 refreshChatMeta 轮询
       // （5 秒）才知道「开始跑了」；加上模型首字延迟十几秒，
       // 用户发完消息后屏幕上长时间毫无反应，像是卡死了。
+      optimisticKey = `local-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`;
       this.chats.set(sessionId, {
         ...cur,
         running: true,
@@ -1415,7 +1423,7 @@ export class Store {
           ...cur.items,
           {
             kind: 'user',
-            key: `local-${Date.now()}`,
+            key: optimisticKey,
             turn: (cur.turns.at(-1)?.turn ?? 0) + 1,
             text: stripModeTag(text).trim(),
             time: Date.now(),
@@ -1435,6 +1443,15 @@ export class Store {
         // 发送失败必须把 running 复位，否则界面会一直显示「思考中」转圈
         running: false,
         error: e instanceof Error ? e.message : String(e),
+        // ⚠️ 把乐观插入的那条删掉。
+        //
+        // 不删的话：用户看到这条以为已经发出去了，点重试又插一条，
+        // 聊天区出现两条相同内容。实测断网重试能稳定复现。
+        //
+        // 只删自己那条（按 key 匹配），不影响已有的历史消息。
+        items: optimisticKey
+          ? c.items.filter((it) => it.key !== optimisticKey)
+          : c.items,
       });
       this.emit();
       throw e;
