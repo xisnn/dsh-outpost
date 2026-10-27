@@ -99,6 +99,22 @@ export function ChatScreen({
   const [sending, setSending] = useState(false);
   const [attaching, setAttaching] = useState(false);
   const [sendError, setSendError] = useState<string | undefined>(undefined);
+  /**
+   * 上一次发送失败、可以安全重试的那条消息。
+   *
+   * 关键点：**重试必须复用同一个 requestId**。
+   *
+   * DSH 服务端按 requestId 去重（`hasPromptRequest` 同时查已排队和
+   * 已执行的用户消息）。所以：
+   *   · requestId 不变 → 就算上次其实已经送达，重试也只会拿到
+   *     `{accepted:true}`，**不会重复执行任务**
+   *   · requestId 变了 → 服务端当成两条不同消息，有副作用的工具调用
+   *     会**真的跑两遍**
+   *
+   * 为什么还要记 `text`：用户失败后改了内容再发，那是新的意图，
+   * 必须换新 id —— 否则会被服务端误判成重复而丢弃。
+   */
+  const [retryReq, setRetryReq] = useState<{ id: string; text: string } | undefined>(undefined);
   // 管家模式：chat=闲聊（默认，直接回答）/ plan=计划（先对齐需求再派活）
   const [butlerMode, setButlerMode] = useState<ButlerMode>('chat');
   // 管家页顶部的「切换项目」弹层
@@ -288,22 +304,35 @@ export function ChatScreen({
     setAttaching(pending.length > 0);
     setDraft('');
     setDrafts([]);
+
+    // 重试复用同一个 requestId —— 让服务端能按幂等键去重。
+    //
+    // 判据是「文字没变」：失败后草稿会被放回输入框，用户直接点发送
+    // 就是同一次意图；如果改了内容，那是一条新消息，要换新 id。
+    const isRetry = retryReq !== undefined && retryReq.text === text;
+    const requestId =
+      isRetry ? retryReq.id : `req-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
+
     try {
       const attachments = await resolveDrafts(pending);
       // 不再给每条消息拼 〔模式:xxx〕 —— 模式切换时已经单独发过指令了。
       // 每条都带标记会白烧 token（100 轮 = 100 个标记全进上下文）。
-      await store.send(sessionId, text, attachments, 'queue');
+      await store.send(sessionId, text, attachments, 'queue', requestId);
       setNearBottom(true);
+      // 成功 → 清掉重试记录，下次发送必须是新的 requestId
+      setRetryReq(undefined);
     } catch (e) {
       // 失败把草稿放回去，别让用户白选一遍
       setDraft(text);
       setDrafts(pending);
-      setSendError(e instanceof Error ? e.message : String(e));
+      // 记住这次意图，重试时复用同一个 requestId
+      setRetryReq({ id: requestId, text });
+      setSendError(describeSendError(e));
     } finally {
       setSending(false);
       setAttaching(false);
     }
-  }, [draft, drafts, sending, resolveDrafts, sessionId, store]);
+  }, [draft, drafts, sending, resolveDrafts, sessionId, store, retryReq]);
 
   const renderBlocks = (blocks: Block[], keyPrefix: string) =>
     blocks.map((b, i) => {
@@ -828,6 +857,48 @@ export function ChatScreen({
       />
     </View>
   );
+}
+
+/**
+ * 把发送失败的原因翻译成用户能判断的话。
+ *
+ * ## 为什么要区分「未知」和「失败」
+ *
+ * 这两件事对用户的含义完全不同：
+ *
+ *   · **明确没送达**（连接被拒、DNS 失败）→ 任务肯定没跑，放心重试
+ *   · **结果未知**（请求发出后超时、读到一半断网）→ 任务**可能已经在
+ *     电脑上跑起来了**，只是回执没回来
+ *
+ * 对第二种情况，绝不能简单说「发送失败」然后让用户以为没发出去 ——
+ * 他可能会去电脑上手动再跑一遍，那就真的重复了。
+ *
+ * 好在我们的重试是**幂等**的（复用同一个 requestId，服务端会去重），
+ * 所以可以明确告诉用户「直接点发送重试即可，不会重复」。
+ */
+function describeSendError(e: unknown): string {
+  const raw = e instanceof Error ? e.message : String(e);
+  const kind = e && typeof e === 'object' && 'kind' in e ? String((e as { kind?: unknown }).kind) : '';
+  const isTimeout = /请求超时|AbortError|timeout/i.test(raw);
+  const isNetworkDown = /Network request failed|ENOTFOUND|ECONNREFUSED|Network is unreachable/i.test(raw);
+
+  if (isTimeout) {
+    // 最需要小心的一类：请求可能已经到达
+    return (
+      '发送结果未知：请求已发出但没收到回执，电脑上可能已经开始执行了。\n' +
+      '直接点发送重试即可 —— 会复用同一个消息 ID，服务端自动去重，不会重复执行。'
+    );
+  }
+  if (isNetworkDown) {
+    return (
+      '消息没发出去（网络不通）。\n' +
+      '检查网络后点发送重试即可。'
+    );
+  }
+  if (kind === 'auth') {
+    return '登录凭据失效了，请回到「我的」重新连接后再发送。';
+  }
+  return `发送失败：${raw}\n可以直接点发送重试（不会重复）。`;
 }
 
 function makeStyles(tv: ReturnType<typeof useTheme>) {
