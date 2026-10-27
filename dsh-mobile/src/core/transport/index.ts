@@ -198,6 +198,20 @@ export class DshConnection {
     const insecure = checkBaseUrlSecurity(this.baseUrl);
     if (insecure) throw new Error(insecure);
 
+    // ⚠️ 登录前必须先清空本服务的 cookie jar。
+    //
+    // 为什么：后面要用「jar 里有没有 dsh-auth cookie」来判断配对是否
+    // 成功（303 被跟随之后状态码不可信，见下面的说明）。
+    // 但 cookie jar 是**原生层的持久容器** —— 上一次登录留下的
+    // dsh-auth cookie 会一直在里面。不清的话：
+    //
+    //     jar 里有旧 cookie + 错误 token → 读到旧 cookie → 判定成功
+    //
+    // 也就是**任何 token 都能通过**，认证被完全绕过。
+    //
+    // 清空只针对本服务地址，不影响用户连的其他 DSH 实例。
+    await this.clearCookieJar();
+
     const url = `${this.baseUrl}/?token=${encodeURIComponent(token)}`;
     let res: Response | undefined;
     let fetchError: unknown;
@@ -226,6 +240,9 @@ export class DshConnection {
     // 还没带上 cookie 而返回 401 —— 但配对其实**已经成功**了
     // （Set-Cookie 已经下发）。先判状态码会把成功当失败。
     //
+    // 前提是上面已经清空过 jar，所以这里读到的只可能是
+    // **本次登录**服务端下发的 cookie。
+    //
     // 详见上面方法注释里的实测数据。
     const cookie = await this.readCookieFromJar();
     if (cookie) {
@@ -242,6 +259,30 @@ export class DshConnection {
       'token exchange failed: no cookie in jar. ' +
         '确认 token 未过期，且服务地址与端口和启动日志一致。',
     );
+  }
+
+  /**
+   * 清空本服务地址下的 dsh-auth cookie。
+   *
+   * 登录前调用。目的只有一个：保证登录后从 jar 里读到的 cookie
+   * **一定是本次登录下发的**，而不是上次遗留的。
+   *
+   * 不清的话，cookie jar 里的历史凭据会让「jar 里有 cookie」
+   * 这个判据失效 —— 错误的 token 也能通过认证。
+   *
+   * 只清本 baseUrl 下的 cookie，不影响用户连的其他 DSH 实例。
+   * 失败不阻断：读不到 CookieManager 时（纯 Node 环境）本来就没有
+   * 第二个存储需要清。
+   */
+  private async clearCookieJar(): Promise<void> {
+    try {
+      const { clearNativeCookieJar } = await import('../cookieJar');
+      await clearNativeCookieJar(this.baseUrl);
+    } catch {
+      // 清理失败也让登录继续 —— 但下面的判据会因此变得不严格。
+      // 这种情况在真机上不该出现（CookieManager 是 RN 的必需依赖），
+      // 真出现了说明宿主没注入 reader，那时 readCookieFromJar 也会返回空。
+    }
   }
 
   /** 从 RN 的原生 cookie 容器读回 dsh-auth cookie */
