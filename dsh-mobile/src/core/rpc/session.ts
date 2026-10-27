@@ -51,7 +51,19 @@ export class SessionApi {
     if (params.beforeSeq !== undefined) request.beforeSeq = params.beforeSeq;
     if (params.maxMessages !== undefined) request.maxMessages = params.maxMessages;
 
-    const res = await this.conn.call<SessionPageResult>('session/page', { request });
+    const res = await this.conn.call<SessionPageResult>('session/page', {
+      request,
+      // 长会话的分页查询要给足时间。
+      //
+      // 实测：一个 92 条消息、几百个事件的会话，在模拟器上默认 30 秒
+      // 不够用，界面顶部报「session/page: 请求超时（30 秒无响应）」。
+      // 服务端本身没卡（同时测登录接口只要 0.3 秒），是这次查询确实慢 ——
+      // 要把会话事件读出来、折叠成消息，事件多的时候很重。
+      //
+      // 给 60 秒：比默认翻倍，但不像 prompt 那样给到 3 分钟 ——
+      // 用户在看历史时对等待更敏感，超时了要能尽快给出「加载失败」。
+      __timeoutMs: 60_000,
+    });
     return { records: res?.records ?? [], hasMore: res?.hasMore ?? false };
   }
 
@@ -80,6 +92,17 @@ export class SessionApi {
         content,
         ...(params.clientTimeZone ? { clientTimeZone: params.clientTimeZone } : {}),
       },
+      // ⚠️ session/prompt 必须给足超时。
+      //
+      // 它和普通查询不一样：服务端收到之后要**启动一轮模型推理**，
+      // 排队、加载上下文、首字生成都可能耗时。默认 30 秒在真机上
+      // 不够 —— 实测模拟器上长会话直接报「请求超时（30 秒无响应）」，
+      // 但服务端其实正常接收并跑起来了，而且消息已经入了队列。
+      //
+      // 给 3 分钟：足够覆盖绝大多数首字延迟，又不至于让用户无限等。
+      // 注意这只是**等待「入队成功」的确认**，不是等模型答完 ——
+      // 真正的回复通过 WebSocket 事件流式推回来，和后端那段耗时无关。
+      __timeoutMs: 180_000,
     });
   }
 
