@@ -364,15 +364,21 @@ await check('配对：错误 token -> loginWithToken 抛错（不静默成功）
 });
 
 await check('配对：公网 http 地址被 checkBaseUrlSecurity 拦住', async () => {
-  // 这是 v0.11.0 加的安全校验，走真实 DshConnection 验证它确实生效
-  const conn = new DshConnection({ baseUrl: 'http://8.8.8.8:3095' });
+  // 这是 v0.11.0 加的安全校验，走真实 DshConnection 验证它确实生效。
+  //
+  // v0.16.7 起校验点前移到**构造期**：不合规的地址连 DshConnection 都建不出来。
+  // 这比「建得出来但 loginWithToken 才失败」更安全 —— 后者意味着任何一条
+  // 忘了调用 loginWithToken 的路径（例如直接用已有的 cookie 发 RPC）会绕过校验。
+  // 所以这里同时接受两个拦截点，但要求**必须被拦住**。
   let msg = '';
+  let conn;
   try {
+    conn = new DshConnection({ baseUrl: 'http://8.8.8.8:3095' });
     await conn.loginWithToken('sometoken_xxxxxxxxxxxxxx');
   } catch (e) {
     msg = e?.message ?? '';
   }
-  conn.close();
+  try { conn?.close(); } catch { /* ignore */ }
   return msg.includes('明文') || msg.includes('https')
     ? true
     : '公网 http 没被拦住，错误信息：' + msg;

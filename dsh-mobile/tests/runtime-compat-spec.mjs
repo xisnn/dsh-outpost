@@ -226,9 +226,19 @@ await check('import .ts 的测试必须用 tsx 启动', () => {
         continue;
       }
       // 这个文件有没有 import ../src/**/*.ts
-      const importsTs = /from\s+['"][^'"]*\/src\/[^'"]*\.ts['"]/.test(src);
-      if (importsTs) {
-        offenders.push(`${name}: ${file}（用了 node，但 import 了 .ts）`);
+      //
+      // ⚠️ 必须同时认**两种**写法：
+      //   1. 静态：import x from '../src/core/foo.ts'
+      //   2. 动态：await import('../src/core/foo.ts')
+      //
+      // 早先这里只查静态写法，于是「用动态 import 加载 .ts」的测试
+      // 在 Node 24 下跑得好好的，一推上 Node 20 的 CI 就
+      // ERR_UNKNOWN_FILE_EXTENSION —— 这正是本轮踩到的坑。
+      const staticTs = /from\s+['"][^'"]*\/src\/[^'"]*\.ts['"]/.test(src);
+      const dynamicTs = /import\(\s*['"][^'"]*\/src\/[^'"]*\.ts['"]\s*\)/.test(src);
+      if (staticTs || dynamicTs) {
+        const how = staticTs ? '静态 import' : '动态 import()';
+        offenders.push(`${name}: ${file}（用了 node，但 ${how} 了 .ts）`);
       }
     }
   }

@@ -393,12 +393,22 @@ await check('clearAuthorization 不会用 clearLoginIntent 绕过安全检查', 
 });
 
 await check('凭据不存在时即使意图是 active 也不会登录', () => {
-  // 启动条件是 `savedBase && savedCookie && autoResume`
+  // 启动条件是 `<地址> && savedCookie && autoResume`。
+  //
+  // v0.16.7 起地址变量叫 usableBase：它表示「校验通过、可以用的地址」
+  // （地址不安全时为 null，同样不登录）。语义比 savedBase 更强，
+  // 所以这里接受两者之一，但仍然**要求** cookie 与 autoResume 同时在场。
   const i = appSrc.indexOf('const autoResume');
-  const body = appSrc.slice(i, i + 500);
-  return /savedBase\s*&&\s*savedCookie\s*&&\s*autoResume/.test(body)
-    ? true
-    : '自动登录条件里没有检查 cookie 是否存在';
+  const body = appSrc.slice(i, i + 800);
+  const hasBase = /(?:savedBase|usableBase)\s*&&\s*savedCookie/.test(body);
+  const hasResume = /savedCookie\s*&&\s*autoResume/.test(body);
+  if (!hasBase || !hasResume) {
+    return '自动登录条件里没有同时检查地址、cookie 与意图';
+  }
+  // setAuthed(true) 必须落在这个条件分支里（不是无条件执行）
+  const condIdx = body.indexOf('autoResume)');
+  const authIdx = body.indexOf('setAuthed(true)');
+  return authIdx > condIdx ? true : 'setAuthed(true) 不在自动登录条件分支内';
 });
 
 console.log('');
