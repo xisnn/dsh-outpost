@@ -90,6 +90,13 @@ async function check(n, fn) {
   }
 }
 
+// ⚠️ Node 20 没有全局 WebSocket（Node 21+ 才有）。
+// DshConnection 构造时会检查 WS 实现，缺了直接抛
+// 「no WebSocket implementation available」。
+// 其他集成测试都调了 ensureWebSocket()，这里也必须调。
+const wsMod = await imp(path.join(__dirname, 'support', 'ws-compat.mjs'));
+wsMod.ensureWebSocket();
+
 const { DshConnection } = await imp(
   path.join(__dirname, '..', 'src', 'core', 'transport', 'index.ts'),
 );
