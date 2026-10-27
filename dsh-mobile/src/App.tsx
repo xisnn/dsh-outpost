@@ -63,6 +63,19 @@ import { TaskBoardScreen } from './screens/TaskBoardScreen';
 // @dsh/gatewayDeviceId）统一由 core/credentialMigration.ts 管理 ——
 // 迁移、清理、以及「清除授权」时的兜底删除都在那里。
 const BASE_URL_KEY = '@dsh/baseUrl';
+
+/**
+ * 还没配对时用来撑住 DshConnection 的占位地址。
+ *
+ * 为什么需要：DshConnection 构造时会校验地址，空字符串会让
+ * `new URL('')` 抛异常 → 渲染期崩溃 → 用户连配对页都看不到。
+ * 详见 store 的 useMemo 注释。
+ *
+ * 必须是**合法且私有**的地址：合法才能通过构造校验；
+ * 私有才符合「明文 HTTP 只发私有网段」的策略，即使漏判也不会
+ * 把凭据发到公网。
+ */
+const PLACEHOLDER_BASE_URL = 'http://127.0.0.1:1';
 const OWNED_KEY = '@dsh/ownedSessions';
 const THEME_KEY = '@dsh/themeMode';
 const BUTLER_KEY = '@dsh/butlerMode';
@@ -411,7 +424,25 @@ export default function App() {
   const [secureStorageError, setSecureStorageError] = useState<string | null>(null);
 
   const store = useMemo(() => {
-    const conn = new DshConnection({ baseUrl, cookie });
+    // ⚠️ baseUrl 在「未配对 / 刚清过数据」时是空字符串。
+    //
+    // DshConnection 的构造函数会对地址做安全校验，而 `new URL('')`
+    // 直接抛异常 —— 于是构造就失败了。这个异常发生在 useMemo 里，
+    // 属于渲染期错误，整个组件树会被 React 卸载，用户看到的是
+    // 满屏红色 Render Error，**连配对页都到不了**。
+    //
+    // 实测：模拟器上清空应用数据后首次启动必然复现（Android 15 /
+    // Pixel 6 AVD）。真机上「换手机 / 重装 App」也是同样的路径。
+    //
+    // 修法：地址还没配好时给一个占位值构造连接对象。这个 store 只用于
+    // 撑住 context 的初始状态，用户填完地址后 baseUrl 变化会重建它，
+    // 真正的请求都要经过 assertSecureUrl，占位地址发不出去。
+    //
+    // 占位用 localhost 而不是随便一个字符串：它是合法的私有地址，
+    // 万一日后有人漏了判空，请求也只会打在手机自己身上，
+    // 不会把凭据发到外部。
+    const safeBaseUrl = baseUrl || PLACEHOLDER_BASE_URL;
+    const conn = new DshConnection({ baseUrl: safeBaseUrl, cookie });
     return new Store(conn);
   }, [baseUrl, cookie]);
 

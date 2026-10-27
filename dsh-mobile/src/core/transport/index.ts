@@ -172,6 +172,24 @@ export class DshConnection {
    * 所以改用 RN 的原生 cookie 容器：
    * 1. 带 `credentials: 'include'` 请求 → 原生层自动接收并保存 Set-Cookie
    * 2. 用 CookieManager 把保存的 cookie 读回来，交给调用方持久化
+   *
+   * ## ⚠️ 关键坑：303 被跟随之后的状态码不可信
+   *
+   * 服务端对 `GET /?token=xxx` 返回 **303 + Set-Cookie**，location 是 `./`
+   * ——也就是回到 `/`。RN 的 fetch 会自动跟随这个重定向，于是实际发出的
+   * 第二个请求是 `GET /`。
+   *
+   * 问题在于：**重定向那一步不一定带着刚拿到的 cookie**（取决于原生
+   * 网络栈把 Set-Cookie 写进 jar 的时机）。没带上就是 401。
+   *
+   * 实测（Android 15 / API 35 模拟器）：
+   *   GET /?token=xxx   → 303 + set-cookie   ✅
+   *   GET /  (无 cookie) → 401               ❌ ← fetch 的最终结果
+   *
+   * 所以**绝不能拿 res.status 判断配对成功与否**。正确做法：
+   * 请求发出去之后，只看 cookie jar 里有没有 dsh-auth cookie。
+   * 有 = 配对成功（服务端已经认可了 token 并下发凭据），
+   * 没有才去纠结状态码。
    */
   async loginWithToken(token: string): Promise<string> {
     // 明文 HTTP 只允许发往私有地址。公网域名必须 https ——
@@ -181,7 +199,8 @@ export class DshConnection {
     if (insecure) throw new Error(insecure);
 
     const url = `${this.baseUrl}/?token=${encodeURIComponent(token)}`;
-    let res: Response;
+    let res: Response | undefined;
+    let fetchError: unknown;
     try {
       res = await this.fetchImpl(url, {
         method: 'GET',
@@ -192,26 +211,37 @@ export class DshConnection {
       // 错误信息里带地址有助于排查，但必须脱敏 ——
       // baseUrl 理论上不含 token（配对解析时已剥离），
       // 这里再兜一层，防止将来有人改了解析逻辑把 token 带进来。
+      fetchError = e;
       const msg = e instanceof Error ? `${e.name}: ${e.message}` : String(e);
       throw new Error(
         `连接失败（fetch 阶段）：${msg}。地址=${redactUrl(this.baseUrl)}`,
       );
+    } finally {
+      void fetchError;
     }
 
-    // 303 被自动跟随，最终是 200；状态码不再可靠，直接读 cookie 容器
-    if (res.status >= 400) {
+    // ⚠️ 先看 cookie jar，再看状态码。
+    //
+    // 顺序不能反：303 被跟随之后最终落到 `GET /`，那一步很可能因为
+    // 还没带上 cookie 而返回 401 —— 但配对其实**已经成功**了
+    // （Set-Cookie 已经下发）。先判状态码会把成功当失败。
+    //
+    // 详见上面方法注释里的实测数据。
+    const cookie = await this.readCookieFromJar();
+    if (cookie) {
+      this.cookie = cookie;
+      return cookie;
+    }
+
+    // jar 里没有 cookie，这才是真的失败。这时候状态码才有参考价值。
+    if (res && res.status >= 400) {
       throw new Error(`token exchange failed: HTTP ${res.status}`);
     }
 
-    const cookie = await this.readCookieFromJar();
-    if (!cookie) {
-      throw new Error(
-        'token exchange failed: no cookie in jar. ' +
-          '确认 token 未过期，且服务地址与端口和启动日志一致。',
-      );
-    }
-    this.cookie = cookie;
-    return cookie;
+    throw new Error(
+      'token exchange failed: no cookie in jar. ' +
+        '确认 token 未过期，且服务地址与端口和启动日志一致。',
+    );
   }
 
   /** 从 RN 的原生 cookie 容器读回 dsh-auth cookie */
