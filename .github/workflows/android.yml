@@ -340,10 +340,37 @@ jobs:
           ACTUAL=$(grep 'SHA-256 digest' /tmp/certs.txt | head -1 | awk '{print $NF}')
           echo "APK 证书 SHA-256: $ACTUAL"
 
+          # ── 2a) 必须先排除「公开 debug 证书」──────────────────────
+          #
+          # 这是独立于 EXPECTED_CERT_SHA256 的一道**绝对**门禁。
+          #
+          # 为什么必须单独有：如果只比对 EXPECTED_CERT_SHA256，那么管理员
+          # 把这个变量误设成 debug 证书的指纹（fac61745…）时，门禁会**通过** ——
+          # 而那个证书的私钥就提交在仓库里（dsh-mobile/android/app/debug.keystore），
+          # 任何拿到仓库的人都能签出一个 Android 会当正式更新接受的包。
+          #
+          # 指纹是公开信息，写死在这里没有保密问题。
+          DEBUG_CERT_SHA256="fac61745dc0903786fb9ede62a962b399f7348f0bb6f899b8332667591033b9c"
+          NORM_ACTUAL_LC=$(echo "$ACTUAL" | tr -d ':' | tr 'A-F' 'a-f')
+          if [ "$NORM_ACTUAL_LC" = "$DEBUG_CERT_SHA256" ]; then
+            echo "::error::APK 使用的是仓库内公开的 Android Debug 证书，绝对不允许发布"
+            echo "  该证书私钥随仓库分发（dsh-mobile/android/app/debug.keystore），"
+            echo "  任何人都能用它签出 Android 会接受的「更新」。"
+            echo "  请生成私有 keystore 并配置 KEYSTORE_BASE64 等 Secrets 后重试。"
+            exit 1
+          fi
+          echo "证书不是公开 debug 证书 ✓"
+
           EXPECTED="${{ vars.EXPECTED_CERT_SHA256 }}"
           if [ -n "$EXPECTED" ]; then
             NORM_ACTUAL=$(echo "$ACTUAL" | tr 'A-F' 'a-f')
             NORM_EXPECTED=$(echo "$EXPECTED" | tr -d ':' | tr 'A-F' 'a-f')
+            # 双保险：即使变量被误设成 debug 指纹，也不放行
+            if [ "$NORM_EXPECTED" = "$DEBUG_CERT_SHA256" ]; then
+              echo "::error::仓库变量 EXPECTED_CERT_SHA256 被设成了公开 debug 证书的指纹"
+              echo "  这会让门禁形同虚设。请改成私有签名证书的 SHA-256。"
+              exit 1
+            fi
             if [ "$NORM_ACTUAL" != "$NORM_EXPECTED" ]; then
               echo "::error::APK 签名证书不符合预期发布身份"
               echo "  期望: $NORM_EXPECTED"
@@ -353,8 +380,16 @@ jobs:
             fi
             echo "证书指纹符合预期 ✓"
           else
-            echo "::warning::未设置仓库变量 EXPECTED_CERT_SHA256，跳过指纹比对"
-            echo "（建议在 Settings → Variables 中设置，防止误用错误证书发布）"
+            # ⚠️ 这里原来是 ::warning:: + 继续发布。
+            #
+            # 那等于「指纹门禁默认关闭」：谁能改仓库变量（或忘了配），
+            # 一次配错证书的发布就会静默上线，而它的后果是所有老用户
+            # 都装不上后续版本（签名不一致必须卸载重装）。
+            # 门禁必须**默认开启**，缺配置就停下让人去补。
+            echo "::error::未设置仓库变量 EXPECTED_CERT_SHA256，无法校验发布身份，已中止。"
+            echo "  请在 Settings → Variables 配置该项（值为正式签名证书的 SHA-256）。"
+            echo "  这是发布门禁，不允许跳过。"
+            exit 1
           fi
 
           # 3) 包名 / 版本必须与 Tag 一致
