@@ -220,3 +220,41 @@ bundle 是 **Hermes 字节码**，中文字符串以 **UTF-16LE** 存储。按�
 ---
 
 *报告生成：2026-10-28 · APK `2FD7C78B…` · 代码 `3349bbf`*
+
+---
+
+## 发布状态（2026-10-28 更新）
+
+**已发布：v0.16.7**
+
+| 项 | 值 |
+|---|---|
+| Release | https://github.com/xisnn/dsh-outpost/releases/tag/v0.16.7 |
+| APK | `dsh-outpost-v0.16.7.apk`（73.6 MB） |
+| versionCode / Name | `160700` / `0.16.7` |
+| APK SHA-256 | `1BE39824B0EC35576B91D223CF488D9F911C233EE0063042D409D981D00015F2` |
+| 签名证书 | `191b16ce…293a736a`（与 CI 一致） |
+| CI | ✓ success（15.6 分钟） |
+| 类型 | 正式版（prerelease=false） |
+
+### 发布时修复的一个 CI 问题
+
+首次打 tag 时 CI 在「Unit tests」失败：
+
+```
+FAIL  store.send 把 requestId 透传给 prompt — no WebSocket implementation available
+```
+
+**Node 20 没有全局 WebSocket**（Node 21+ 才有），而 `DshConnection`
+构造时会检查它。两个新测试漏了 `ensureWebSocket()`，本地 Node 24 掩盖了问题。
+
+已修复（`6e708b6`），并顺带发现 `send-retry-spec.mjs` **根本没进测试链**，
+一起补上。用 `node --no-experimental-websocket` 模拟 Node 20 验证通过。
+
+### 发布包冒烟测试
+
+在 `dsh_release` AVD 上卸载测试包后安装 v0.16.7 正式包：
+安装成功、启动进入配对页、零崩溃。
+
+> ⚠️ 测试包 versionCode `916204` 高于正式包 `160700`，
+> 装过测试包的设备必须先卸载才能装正式版（会丢配对数据）。
