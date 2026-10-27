@@ -88,6 +88,23 @@ if (!existsSync(gradlew)) {
   const isWin = process.platform === 'win32';
   const gradlewCmd = isWin ? path.join(androidDir, 'gradlew.bat') : gradlew;
 
+  // ⚠️ Linux 上 gradlew 必须有可执行位。
+  //
+  // 仓库里 gradlew 的 git 模式是 100644（不可执行），Windows 上无所谓
+  // （走 gradlew.bat），但 ubuntu CI 上直接执行会 EACCES，
+  // 表现为**所有** gradlew 调用都 exit=1 —— 连 assembleDebug 都"失败"，
+  // 看起来像门禁坏了，实际只是文件没有 +x。
+  //
+  // workflow 里每处调用前都 `chmod +x gradlew`，这个测试也要做同样的事，
+  // 否则会在 CI 上误报 5 个失败。
+  if (!isWin) {
+    try {
+      execFileSync('chmod', ['+x', gradlewCmd], { stdio: 'ignore' });
+    } catch {
+      /* 权限已经是 +x，或 chmod 不可用：继续跑，让真实的错误暴露 */
+    }
+  }
+
   function run(args) {
     let out = '';
     let code = 0;
@@ -104,6 +121,18 @@ if (!existsSync(gradlew)) {
     } catch (e) {
       out = String(e.stdout || '') + String(e.stderr || '');
       code = typeof e.status === 'number' ? e.status : 1;
+      // 之前这里不打印任何东西，CI 上只看到「exit=1」，
+      // 无法判断是权限、网络、SDK 缺失还是真门禁失败 —— 排查成本很高。
+      // 失败时把输出尾部（去掉 ANSI 色码）打到 stderr，便于直接定位。
+      if (process.env.CI) {
+        const tail = out
+          .replace(/\u001b\[[0-9;]*m/g, '')
+          .split('\n')
+          .filter((l) => l.trim())
+          .slice(-12)
+          .join('\n    ');
+        console.error(`  [gradle] ${args.join(' ')} -> exit=${code}\n    ${tail}`);
+      }
     }
     return { out, code };
   }
