@@ -39,6 +39,14 @@
     {
       "from": "../start-tunnel.ps1",
       "to": "start-tunnel.ps1"
+    },
+    {
+      "from": "../scripts",
+      "to": "scripts"
+    },
+    {
+      "from": "../patches",
+      "to": "patches"
     }
   ],
   "win": {
