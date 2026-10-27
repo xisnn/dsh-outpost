@@ -92,6 +92,46 @@ if (Test-Path $pluginDir) {
     Write-Ok '安装完成'
 }
 
+# ── 1.5 打管理接口认证补丁 ──
+#
+# 上游插件的 /mgw/* 管理路由（含能铸造配对码的 POST /mgw/pair）没有鉴权，
+# 而它的两道防线在本项目部署形态下都不成立：
+#   · adminLoopbackOnly：DSH 绑具体 IP 时回环没监听，开了会挡住所有人（含本机）
+#   · isSameOrigin：对不带 Origin 的脚本直接放行
+#
+# 所以必须给管理接口加上真正的认证。补丁把访问控制交给 DSH 自己的会话认证
+# （ctx.connection.requestRejection：Host/Origin 栅栏 + dsh-auth cookie）。
+# 详见 patches/mobile-gateway-mgmt-auth/README.md。
+Write-Host ''
+Write-Step '检查管理接口认证补丁 ...'
+$patchScript = Join-Path (Split-Path $PSCommandPath -Parent) 'patches\mobile-gateway-mgmt-auth\apply.mjs'
+$patchOk = $false
+if (-not (Test-Path $patchScript)) {
+    Write-Err2 "找不到补丁脚本：$patchScript"
+} else {
+    & node $patchScript --check 2>&1 | ForEach-Object { Write-Step $_ }
+    if ($LASTEXITCODE -ne 0) {
+        Write-Step '正在应用补丁 ...'
+        & node $patchScript --apply 2>&1 | ForEach-Object { Write-Step $_ }
+        if ($LASTEXITCODE -eq 0) { $patchOk = $true } else { $patchOk = $false }
+    } else {
+        $patchOk = $true
+    }
+}
+
+if (-not $patchOk) {
+    Write-Host ''
+    Write-Err2 '管理接口认证补丁未应用 —— 拒绝继续写入开放配置。'
+    Write-Host '    原因：未打补丁时 /mgw/* 没有认证，打开 adminLoopbackOnly 等于把' -ForegroundColor Yellow
+    Write-Host '    配对码铸造能力暴露给同网段所有人（= 完整远程控制权）。' -ForegroundColor Yellow
+    Write-Host '' 
+    Write-Host '    请先处理补丁问题（插件版本可能已变，需要人工核对锚点），再重跑本脚本。' -ForegroundColor Yellow
+    Write-Host '    排查：node patches\mobile-gateway-mgmt-auth\apply.mjs --check' -ForegroundColor DarkGray
+    Write-Host '    文档：patches\mobile-gateway-mgmt-auth\README.md' -ForegroundColor DarkGray
+    exit 1
+}
+Write-Ok '管理接口认证补丁已就绪'
+
 # ── 2. 写配置 ──
 Write-Step '写入网关配置 ...'
 $content = [IO.File]::ReadAllText($ProfileFile, [Text.Encoding]::UTF8)
@@ -99,6 +139,13 @@ $content = [IO.File]::ReadAllText($ProfileFile, [Text.Encoding]::UTF8)
 if ($content -match '(?m)^- id:\s*mobile-gateway') {
     Write-Warn2 '配置已存在，跳过（如需重写请先手动删掉那段）'
 } else {
+    # 打了认证补丁之后，adminLoopbackOnly 可以安全地设为 false：
+    # 管理接口虽然局域网可达，但每个请求都要过 DSH 会话认证。
+    #
+    # 没打补丁时**绝不**写 false —— 上面已经 exit 1 拦住了。
+    $adminLoopback = 'false'
+    Write-Step 'adminLoopbackOnly = false（补丁后由 DSH 会话认证保护）'
+
     $block = @"
 
 # 手机网关：让 DSH Outpost 能通过 WebSocket 接审批和实时事件。
@@ -110,7 +157,7 @@ if ($content -match '(?m)^- id:\s*mobile-gateway') {
     gatewayMode: persistent
     gatewayName: DSH Outpost
     requireAuth: true
-    adminLoopbackOnly: false
+    adminLoopbackOnly: $adminLoopback
     lanEnabled: true
     lanHost: 0.0.0.0
     lanPort: $GatewayPort

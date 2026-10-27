@@ -7,7 +7,7 @@
  * 协议实测见 docs/protocol-notes.md。
  */
 
-import { checkBaseUrlSecurity, redactUrl } from '../net-security';
+import { assertSecureUrl, checkBaseUrlSecurity, redactUrl } from '../net-security';
 import { RpcError, type RpcErrorKind } from '../rpc-error';
 
 /**
@@ -141,6 +141,12 @@ export class DshConnection {
 
   constructor(opts: TransportOptions) {
     this.baseUrl = opts.baseUrl.replace(/\/+$/, '');
+    // 构造时就校验一次：不合规的地址连对象都建不出来。
+    //
+    // 为什么放在构造而不是每个调用点：连接是**所有**带凭据请求的唯一来源
+    // （RPC / 会话流 WS / 上传 / 文件下载都从这里拿 baseUrl），在入口挡一次，
+    // 比在每个调用点重复挡更可靠 —— 后者只要有人加新调用就漏。
+    assertSecureUrl(this.baseUrl, '连接地址');
     this.cookie = opts.cookie;
     this.fetchImpl = opts.fetchImpl ?? globalThis.fetch.bind(globalThis);
     const WSImpl = opts.WebSocketImpl ?? globalThis.WebSocket;
@@ -371,6 +377,59 @@ export class DshConnection {
       try { frame = JSON.parse(typeof ev.data === 'string' ? ev.data : String(ev.data)); } catch { return; }
       const handler = frame.streamId ? this.streams.get(frame.streamId) : undefined;
       handler?.(frame);
+    });
+
+    // ── 连接关闭 / 出错：必须让所有活跃流立刻失败 ────────────────
+    //
+    // ## 为什么这是必须的（P0-1）
+    //
+    // 之前这里**没有** close 监听。socket 断开后：
+    //   · 没有任何帧会再到达
+    //   · 流的 async iterator 永远卡在 `await new Promise(r => notify = r)`
+    //   · store.pump() 的 `await next()` 永不返回
+    //   · 聊天页既不报错也不结束，转圈动画一直转（用户只能杀 App）
+    //
+    // 这是「假死」类 bug 里最难排查的一种：界面上没有任何错误。
+    //
+    // 修法：close/error 时把**所有**活跃流以网络错误失败掉，
+    // 让 iterator 从 await 里出来并抛出，最终走到 store 的错误分支。
+    const failAllStreams = (reason: string) => {
+      const entries = [...this.streams.entries()];
+      this.streams.clear();
+      this.ws = undefined;
+      for (const [, handler] of entries) {
+        try {
+          handler({
+            type: 'error',
+            streamId: '',
+            error: { code: 'network', message: reason },
+          });
+        } catch {
+          /* 单个流处理失败不影响其它 */
+        }
+      }
+    };
+
+    ws.addEventListener('close', (ev: { code?: number; reason?: string }) => {
+      const code = Number(ev?.code ?? 0);
+      const why = String(ev?.reason ?? '');
+      // 1000 = 正常关闭（我们自己调的 close()）；其余都当异常
+      const detail = code === 1000
+        ? '连接已关闭'
+        : `连接已断开（code ${code}${why ? `：${why}` : ''}）`;
+      // ⚠️ `__DEV__` 是 RN 注入的全局；Node 测试环境里不存在。
+      // 直接写 if (__DEV__) 会在测试里抛 ReferenceError —— 而这个 handler
+      // 一旦抛错，下面的 failAllStreams 就永远执行不到，等于修复失效。
+      // 所以用 typeof 守护。
+      if (typeof __DEV__ !== 'undefined' && __DEV__) {
+        console.log('[transport] ws closed', code, why);
+      }
+      failAllStreams(detail);
+    });
+
+    ws.addEventListener('error', () => {
+      // error 之后通常还会来 close；这里先失败一次，close 再来是幂等的
+      failAllStreams('WebSocket 连接出错');
     });
 
     this.ws = ws;

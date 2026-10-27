@@ -25,10 +25,38 @@ npx dsh plugin add dsh-plugin-mobile-gateway
 插件自带的默认配置是 `gatewayEnabled: false`（关闭）和
 `adminLoopbackOnly: true`（管理接口只允许本机回环）。
 
-但 DSH 的 web server 绑在**局域网 IP** 上，回环地址连不进去，
-所以管理接口打不开。必须改这两个：
+## ⚠️ 先说清楚这个安全取舍（v0.16.7 起变更）
 
-编辑 `%USERPROFILE%\.dsh\profiles\web\cordis.patch.yml`，在末尾追加：
+**DSH 只接受「一个具体 IP」，不接受 `0.0.0.0`**，而且绑定局域网 IP 之后
+**回环地址并不在监听** —— 本机访问 `127.0.0.1:3095` 会直接连不上。
+（这是实测结论，不是推测；`dsh --host 0.0.0.0` 会被 DSH 自己拒绝：
+"binding every interface would expose remote code execution to the network"。）
+
+所以这里没有「只用回环」的选项：
+
+| 配置 | `/mgw/*` 谁能访问 | 手机审批 |
+|---|---|---|
+| `adminLoopbackOnly: true` | **谁都访问不到**（回环没监听） | ❌ 不能自动配对 |
+| `adminLoopbackOnly: false` | 同网段任何设备 | ✅ 能用 |
+
+而 `POST /mgw/pair` **在插件 0.10.3 / 0.11.1 里都没有鉴权**
+（无 Cookie、无令牌、无 Origin 校验；不带 Origin 的脚本请求直接放行）。
+这意味着 `adminLoopbackOnly: false` 时，**同网段内任何设备都能铸造配对码**，
+配对成功后就是一台受信设备，可以：发提示词（= agent 在你电脑上跑命令）、
+切 `permission`（`danger-full-access` 会直接关掉审批）、装卸插件。
+
+**这是插件侧的缺口，不是本仓库能闭合的。** 我们的处理：
+
+- `setup-gateway.ps1` **默认写入 `adminLoopbackOnly: true`**（安全默认）。
+- 需要手机审批时必须显式加 `-AllowLanManagement`，脚本会明确打印风险。
+- 公共 WiFi / 不可信网络：**不要开**。用 Cloudflare 隧道，或者接受
+  「审批只能在电脑上点」。
+
+上游（`dsh-plugin-mobile-gateway`）如果给 `/mgw/pair` 加上鉴权，
+这个取舍就会消失。届时把默认值改回来即可。
+
+编辑 `%USERPROFILE%\.dsh\profiles\web\cordis.patch.yml`，在末尾追加
+（**只在确认要开手机审批时**才把 `adminLoopbackOnly` 设成 `false`）：
 
 ```yaml
 - id: mobile-gateway
@@ -38,11 +66,18 @@ npx dsh plugin add dsh-plugin-mobile-gateway
     gatewayMode: persistent   # 常驻，不自动关
     gatewayName: DSH Outpost
     requireAuth: true         # 手机仍需配对码（安全边界不变）
-    adminLoopbackOnly: false  # 允许从局域网访问管理接口
+    adminLoopbackOnly: false  # ⚠️ 同网段可达；见上面的取舍说明
     lanEnabled: true
     lanHost: 0.0.0.0
     lanPort: 3081
     pairingTtlMs: 300000
+```
+
+或者直接用脚本（推荐，它会打印风险并写好配置）：
+
+```powershell
+.\setup-gateway.ps1                     # 安全默认，不写 LAN 管理面
+.\setup-gateway.ps1 -AllowLanManagement  # 启用手机审批，接受风险
 ```
 
 然后重启 DSH Web。

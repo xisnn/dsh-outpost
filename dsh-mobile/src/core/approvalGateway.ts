@@ -56,7 +56,7 @@ import {
 
 import { readGatewayId, readServerDeviceId, saveServerBinding } from './serverIdentity';
 
-import { redactUrl } from './net-security';
+import { assertSecureUrl, redactUrl } from './net-security';
 
 /** 网关默认端口（插件配置 lanPort） */
 const GATEWAY_PORT = 3081;
@@ -327,6 +327,9 @@ export class ApprovalGateway {
   >();
 
   constructor(baseUrl: string, events: GatewayEvents) {
+    // 与 DshConnection 一致：地址不合规就在构造期失败，不等到发请求才拦。
+    // 网关会用 `credentials: 'include'` 打 /mgw/pair，属于带凭据请求。
+    assertSecureUrl(baseUrl, '网关地址');
     this.baseUrl = baseUrl;
     this.events = events;
   }

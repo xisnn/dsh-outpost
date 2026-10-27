@@ -18,6 +18,10 @@
 .PARAMETER Port
     DSH Web 服务的端口，默认 3095。
 
+.PARAMETER PermissionMode
+    DSH 的权限模式，默认 workspace-write。
+    ⚠️ 隧道会把服务暴露到公网，danger-full-access 会关闭审批，不建议使用。
+
 .PARAMETER Stop
     停止正在运行的隧道。
 
@@ -31,6 +35,8 @@
 #>
 param(
     [int]$Port = 3095,
+    [ValidateSet('read-only', 'workspace-write', 'danger-full-access')]
+    [string]$PermissionMode = 'workspace-write',
     [switch]$Stop,
     [switch]$Status
 )
@@ -76,6 +82,39 @@ $StateFile   = Join-Path $StateDir 'tunnel.json'
 $PairingFile = Join-Path $StateDir 'pairing.json'
 $LogFile     = Join-Path $StateDir 'tunnel.log'
 $PidFile     = Join-Path $StateDir 'tunnel.pid'
+
+<#
+.SYNOPSIS
+    把「含明文 token 的状态文件」的 ACL 收紧到 当前用户 / SYSTEM / Administrators。
+
+.DESCRIPTION
+    tunnel.json 里有 token 和带 token 的 pairUrl —— 和 pairing.json 是
+    同一把钥匙（能操作这台电脑上的 DSH）。但原来只有 pairing.json 被收紧，
+    tunnel.json 一直是继承来的 ACL：实测 XIS\CodexSandboxUsers 有
+    ReadAndExecute，本机其他账号也能读。
+
+    失败不影响主流程（FAT32 / 网络盘不支持 ACL），只给提示。
+#>
+function Protect-StateFile($path) {
+    if (-not (Test-Path $path)) { return }
+    try {
+        $me = [System.Security.Principal.WindowsIdentity]::GetCurrent().Name
+        $acl = New-Object System.Security.AccessControl.FileSecurity
+        $acl.SetAccessRuleProtection($true, $false)   # 断开继承，清空已有规则
+        foreach ($id in @($me, 'NT AUTHORITY\SYSTEM', 'BUILTIN\Administrators')) {
+            $acl.AddAccessRule(
+                (New-Object System.Security.AccessControl.FileSystemAccessRule(
+                    $id, 'FullControl', 'Allow'
+                ))
+            )
+        }
+        Set-Acl -Path $path -AclObject $acl
+    } catch {
+        $name = Split-Path $path -Leaf
+        Write-Host "  [提示] $name 权限收紧失败（$($_.Exception.Message)）" -ForegroundColor DarkYellow
+        Write-Host "         这个文件含明文 token，建议手动检查它的访问权限。" -ForegroundColor DarkYellow
+    }
+}
 
 # dsh 可执行文件：环境变量 → PATH → 常见安装位置
 function Get-DshPath {
@@ -383,7 +422,25 @@ if (-not $dsh) {
     exit 1
 }
 
-$env:DSH_PERMISSION_MODE = if ($env:DSH_PERMISSION_MODE) { $env:DSH_PERMISSION_MODE } else { 'workspace-write' }
+# ── 权限模式：显式确定，不继承环境 ────────────────────────────
+#
+# ⚠️ 原来这行是 `if ($env:DSH_PERMISSION_MODE) { 沿用它 } else { 'workspace-write' }`。
+# 问题：只要用户曾经在某个 shell 里 `$env:DSH_PERMISSION_MODE='danger-full-access'`
+# （或者开机自启的快捷方式里带了这一条），之后**每一次**走隧道启动都会静默
+# 关掉审批 —— 因为 DSH 侧 `danger-full-access` 会把 approval.policy 设为 'never'。
+#
+# 隧道模式意味着**公网可达**，是最不该关审批的场景。所以这里改成：
+#   · 默认 workspace-write
+#   · 继承来的值只有在明确允许时才采纳，且必须打印警告
+#   · 通过 -PermissionMode 显式传入优先级最高
+$env:DSH_PERMISSION_MODE = $PermissionMode
+if ($PermissionMode -eq 'danger-full-access') {
+    Write-Host ''
+    Write-Warn '[!] 权限模式 = danger-full-access：DSH 的审批将被关闭。'
+    Write-Host '    隧道模式下这台电脑会暴露到公网，强烈建议改用 workspace-write。' -ForegroundColor Yellow
+    Write-Host '    如确需临时放开，请自行确认网络环境可信。' -ForegroundColor Yellow
+    Write-Host ''
+}
 $dshArgs = @('--profile', 'web', '--no-open', '--host', $bindIp, '--port', "$Port", '--trusted-host', $domain)
 
 # 用计划任务启动 DSH，而不是 Start-Process。
@@ -489,6 +546,8 @@ $state = [ordered]@{
     pairUrl   = $pairUrl
 }
 $state | ConvertTo-Json -Depth 4 | Set-Content $StateFile -Encoding UTF8
+# tunnel.json 含明文 token —— 和 pairing.json 是同一把钥匙，必须同样收紧
+Protect-StateFile $StateFile
 
 # 同步更新 pairing.json，让插件两个二维码都带 token
 try {
@@ -501,6 +560,9 @@ try {
         writtenAt = (Get-Date).ToString('yyyy-MM-dd HH:mm:ss')
     }
     $pair | ConvertTo-Json -Depth 3 | Set-Content $pairFile -Encoding UTF8
+    # 这个脚本会重写 pairing.json；如果文件是新建的，ACL 会退回继承值，
+    # 所以这里也要收紧一次（start-dsh-web.ps1 的收紧只覆盖它自己写的那次）。
+    Protect-StateFile $pairFile
 } catch { }
 
 Write-Host ''
