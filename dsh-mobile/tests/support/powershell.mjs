@@ -29,6 +29,7 @@
  */
 
 import { execFileSync } from 'node:child_process';
+import { writeFileSync } from 'node:fs';
 
 /** 已探测到的可执行文件缓存（避免每次测试都探测一遍） */
 let cached = null;
@@ -199,3 +200,26 @@ function firstErrLine(text) {
     .map((s) => s.trim())
     .find((s) => s.length > 0 && !/^(At line|CategoryInfo|FullyQualifiedErrorId|\+)/.test(s)) || '';
 }
+
+/**
+ * 写一个临时 .ps1 文件，**带 UTF-8 BOM**。
+ *
+ * ## 为什么必须带 BOM
+ *
+ * Windows PowerShell 5.1 在没有 BOM 时按系统 ANSI 代码页解读 .ps1。
+ * 如果脚本里有中文（注释或字符串），会被按 GBK/Latin-1 解码成乱码，
+ * 乱码又可能吞掉后面的引号或换行，导致**语法解析失败或后续代码被静默丢弃**。
+ *
+ * 真实踩到的表现：测试动态生成的驱动脚本里有中文注释，
+ * 结果前两个 `Emit` 调用的输出属性全为空（`CASE|skip|||`），
+ * 而后几个正常 —— 排查了很久才定位到是 BOM 缺失。
+ *
+ * PowerShell 7（pwsh / Linux）默认按 UTF-8 读，加 BOM 也无害。
+ *
+ * @param {string} filePath
+ * @param {string} content
+ */
+export function writePowerShellScript(filePath, content) {
+  writeFileSync(filePath, '\uFEFF' + String(content), 'utf8');
+}
+
