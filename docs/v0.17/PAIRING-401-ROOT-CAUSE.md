@@ -2,104 +2,123 @@
 
 日期：2026-10-28
 项目：`E:\work\dsBot`
-分支：`feat.v0.17`
+分支：`feat/v0.17`
+修复提交：`5d38cdf`
 
-## 1. 结论摘要
+## 1. 结论
 
-**P0-1 FINAL: BLOCKED**
+**P0-1 FINAL: BLOCKED，但 401 的准确位置已定位。**
 
-- DSH 的 launch token **不是一次性 token**；它是每个 DSH 进程生成一次的 256-bit 随机值，进程存活期间可重复匹配。
-- DSH 的 `dsh-auth-*` cookie 默认有效期为 **30 天**（`cookieMaxAgeDays` 默认 30）。
-- 本次 401 不能简单归因于“Token 已过期/一次性消费”。
-- 使用隔离 DSH 测试实例，**Token B 未在主机侧交换、只交给 Android App 首次配对**，App 仍返回 `token exchange failed: HTTP 401`。
-- 当前证据指向 Android App 的 303 重定向 / native Cookie Jar 处理，而不是 Token 本身。未通过关闭认证、硬编码或复用旧 Cookie 绕过。
+- DSH Launch Token **不是一次性**，进程内存活期间可重复匹配；cookie 默认 30 天。
+- Android 第一次 Token 交换实际上**成功**：服务端返回 303 + Set-Cookie，跟随重定向返回 200，Native Cookie Jar 读到了 `dsh-auth`。
+- 最终 401 不是第一次交换失败，也不是 Cookie Jar 没有保存；而是 **PairScreen 在 `/api/session/list` 返回 403 后，用 token 的 `-`/`_` 变体再次调用 `loginWithToken`，第二次请求没有有效 token，返回 401 并覆盖了真实的 403 错误**。
+- 已做最小修复：登录成功后，ping 失败不再回退到变体 token。
 
 ## 2. Token 生命周期源码证据
 
-源码：`dsh-client-connection/lib/index.js`（从 DSH `app.asar` 提取核对）
+从 DSH `app.asar` 提取的 `dsh-client-connection/lib/index.js`：
 
 | 行号 | 证据 |
 |---|---|
 | 274 | `DAY_MILLISECONDS = 1440 * 60 * 1e3` |
-| 294-299 | `processLaunchToken(owner)` 使用 `randomBytes(32)`，按 process owner 存在 `WeakMap` 中；同一进程复用，不产生一次性消费状态 |
-| 330-334 | `tokenMatches(actual, expected)` 是 `timingSafeEqual` 比较，不修改/销毁 token |
-| 458-478 | `authorizeIndex()` 对根路径 token 进行匹配，成功后 303 + `Set-Cookie`；可再次匹配同一 launch token |
-| 505-536 | `authorizeConnect()` 同样只匹配 launch token，不消费 token |
-| 1017-1034 | `cookieMaxAgeDays` 默认 `30`；`maxAgeMilliseconds = maxAgeDays * DAY_MILLISECONDS` |
+| 294-299 | `processLaunchToken(owner)` 用 `randomBytes(32)`，按 process owner 缓存在 WeakMap；同进程复用，不产生一次性消费 |
+| 330-334 | `tokenMatches()` 只做 timingSafeEqual，不修改/销毁 token |
+| 458-478 | `authorizeIndex()` 对 `/?token=` 匹配成功即 303 + Set-Cookie；同一 launch token 可再次匹配 |
+| 505-536 | `authorizeConnect()` 同样只匹配，不消费 |
+| 1017-1034 | `cookieMaxAgeDays` 默认 30，cookie 有效期 30 天 |
 
-结论：
+因此主机侧先 GET Token A 不会导致 Token B 失效；401 不能直接归因于 token 一次性或过期。
 
-- launch token 生命周期 = 当前 DSH 进程生命周期，不是一次性；
-- 主机侧先 GET Token A 不会导致 Token B 失效；
-- dsh-auth cookie 默认 30 天有效。
+## 3. 脱敏链路证据
 
-## 3. 独立测试设计
+测试环境：独立 DSH 实例 + 主机侧透明 HTTP 代理（只记录路径、Host、Cookie 是否存在、状态码、Set-Cookie 是否存在，不记录值）。
 
-### Token A（仅主机侧）
-
-- 在隔离 DSH 测试实例（独立 profile/state，port 3097，未重启用户 DSH）生成；
-- 主机侧 `GET /?token=...` 返回 **303 + Set-Cookie**；
-- 说明主机侧链接有效。
-
-### Token B（仅 Android App 首次配对）
-
-- 重启同一隔离 DSH 实例生成全新 token；
-- **不在主机侧 curl/fetch/浏览器访问 Token B 的交换 URL**；
-- 直接输入 release APK 配对页；
-- App 返回 `token exchange failed: HTTP 401`；
-- 说明即使 Token B 全新且未消费，App 仍无法完成交换。
-
-测试中未输出、记录或提交任何完整 Token/Cookie。
-
-## 4. 401 的结构性位置
-
-App 代码路径：
+代理日志：
 
 ```text
-DshConnection.loginWithToken(token)
-  → clearCookieJar()
-  → fetch(baseUrl + '/?token=...', credentials: 'include')
-  → 303 自动跟随
-  → readCookieFromJar()
-  → 若没有 dsh-auth cookie，最终 401
+GET  /?token=...        host=10.0.2.2:3098 cookie=no  -> 303 set-cookie=yes
+GET  /                  host=10.0.2.2:3098 cookie=yes -> 200
+POST /api/session/list host=10.0.2.2:3098 cookie=yes -> 403
+GET  /                  host=10.0.2.2:3098 cookie=no  -> 401
 ```
 
-源码注释已说明历史误判：303 被自动跟随后的最终 401 不能单独作为 token 失败依据；应先看 cookie jar。本次现象符合：
+App 脱敏日志（instrumented debug APK）：
 
-- 303 已经由 DSH 返回；
-- 自动跟随后的请求没有带有效 dsh-auth cookie，被 DSH 返回 401；
-- App 把最终 `res.status` 报成 `token exchange failed: HTTP 401`；
-- 需要区分 **配对交换失败 / Cookie 保存失败 / Cookie 读回失败 / 后续身份验证失败**。
+```text
+[auth-diag] jar-clear=true
+[auth-diag] response status=200
+[auth-diag] cookie-manager total=1 dsh-auth=1
+[auth-diag] jar dsh-auth=present finalStatus=200
+[auth-diag] jar-clear=true
+[auth-diag] response status=401
+[auth-diag] cookie-manager total=0 dsh-auth=0
+[auth-diag] jar dsh-auth=absent finalStatus=401
+```
 
-## 5. 正确/错误 Token 结果
+解释：
+
+1. 第一次 `GET /?token=...` 收到 **303 + Set-Cookie**；
+2. 跟随重定向的 `GET /` 携带 cookie，返回 **200**；
+3. Android Native Cookie Jar 实际保存并读回了 `dsh-auth`；
+4. 随后 `POST /api/session/list` 返回 **403**（测试代理 Host `10.0.2.2:3098` 不在 DSH trusted hosts）；
+5. `PairScreen` 的候选 token 循环捕获了 ping 的 403，将其当成首个 token 失败，清空 Cookie Jar 并用 `-`/`_` 变体重试；
+6. 变体 token 的 `loginWithToken` 返回 **401**，覆盖 `lastErr`，UI 最终只显示 `token exchange failed: HTTP 401`。
+
+## 4. 准确发生位置
+
+`dsh-mobile/src/screens/PairScreen.tsx` 原逻辑：
+
+```text
+for candidate:
+  loginWithToken(candidate)
+  ping()
+  → 任何异常都 catch: lastErr=e; cookie=undefined
+```
+
+因此第一个正确 token 成功、ping 403 后，下一次候选 token 的 401 成为最终错误。
+
+修复提交 `5d38cdf`：
+
+```text
+for candidate:
+  loginWithToken(candidate)
+  → 只有 login 失败才 continue
+  ping()
+  → ping 失败直接抛出，不再尝试变体 token
+```
+
+这不会绕过认证；只是防止真实 403/网络错误被变体 token 的 401 掩盖。
+
+## 5. 正确/错误 Token
 
 | 用例 | 结果 |
 |---|---|
-| 主机侧 Token A 直接交换 | HTTP 303 + Set-Cookie（PASS） |
-| Android App 使用未消费 Token B | HTTP 401（FAIL） |
-| 错误 Token（本轮未单独执行 App 用例） | NOT TESTED |
-| 已消费 Token（源码证明 launch token 不消费；未做“已消费”App 用例） | NOT TESTED |
+| 正确新 Token，第一次 Android 交换 | **PASS**：303 + Set-Cookie，跟随 200，Cookie Jar 有 dsh-auth |
+| 正确 Token 后续 `/api/session/list`（代理 Host） | 403，原因是代理 Host 未加入 DSH trusted-host，不是 token 失败 |
+| 变体错误 Token 第二次登录 | 401（被旧逻辑当成最终错误） |
+| 错误 Token App 首次交换（独立） | NOT TESTED |
+| 已消费 Token | 源码证明 launch token 不消费；未单独执行 App 用例 |
 
-## 6. 是否需要代码修改
+## 6. Android 配对 / HTTP / WebSocket
 
-**需要，但只应修改认证路径中最小范围。** 当前没有修改认证安全补丁，也没有关闭验证。最小修复方向：
-
-1. 在 release APK 中验证 `@react-native-cookies/cookies` 的 `get(baseUrl)` 能否读到 dsh-auth cookie；
-2. 在 `DshConnection.loginWithToken` 中区分“303 已返回”和“最终 401”，并记录（脱敏）cookie jar 状态；
-3. 如果 native CookieManager 没有保存 303 的 Set-Cookie，修复原生 cookie 接收/读取路径，而不是跳过 token 交换；
-4. 回归正确 Token、错误 Token、旧 Cookie 清理、303 Set-Cookie、HTTP + WebSocket 配对。
-
-本轮没有提交认证修复；修复前 P0-1 保持 BLOCKED。
+- Android 配对：第一次交换 PASS；完整配对仍被测试环境 Host/trust 与我方 UI 自动化阻断，未完成真实 ChatScreen 配对。
+- HTTP RPC：代理下 `/api/session/list` 403（Host 未 trusted）；未完成真实 RPC PASS。
+- WebSocket：未测试。
+- 修复后 debug APK：
+  - APK SHA-256：`01A30A444DACCC799A6F2DC0B3A9BBD93A10240E10FA091C4FDED05A7779745F`
+  - versionCode 1 / versionName 1.0 / debug 签名
+  - 该 APK 用于诊断日志，代码提交 `5d38cdf` 后重新构建；最终仍需重跑。
 
 ## 7. 当前 P0-1 剩余阻断项
 
-- 最新 APK 真实配对仍未通过；需要修复/验证 Android 303/native cookie jar。
-- 因此真实 ChatScreen 文本 accepted/confirmed、unknown 安全重试、force-stop 恢复、App 附件选择器链路都未完成。
-- 真实磁盘满/256MiB 压力注入仍为 NOT TESTED。
+1. 需要把测试代理 Host 加入 DSH `--trusted-host`，或直接使用 DSH 可信 Host，完成完整配对。
+2. 配对后重新验证 `/mgw/status` gatewayId、HTTP RPC、WebSocket。
+3. 真实 ChatScreen 文本 accepted/confirmed、unknown 安全重试、force-stop 恢复、图片/文件/混合附件选择器均未完成。
+4. 真实磁盘满/256MiB 压力注入仍 NOT TESTED。
 
-## 8. 测试环境
+## 8. 最小修复结论
 
-- 模拟器：`dsh_verify`（独立测试 AVD）
-- 隔离 DSH：独立 profile/state、port 3097；不重启用户 DSH
-- APK：release 测试变体（debug 签名，不可发布）
-- 相关证据：`PHASE-3-REAL-DSH-EVIDENCE.md`、`PHASE-4-ACTUAL-CHATSCREEN-FAILED.png`
+- 已确认根因不是 Token 一次性/过期，也不是 Native Cookie Jar 未保存首次 cookie。
+- 需要的最小代码修复已完成：PairScreen 不再掩盖 ping 403。
+- 仍需修复/配置测试环境 Host trust，然后重新跑真实 App 配对与 ChatScreen 验收。
+- 不修改 main、不移动 Tag、不创建 Release。
