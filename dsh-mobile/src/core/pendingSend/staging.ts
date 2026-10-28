@@ -42,16 +42,24 @@ interface BlobFs {
   copyToInternal?(contentUri: string, destPath: string): Promise<string>;
 }
 
-interface BlobModule {
-  fs: BlobFs;
+interface BlobMediaCollection {
+  copyToInternal?(contentUri: string, destPath: string): Promise<string>;
 }
 
-function getBlobFs(): BlobFs {
+interface BlobModule {
+  fs: BlobFs;
+  MediaCollection?: BlobMediaCollection;
+}
+
+function getBlobModule(): BlobModule {
   // 延迟 require：Node 测试不加载 RN 原生模块。
   // eslint-disable-next-line @typescript-eslint/no-var-requires
   const mod = require('react-native-blob-util') as BlobModule | { default: BlobModule };
-  const blob = 'default' in mod ? mod.default : mod;
-  return blob.fs;
+  return 'default' in mod ? mod.default : mod;
+}
+
+function getBlobFs(): BlobFs {
+  return getBlobModule().fs;
 }
 
 export function bareFilePath(uri: string): string {
@@ -145,10 +153,13 @@ export class ReactNativePendingSendStaging implements PendingSendStaging {
 
     try {
       if (source.startsWith('content://')) {
-        if (!fs.copyToInternal) {
-          throw new PendingSendStagingError('attachment-copy-failed', '当前平台不支持 content:// 复制');
+        const copyContent =
+          getBlobModule().MediaCollection?.copyToInternal ?? fs.copyToInternal;
+        if (copyContent) {
+          await copyContent(source, target);
+        } else {
+          await fs.cp(source, target);
         }
-        await fs.copyToInternal(source, target);
       } else {
         // 不同平台实现可能返回 boolean/undefined；以复制后的 stat 为准。
         await fs.cp(bareFilePath(source), target);
@@ -173,6 +184,11 @@ export class ReactNativePendingSendStaging implements PendingSendStaging {
       if (!/^[a-f0-9]{64}$/.test(contentSha256)) {
         await fs.unlink(target).catch(() => undefined);
         throw new PendingSendStagingError('attachment-copy-failed', '附件哈希计算失败');
+      }
+      if (typeof __DEV__ !== 'undefined' && __DEV__) {
+        console.log(
+          `[p0-verify] staged kind=${draft.kind} name=${draft.name} size=${stat.size} sha256=${contentSha256} stagedUri=${target}`,
+        );
       }
       return {
         kind: draft.kind,
@@ -224,6 +240,9 @@ export class ReactNativePendingSendStaging implements PendingSendStaging {
       const path = this.normalizeStagedUri(attachment.stagedUri);
       this.assertInsideDir(path);
       await fs.unlink(bareFilePath(path)).catch(() => undefined);
+      if (typeof __DEV__ !== 'undefined' && __DEV__) {
+        console.log(`[p0-verify] staged-removed name=${attachment.name} stagedUri=${path}`);
+      }
     }
   }
 

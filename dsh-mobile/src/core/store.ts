@@ -1663,6 +1663,11 @@ export class Store {
           attachment.stagedUri,
           attachment.name,
         );
+        if (IS_DEV) {
+          console.log(
+            `[p0-verify] uploaded requestId=${current.requestId} name=${attachment.name} receiptId=${receipt.receiptId} attachmentId=${receipt.file.attachmentId}`,
+          );
+        }
         attachments[i] = {
           ...attachment,
           receiptId: receipt.receiptId,
@@ -1805,6 +1810,11 @@ export class Store {
 
       // 先写 sending 并回读，再发 prompt。
       current = await this.pendingSends.apply(requestId, { type: 'begin-send' });
+      if (IS_DEV) {
+        console.log(
+          `[p0-verify] sending requestId=${requestId} attachments=${current.attachments.length}`,
+        );
+      }
       if (IS_DEV && shouldPauseP0BeforePrompt(requestId)) {
         console.log(`[p0-verify] paused-before-prompt requestId=${requestId}`);
         this.emit();
