@@ -49,8 +49,7 @@ import { ThinkingAccordion, ThinkingDots } from '../components/Thinking';
 import { ToolCard } from '../components/ToolCard';
 import { ModelSwitcher } from '../components/ModelSwitcher';
 import { pickAttachments, formatBytes, type PickMode } from '../core/picker';
-import { guessImageMime, readFileBase64 } from '../core/rpc/upload';
-import type { OutgoingAttachment } from '../core/store';
+import { guessImageMime } from '../core/rpc/upload';
 import type { PendingSendRecord } from '../core/pendingSend/types';
 import {
   PendingSendFailurePersistError,
@@ -107,25 +106,9 @@ export function ChatScreen({
   const [sending, setSending] = useState(false);
   const [attaching, setAttaching] = useState(false);
   const [sendError, setSendError] = useState<string | undefined>(undefined);
-  /** P0-1：文本发送的持久化待发送记录（附件路径仍走旧的 store.send）。 */
+  /** P0-1：文本/图片/文件的持久化待发送记录。 */
   const [pendingSends, setPendingSends] = useState<PendingSendRecord[]>([]);
   const [retryingPendingId, setRetryingPendingId] = useState<string | undefined>(undefined);
-  /**
-   * 上一次发送失败、可以安全重试的那条消息。
-   *
-   * 关键点：**重试必须复用同一个 requestId**。
-   *
-   * DSH 服务端按 requestId 去重（`hasPromptRequest` 同时查已排队和
-   * 已执行的用户消息）。所以：
-   *   · requestId 不变 → 就算上次其实已经送达，重试也只会拿到
-   *     `{accepted:true}`，**不会重复执行任务**
-   *   · requestId 变了 → 服务端当成两条不同消息，有副作用的工具调用
-   *     会**真的跑两遍**
-   *
-   * 为什么还要记 `text`：用户失败后改了内容再发，那是新的意图，
-   * 必须换新 id —— 否则会被服务端误判成重复而丢弃。
-   */
-  const [retryReq, setRetryReq] = useState<{ id: string; text: string } | undefined>(undefined);
   // 管家模式：chat=闲聊（默认，直接回答）/ plan=计划（先对齐需求再派活）
   const [butlerMode, setButlerMode] = useState<ButlerMode>('chat');
   // 管家页顶部的「切换项目」弹层
@@ -294,96 +277,30 @@ export function ChatScreen({
     }
   }, []);
 
-  /** 把本地草稿变成可发送的附件（图片转 base64，文件先传上去换回执） */
-  const resolveDrafts = useCallback(
-    async (list: Draft[]): Promise<OutgoingAttachment[]> => {
-      const out: OutgoingAttachment[] = [];
-      for (const d of list) {
-        if (d.kind === 'image') {
-          const mediaType =
-            d.mime && d.mime.startsWith('image/') ? d.mime : guessImageMime(d.name) ?? 'image/png';
-          const data = await readFileBase64(d.uri);
-          out.push({
-            ref: {
-              kind: 'image',
-              attachmentId: `local-${d.id}`,
-              mediaType,
-              name: d.name,
-              bytes: d.size,
-              localUri: d.uri,
-            },
-            part: { type: 'image', mediaType, data, name: d.name },
-          });
-        } else {
-          const receipt = await store.upload.uploadBinary(sessionId, d.uri, d.name);
-          out.push({
-            ref: {
-              kind: 'file',
-              attachmentId: receipt.file.attachmentId,
-              name: receipt.file.name,
-              bytes: receipt.file.bytes,
-              localUri: d.uri,
-            },
-            part: { type: 'file', receiptId: receipt.receiptId },
-          });
-        }
-      }
-      return out;
-    },
-    [sessionId, store],
-  );
-
   const send = useCallback(async () => {
     const text = draft.trim();
     if ((!text && drafts.length === 0) || sending) return;
     const pendingAttachments = drafts;
 
-    // 阶段 2 只把文本路径接入 PendingSendStore；附件路径保留旧逻辑，
-    // 避免在附件保护（阶段 3）完成前引入回归。
-    if (pendingAttachments.length > 0) {
-      setSending(true);
-      setSendError(undefined);
-      setAttaching(true);
-      setDraft('');
-      setDrafts([]);
-
-      const isRetry = retryReq !== undefined && retryReq.text === text;
-      const requestId =
-        isRetry ? retryReq.id : `req-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
-
-      try {
-        const attachments = await resolveDrafts(pendingAttachments);
-        await store.send(sessionId, text, attachments, 'queue', requestId);
-        setNearBottom(true);
-        setRetryReq(undefined);
-      } catch (e) {
-        setDraft(text);
-        setDrafts(pendingAttachments);
-        setRetryReq({ id: requestId, text });
-        setSendError(describeSendError(e));
-      } finally {
-        setSending(false);
-        setAttaching(false);
-      }
-      return;
-    }
-
-    // 文本路径：先持久化完整发送意图（PendingSendStore.create），成功
-    // 回读后 Store 才调用 session/prompt；正常新发送永远新 requestId。
+    // 文本、图片、文件、混合消息统一进入 PendingSendStore。
+    // 附件在 Store 内先复制到私有暂存区并计算字节 SHA-256，再持久化记录。
     setSending(true);
     setSendError(undefined);
+    setAttaching(pendingAttachments.length > 0);
     setDraft('');
+    setDrafts([]);
     try {
-      await store.sendPending(sessionId, text);
+      await store.sendPending(sessionId, text, pendingAttachments);
       setNearBottom(true);
-      setRetryReq(undefined);
     } catch (e) {
       setDraft(text);
+      setDrafts(pendingAttachments);
       setSendError(describeSendError(e));
     } finally {
       setSending(false);
+      setAttaching(false);
     }
-  }, [draft, drafts, sending, resolveDrafts, sessionId, store, retryReq]);
+  }, [draft, drafts, sending, sessionId, store]);
 
   const retryPendingSend = useCallback(
     async (record: PendingSendRecord) => {

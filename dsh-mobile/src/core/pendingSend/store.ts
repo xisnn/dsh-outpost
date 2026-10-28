@@ -14,11 +14,13 @@ import {
   DEFAULT_PENDING_SEND_LIMITS,
   DEFAULT_PENDING_SEND_TTL_MS,
   PENDING_SEND_SCHEMA,
+  type AttachmentDraft,
   type PendingSendDocument,
   type PendingSendInput,
   type PendingSendLimits,
   type PendingSendRecord,
   type PendingSendState,
+  type PendingAttachment,
 } from './types';
 import {
   canUserRetry,
@@ -35,9 +37,16 @@ import {
   PendingSendPersistenceError,
   type PendingSendPersistence,
 } from './persistence';
+import {
+  NoopPendingSendStaging,
+  PendingSendStagingError,
+  type PendingSendStaging,
+} from './staging';
 
 export interface PendingSendStoreOptions {
   persistence?: PendingSendPersistence;
+  /** 生产 App 必须注入真实私有目录暂存；测试/无文件场景默认 no-op。 */
+  staging?: PendingSendStaging;
   idFactory?: () => string;
   now?: () => number;
   limits?: Partial<PendingSendLimits>;
@@ -57,7 +66,8 @@ export type PendingSendStoreErrorCode =
   | 'request-not-found'
   | 'request-not-retryable'
   | 'limit-exceeded'
-  | 'invalid-record';
+  | 'invalid-record'
+  | 'cleanup-failed';
 
 export class PendingSendStoreError extends Error {
   readonly code: PendingSendStoreErrorCode;
@@ -175,6 +185,7 @@ function parseDocument(raw: string): PendingSendDocumentState {
 
 export class PendingSendStore {
   private readonly persistence: PendingSendPersistence;
+  private readonly staging: PendingSendStaging;
   private readonly idFactory: () => string;
   private readonly now: () => number;
   private readonly limits: PendingSendLimits;
@@ -189,6 +200,7 @@ export class PendingSendStore {
 
   constructor(options: PendingSendStoreOptions = {}) {
     this.persistence = options.persistence ?? new KeychainPendingSendPersistence();
+    this.staging = options.staging ?? new NoopPendingSendStaging();
     this.idFactory = options.idFactory ?? (() => createRequestId());
     this.now = options.now ?? (() => Date.now());
     this.limits = { ...DEFAULT_PENDING_SEND_LIMITS, ...(options.limits ?? {}) };
@@ -294,6 +306,11 @@ export class PendingSendStore {
       this.doc = raw === undefined ? emptyDocument(this.now()) : parseDocument(raw);
       const recovered = await this.recoverInternal();
       const prunedRecords = await this.pruneInternal();
+      // 启动时清理不再被任何记录引用的暂存文件（崩溃/清理失败的残留）。
+      const referenced = this.doc.records.flatMap((r) =>
+        r.attachments.map((a) => a.stagedUri),
+      );
+      await this.staging.cleanupOrphans(referenced).catch(() => 0);
       this.emit();
       return { recovered, pruned: prunedRecords.length };
     });
@@ -361,8 +378,69 @@ export class PendingSendStore {
     }
     if (removed.length > 0) {
       await this.save({ ...doc, records: keep });
+      // 文件清理失败不应该让记录重新出现；孤儿文件由下次 cleanupOrphans 处理。
+      await this.staging
+        .removeAttachments(removed.flatMap((r) => r.attachments))
+        .catch(() => undefined);
     }
     return removed;
+  }
+
+  /** 把 UI 草稿复制到私有暂存区并计算真实字节 SHA-256。 */
+  async stageDrafts(drafts: AttachmentDraft[]): Promise<PendingAttachment[]> {
+    const staged: PendingAttachment[] = [];
+    try {
+      for (const draft of drafts) {
+        staged.push(await this.staging.stage(draft));
+      }
+      return staged;
+    } catch (e) {
+      await this.staging.removeAttachments(staged).catch(() => undefined);
+      if (e instanceof PendingSendStagingError) throw e;
+      throw new PendingSendStoreError('write-failed', '附件暂存失败', e);
+    }
+  }
+
+  /** 记录创建失败/身份失败时清理已经复制到暂存区的文件。 */
+  async discardStaged(attachments: PendingAttachment[]): Promise<void> {
+    await this.staging.removeAttachments(attachments).catch(() => undefined);
+  }
+
+  /** 逐项校验暂存文件仍存在且 SHA-256 未变。 */
+  async verifyAttachments(attachments: PendingAttachment[]): Promise<void> {
+    for (const attachment of attachments) {
+      await this.staging.verify(attachment);
+    }
+  }
+
+  /** 附件上传回执写回（preparing/ready 阶段）。 */
+  async updateAttachments(
+    requestId: string,
+    attachments: PendingAttachment[],
+  ): Promise<PendingSendRecord> {
+    return this.runExclusive(async () => {
+      const doc = this.requireDoc();
+      const index = doc.records.findIndex((r) => r.requestId === requestId);
+      if (index < 0) {
+        throw new PendingSendStoreError('request-not-found', `找不到待发送记录 ${requestId}`);
+      }
+      const current = doc.records[index]!;
+      if (current.state !== 'preparing' && current.state !== 'ready') {
+        throw new PendingSendStoreError(
+          'request-not-retryable',
+          `状态 ${current.state} 不允许更新附件回执`,
+        );
+      }
+      const next: PendingSendRecord = {
+        ...current,
+        attachments: attachments.map((a) => ({ ...a })),
+        updatedAt: this.now(),
+      };
+      const records = doc.records.slice();
+      records[index] = next;
+      await this.save({ ...doc, records });
+      return cloneRecord(next);
+    });
   }
 
   async create(input: PendingSendInput): Promise<PendingSendRecord> {
@@ -395,6 +473,12 @@ export class PendingSendStore {
           throw new PendingSendStoreError(
             'invalid-record',
             `附件 ${attachment.name} 缺少合法的 contentSha256`,
+          );
+        }
+        if (!attachment.stagedUri) {
+          throw new PendingSendStoreError(
+            'invalid-record',
+            `附件 ${attachment.name} 缺少私有暂存路径`,
           );
         }
       }
@@ -497,6 +581,11 @@ export class PendingSendStore {
       const doc = this.requireDoc();
       // save() 会递增 revision 并写入空记录；不要在此后重置 revision。
       await this.save({ ...doc, records: [] });
+      try {
+        await this.staging.clearAll();
+      } catch (e) {
+        throw new PendingSendStoreError('cleanup-failed', '附件暂存目录清理失败', e);
+      }
     });
   }
 

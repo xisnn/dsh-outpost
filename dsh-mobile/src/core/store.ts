@@ -39,7 +39,8 @@ import {
   PendingSendFailurePersistError,
   PendingSendPostAcceptError,
 } from './pendingSend/errors';
-import type { PendingSendBinding, PendingSendRecord } from './pendingSend/types';
+import type { PendingSendBinding, PendingSendRecord, AttachmentDraft, PendingAttachment } from './pendingSend/types';
+import { guessImageMime, readFileBase64 } from './rpc/upload';
 
 /** 延迟加载待发送模块：避免 Store 的 Node 测试被 RN 原生模块解析链拖死。 */
 function createDefaultPendingSendStore(): PendingSendStore {
@@ -51,7 +52,18 @@ function createDefaultPendingSendStore(): PendingSendStore {
 function defaultLoadPendingBinding(baseUrl: string): Promise<PendingSendBinding> {
   // eslint-disable-next-line @typescript-eslint/no-var-requires
   const mod = require('./pendingSend/serviceBinding') as typeof import('./pendingSend/serviceBinding');
-  return mod.loadPendingSendBinding(baseUrl);
+  // 本地组装；真正的“当前服务器”验证在 runPendingSend 里用已认证远端接口执行。
+  return mod.loadPendingSendBinding(baseUrl, { requireRemote: false });
+}
+
+function defaultVerifyPendingBinding(
+  expected: PendingSendBinding,
+  baseUrl: string,
+  cookie: string | undefined,
+): Promise<void> {
+  // eslint-disable-next-line @typescript-eslint/no-var-requires
+  const mod = require('./pendingSend/serviceBinding') as typeof import('./pendingSend/serviceBinding');
+  return mod.verifyPendingSendBinding(expected, baseUrl, cookie);
 }
 
 /** 已归档会话 id 的存储 key（DSH 不返回归档状态，只能客户端自己记） */
@@ -183,6 +195,12 @@ export interface StoreOptions {
   pendingSendStore?: PendingSendStore;
   /** 注入测试用服务身份来源；生产使用 Keychain 中已持久化的绑定。 */
   loadPendingBinding?: (baseUrl: string) => Promise<PendingSendBinding>;
+  /** 注入测试用身份验证；生产走已认证的远端 gatewayId 查询。 */
+  verifyPendingBinding?: (
+    expected: PendingSendBinding,
+    baseUrl: string,
+    cookie: string | undefined,
+  ) => Promise<void>;
 }
 
 export class Store {
@@ -196,6 +214,11 @@ export class Store {
   /** P0-1：持久化待发送记录（App 级单例，由 App 注入） */
   readonly pendingSends: PendingSendStore;
   private readonly loadPendingBinding: (baseUrl: string) => Promise<PendingSendBinding>;
+  private readonly verifyPendingBinding: (
+    expected: PendingSendBinding,
+    baseUrl: string,
+    cookie: string | undefined,
+  ) => Promise<void>;
   private conn: DshConnection;
 
   connection: ConnectionState = 'idle';
@@ -263,6 +286,7 @@ export class Store {
     this.dirs = new DirectoryPickerApi(conn);
     this.pendingSends = opts.pendingSendStore ?? createDefaultPendingSendStore();
     this.loadPendingBinding = opts.loadPendingBinding ?? defaultLoadPendingBinding;
+    this.verifyPendingBinding = opts.verifyPendingBinding ?? defaultVerifyPendingBinding;
   }
 
   /** 拉取账户余额与登录态 */
@@ -1528,27 +1552,37 @@ export class Store {
     await this.api.cancel(sessionId);
   }
 
-  // ── P0-1 持久化发送（阶段 2：文本） ─────────────────────────────
+  // ── P0-1 持久化发送（阶段 2/3：文本与附件） ─────────────────────
   /**
-   * 发送一条文本消息：先创建并持久化 PendingSendRecord，成功回读后才发 prompt。
-   * 正常新发送永远生成新 requestId；绝不按内容指纹复用旧记录。
+   * 发送一条消息：附件先复制到私有暂存区并计算真实字节 SHA-256，再创建
+   * PendingSendRecord；成功回读后才上传/发 prompt。正常新发送永远新 ID。
    */
   async sendPending(
     sessionId: string,
     text: string,
+    attachments: AttachmentDraft[] = [],
     mode: 'queue' | 'steer' = 'queue',
   ): Promise<PendingSendRecord> {
     const trimmed = text.trim();
-    if (!trimmed) throw new Error('消息内容为空');
+    if (!trimmed && attachments.length === 0) throw new Error('消息内容为空');
     await this.pendingSends.ensureHydrated();
-    const binding = await this.loadPendingBinding(this.conn.baseUrl);
-    const record = await this.pendingSends.create({
-      sessionId,
-      mode,
-      text: trimmed,
-      attachments: [],
-      binding,
-    });
+
+    let staged: PendingAttachment[] = [];
+    let record: PendingSendRecord;
+    try {
+      staged = await this.pendingSends.stageDrafts(attachments);
+      const binding = await this.loadPendingBinding(this.conn.baseUrl);
+      record = await this.pendingSends.create({
+        sessionId,
+        mode,
+        text: trimmed,
+        attachments: staged,
+        binding,
+      });
+    } catch (e) {
+      await this.pendingSends.discardStaged(staged);
+      throw e;
+    }
     this.emit();
     return this.runPendingSend(record);
   }
@@ -1561,9 +1595,11 @@ export class Store {
       throw new Error('找不到待发送记录');
     }
     const binding = await this.loadPendingBinding(this.conn.baseUrl);
+    // 重试前必须有已认证的远端 gatewayId 验证；验证失败时不改变记录状态。
+    await this.verifyPendingBinding(existing.binding, this.conn.baseUrl, this.conn.currentCookie);
     const record = await this.pendingSends.retry(requestId, binding);
     this.emit();
-    return this.runPendingSend(record);
+    return this.runPendingSend(record, { identityVerified: true });
   }
 
   private runPendingSingleFlight(
@@ -1579,7 +1615,95 @@ export class Store {
     return promise;
   }
 
-  private async runPendingSend(initial: PendingSendRecord): Promise<PendingSendRecord> {
+  private async preparePendingAttachments(
+    current: PendingSendRecord,
+  ): Promise<PendingAttachment[]> {
+    const attachments = current.attachments.map((a) => ({ ...a }));
+    for (let i = 0; i < attachments.length; i += 1) {
+      const attachment = attachments[i]!;
+      // 每次都按原始字节重新校验；临时 URI 失效/文件被删/内容被改都拒绝。
+      await this.pendingSends.verifyAttachments([attachment]);
+      if (attachment.kind === 'file' && !attachment.receiptId) {
+        const receipt = await this.upload.uploadBinary(
+          current.sessionId,
+          attachment.stagedUri,
+          attachment.name,
+        );
+        attachments[i] = {
+          ...attachment,
+          receiptId: receipt.receiptId,
+          attachmentId: receipt.file.attachmentId,
+          size: receipt.file.bytes ?? attachment.size,
+        };
+        // 每成功一个就写回，上传中断/进程被杀后已成功的回执可复用。
+        await this.pendingSends.updateAttachments(current.requestId, attachments);
+      }
+    }
+    return attachments;
+  }
+
+  private async buildOutgoingAttachments(
+    attachments: PendingAttachment[],
+  ): Promise<OutgoingAttachment[]> {
+    const outgoing: OutgoingAttachment[] = [];
+    for (const attachment of attachments) {
+      if (attachment.kind === 'image') {
+        const mediaType =
+          (attachment.mime?.startsWith('image/') ? attachment.mime : undefined) ??
+          guessImageMime(attachment.name) ??
+          'image/png';
+        const data = await readFileBase64(attachment.stagedUri);
+        outgoing.push({
+          ref: {
+            kind: 'image',
+            attachmentId: attachment.attachmentId ?? '',
+            mediaType,
+            bytes: attachment.size,
+            name: attachment.name,
+            localUri: attachment.stagedUri,
+          },
+          part: { type: 'image', mediaType, data, name: attachment.name },
+        });
+      } else {
+        if (!attachment.receiptId) {
+          throw new Error(`附件上传回执丢失：${attachment.name}`);
+        }
+        outgoing.push({
+          ref: {
+            kind: 'file',
+            attachmentId: attachment.attachmentId ?? '',
+            name: attachment.name,
+            bytes: attachment.size,
+            localUri: attachment.stagedUri,
+          },
+          part: { type: 'file', receiptId: attachment.receiptId },
+        });
+      }
+    }
+    return outgoing;
+  }
+
+  private async failPendingAttachments(
+    requestId: string,
+    code: string,
+    error: unknown,
+  ): Promise<never> {
+    try {
+      await this.pendingSends.apply(requestId, {
+        type: 'definite-failure',
+        code,
+        message: error instanceof Error ? error.message : String(error),
+      });
+    } catch (persistError) {
+      throw new PendingSendFailurePersistError(requestId, persistError);
+    }
+    throw error;
+  }
+
+  private async runPendingSend(
+    initial: PendingSendRecord,
+    options: { identityVerified?: boolean } = {},
+  ): Promise<PendingSendRecord> {
     return this.runPendingSingleFlight(initial.requestId, async () => {
       const requestId = initial.requestId;
       let current = await this.pendingSends.get(requestId);
@@ -1589,8 +1713,17 @@ export class Store {
         current = await this.pendingSends.apply(requestId, { type: 'begin-preparing' });
       }
       if (current.state === 'preparing') {
-        // 阶段 2 只发文本；附件路径仍走旧 store.send，不在这里声称完成。
-        current = await this.pendingSends.apply(requestId, { type: 'attachments-ready' });
+        try {
+          await this.preparePendingAttachments(current);
+          current = (await this.pendingSends.get(requestId)) ?? current;
+          if (current.state === 'preparing') {
+            current = await this.pendingSends.apply(requestId, { type: 'attachments-ready' });
+          }
+        } catch (e) {
+          // 上传失败/暂存文件失效都确定尚未调用 prompt；保持原 requestId，
+          // 已成功上传的回执留在记录里供用户显式重试时复用。
+          return this.failPendingAttachments(requestId, 'attachment-upload-failed', e);
+        }
       }
       if (current.state === 'sending' || current.state === 'accepted') {
         // single-flight 下的重复调用直接返回当前记录，不重复发网络请求。
@@ -1599,12 +1732,48 @@ export class Store {
       if (current.state !== 'ready') {
         throw new Error(`待发送记录状态 ${current.state} 不能发送`);
       }
+      // ready 可能是上次进程在上传完成后退出留下的；重新核验私有暂存文件。
+      try {
+        await this.pendingSends.verifyAttachments(current.attachments);
+      } catch (e) {
+        return this.failPendingAttachments(requestId, 'attachment-invalid', e);
+      }
+
+      let outgoing: OutgoingAttachment[];
+      try {
+        outgoing = await this.buildOutgoingAttachments(current.attachments);
+      } catch (e) {
+        return this.failPendingAttachments(requestId, 'attachment-unreadable', e);
+      }
+
+      // 新建发送在 prompt 之前做已认证的远端身份核验；显式 retry 已在
+      // retryPending 中提前核验，避免重复网络请求。
+      if (!options.identityVerified) {
+        try {
+          await this.verifyPendingBinding(
+            current.binding,
+            this.conn.baseUrl,
+            this.conn.currentCookie,
+          );
+        } catch (e) {
+          try {
+            await this.pendingSends.apply(requestId, {
+              type: 'definite-failure',
+              code: 'identity-verification-failed',
+              message: e instanceof Error ? e.message : String(e),
+            });
+          } catch (persistError) {
+            throw new PendingSendFailurePersistError(requestId, persistError);
+          }
+          throw e;
+        }
+      }
 
       // 先写 sending 并回读，再发 prompt。
       current = await this.pendingSends.apply(requestId, { type: 'begin-send' });
 
       try {
-        await this.send(current.sessionId, current.text, [], current.mode, requestId, {
+        await this.send(current.sessionId, current.text, outgoing, current.mode, requestId, {
           optimistic: false,
         });
       } catch (e) {
@@ -1667,7 +1836,10 @@ export class Store {
       .list(sessionId)
       .then(async (records) => {
         for (const record of records) {
-          if (record.state === 'accepted' && rpcIds.has(record.requestId)) {
+          if (
+            rpcIds.has(record.requestId) &&
+            (record.state === 'accepted' || record.state === 'sending' || record.state === 'unknown')
+          ) {
             try {
               await this.pendingSends.apply(record.requestId, { type: 'confirm' });
             } catch {

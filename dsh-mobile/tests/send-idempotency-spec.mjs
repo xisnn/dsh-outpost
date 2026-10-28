@@ -190,37 +190,31 @@ await check('🔴 若换新 id → 服务端会当成两条（反证）', async 
 
 
 
-await check('ChatScreen 保存了失败请求的 requestId', () => {
-  if (!/retryReq/.test(chatSrc)) return '没有 retryReq 状态';
-  const i = chatSrc.indexOf('setRetryReq({ id: requestId, text })');
-  return i > 0 ? true : '失败分支没有记住 requestId';
+await check('ChatScreen 文本/附件统一走 store.sendPending', () => {
+  return /store\.sendPending\(sessionId,\s*text,\s*pendingAttachments\)/.test(chatSrc)
+    ? true
+    : 'ChatScreen 没有把文本和附件统一交给 store.sendPending';
 });
 
-await check('ChatScreen 重试时复用（而不是重新生成）', () => {
-  const i = chatSrc.indexOf('const isRetry =');
-  if (i < 0) return '找不到 isRetry 判断';
-  const seg = chatSrc.slice(i, i + 500);
-  if (!/retryReq\.id/.test(seg)) return '重试分支没用 retryReq.id';
-  return /isRetry \? retryReq\.id :/.test(seg)
+await check('ChatScreen 只通过待发送气泡的 retryPending 重试', () => {
+  return /store\.retryPending\(sessionId,\s*record\.requestId\)/.test(chatSrc)
     ? true
-    : '判断结构不对，可能总是生成新 id';
+    : 'ChatScreen 没有调用 retryPending';
 });
 
-await check('ChatScreen 成功后会清掉 retryReq', () => {
-  const i = chatSrc.indexOf('await store.send(sessionId, text, attachments,');
-  if (i < 0) return '找不到发送调用';
-  const seg = chatSrc.slice(i, i + 400);
-  return /setRetryReq\(undefined\)/.test(seg)
+await check('ChatScreen 不再自行生成 requestId / retryReq', () => {
+  return !/retryReq|req-\$\{Date\.now\(\)\}/.test(chatSrc)
     ? true
-    : '成功后没清掉 —— 下次再发同样内容会被误判成重试';
+    : 'ChatScreen 仍可能自行生成或复用 requestId';
 });
 
-await check('改了文字必须换新 requestId（否则被服务端丢弃）', () => {
-  const i = chatSrc.indexOf('const isRetry =');
-  const seg = chatSrc.slice(i, i + 300);
-  return /retryReq\.text === text/.test(seg)
+await check('Store.sendPending 正常新发送创建新记录（不复用旧 ID）', () => {
+  const i = storeSrc.indexOf('async sendPending(');
+  const j = storeSrc.indexOf('async retryPending(', i);
+  const seg = storeSrc.slice(i, j);
+  return /pendingSends\.create\(/.test(seg) && !/requestId\s*:\s*['"]/.test(seg)
     ? true
-    : '没有按文字内容判断，用户改完内容重发会被当成重复而丢弃';
+    : 'sendPending 没有走 create 新记录语义';
 });
 
 await check('store.send 把 requestId 传给 api.prompt', () => {

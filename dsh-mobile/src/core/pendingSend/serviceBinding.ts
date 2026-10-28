@@ -11,8 +11,13 @@
  */
 
 import { CredentialKey, loadCredential } from '../secureStore';
-import { normalizeBaseUrl, readServerBindingSnapshot } from '../serverIdentity';
+import {
+  fetchServerGatewayId,
+  normalizeBaseUrl,
+  readServerBindingSnapshot,
+} from '../serverIdentity';
 import { sha256Hex } from './fingerprint';
+import { evaluatePendingSendBinding } from './state';
 import type { PendingSendBinding } from './types';
 
 export type PendingSendIdentityErrorCode =
@@ -20,7 +25,23 @@ export type PendingSendIdentityErrorCode =
   | 'binding-missing'
   | 'address-changed'
   | 'gateway-missing'
-  | 'device-context-missing';
+  | 'device-context-missing'
+  | 'auth-context-missing'
+  | 'remote-identity-unavailable'
+  | 'remote-instance-mismatch';
+
+export type RemoteGatewayVerifier = (
+  baseUrl: string,
+  cookie: string | undefined,
+) => Promise<string | undefined>;
+
+export interface LoadPendingSendBindingOptions {
+  /** 生产默认 true；本地组装测试可显式 false。 */
+  requireRemote?: boolean;
+  /** 认证 cookie；requireRemote=true 时必须有。 */
+  cookie?: string;
+  verifyRemote?: RemoteGatewayVerifier;
+}
 
 export class PendingSendIdentityError extends Error {
   readonly code: PendingSendIdentityErrorCode;
@@ -33,13 +54,17 @@ export class PendingSendIdentityError extends Error {
 }
 
 /**
- * 读取当前可验证的服务身份。
+ * 读取并验证当前服务身份。
  *
- * 只有已经持久化的 gatewayServerBinding 与当前连接地址一致、且
- * gatewayId / gatewayServerDeviceId / gatewayDeviceId 都可用时，才返回
- * `confirmed` 绑定。否则抛出 PendingSendIdentityError，让上层阻止发送。
+ * `requireRemote` 默认 true：除本地 Keychain 绑定外，还必须用当前登录 cookie
+ * 请求已认证的 `/mgw/status`，拿到**实时 gatewayId**并与本地绑定比对。
+ * 只读本地缓存不能作为“当前服务器仍是同一实例”的证明；地址相同也可能
+ * 已经被另一台机器占用。
  */
-export async function loadPendingSendBinding(currentBaseUrl: string): Promise<PendingSendBinding> {
+export async function loadPendingSendBinding(
+  currentBaseUrl: string,
+  options: LoadPendingSendBindingOptions = {},
+): Promise<PendingSendBinding> {
   const baseUrl = normalizeBaseUrl(currentBaseUrl);
   if (!baseUrl) {
     throw new PendingSendIdentityError('base-url-missing', '当前没有可用的服务地址');
@@ -87,10 +112,83 @@ export async function loadPendingSendBinding(currentBaseUrl: string): Promise<Pe
     }),
   );
 
+  if (options.requireRemote !== false) {
+    if (!options.cookie) {
+      throw new PendingSendIdentityError(
+        'auth-context-missing',
+        '没有当前登录凭据，无法进行已认证的服务器身份验证',
+      );
+    }
+    const verify = options.verifyRemote ?? fetchServerGatewayId;
+    const remoteGatewayId = await verify(baseUrl, options.cookie);
+    if (!remoteGatewayId) {
+      throw new PendingSendIdentityError(
+        'remote-identity-unavailable',
+        '无法通过已认证请求确认当前服务器实例身份',
+      );
+    }
+    if (remoteGatewayId !== binding.gatewayId) {
+      throw new PendingSendIdentityError(
+        'remote-instance-mismatch',
+        '当前连接的服务器实例与本地绑定不一致',
+      );
+    }
+  }
+
   return {
     baseUrl,
     gatewayId: binding.gatewayId,
     authContextHash,
     identityQuality: 'confirmed',
   };
+}
+
+/**
+ * 重试前验证：本地绑定三项 + 已认证远端 gatewayId 必须同时匹配。
+ *
+ * 任何一项失败都抛 PendingSendIdentityError，调用方不得继续发送。
+ */
+export async function verifyPendingSendBinding(
+  expected: PendingSendBinding,
+  currentBaseUrl: string,
+  cookie: string | undefined,
+  verifyRemote: RemoteGatewayVerifier = fetchServerGatewayId,
+): Promise<void> {
+  const local = await loadPendingSendBinding(currentBaseUrl, { requireRemote: false });
+  const verdict = evaluatePendingSendBinding(expected, {
+    baseUrl: local.baseUrl,
+    gatewayId: local.gatewayId,
+    authContextHash: local.authContextHash,
+  });
+  if (!verdict.ok) {
+    throw new PendingSendIdentityError(
+      verdict.reason === 'service-address-changed'
+        ? 'address-changed'
+        : verdict.reason === 'server-instance-changed'
+          ? 'remote-instance-mismatch'
+          : verdict.reason === 'authorization-context-changed'
+            ? 'device-context-missing'
+            : 'remote-identity-unavailable',
+      `发送身份验证失败：${verdict.reason}`,
+    );
+  }
+  if (!cookie) {
+    throw new PendingSendIdentityError(
+      'auth-context-missing',
+      '没有当前登录凭据，无法进行已认证的服务器身份验证',
+    );
+  }
+  const remoteGatewayId = await verifyRemote(local.baseUrl, cookie);
+  if (!remoteGatewayId) {
+    throw new PendingSendIdentityError(
+      'remote-identity-unavailable',
+      '无法通过已认证请求确认当前服务器实例身份',
+    );
+  }
+  if (remoteGatewayId !== expected.gatewayId) {
+    throw new PendingSendIdentityError(
+      'remote-instance-mismatch',
+      '当前连接的服务器实例与待发送记录不一致',
+    );
+  }
 }

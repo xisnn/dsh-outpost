@@ -55,6 +55,14 @@ const BASE = 'http://127.0.0.1:3095';
 const GW_A = '11111111-1111-4111-8111-111111111111';
 const GW_B = '22222222-2222-4222-8222-222222222222';
 
+async function load(base = BASE, remoteGatewayId = GW_A, options = {}) {
+  return loadPendingSendBinding(base, {
+    cookie: 'test-auth-cookie',
+    verifyRemote: async () => remoteGatewayId,
+    ...options,
+  });
+}
+
 async function seed({ gatewayId = GW_A, baseUrl = BASE, serverDeviceId = 'server-device-A', clientDeviceId = 'client-device-A', cookie = 'cookie-1' } = {}) {
   keychain.__reset();
   await saveCredential(
@@ -81,18 +89,42 @@ async function check(name, fn) {
 
 await check('读取持久化 gatewayId 并生成 confirmed 绑定', async () => {
   await seed();
-  const b = await loadPendingSendBinding(BASE);
+  const b = await load();
   assert.equal(b.gatewayId, GW_A);
   assert.equal(b.baseUrl, BASE);
   assert.equal(b.identityQuality, 'confirmed');
   assert.match(b.authContextHash, /^[a-f0-9]{64}$/);
 });
 
+await check('已认证远端 gatewayId 不匹配 → 拒绝', async () => {
+  await seed();
+  await assert.rejects(
+    () => load(BASE, GW_B),
+    (e) => e instanceof PendingSendIdentityError && e.code === 'remote-instance-mismatch',
+  );
+});
+
+await check('缺认证 cookie → 拒绝（不允许只信本地缓存）', async () => {
+  await seed();
+  await assert.rejects(
+    () => loadPendingSendBinding(BASE, { verifyRemote: async () => GW_A }),
+    (e) => e instanceof PendingSendIdentityError && e.code === 'auth-context-missing',
+  );
+});
+
+await check('远端身份不可得 → 拒绝', async () => {
+  await seed();
+  await assert.rejects(
+    () => load(BASE, null),
+    (e) => e instanceof PendingSendIdentityError && e.code === 'remote-identity-unavailable',
+  );
+});
+
 await check('cookie 轮换不改变 authContextHash（不把 cookie 当身份）', async () => {
   await seed({ cookie: 'cookie-1' });
-  const a = await loadPendingSendBinding(BASE);
+  const a = await load();
   await saveCredential(CredentialKey.cookie, 'cookie-2-rotated');
-  const b = await loadPendingSendBinding(BASE);
+  const b = await load();
   assert.equal(a.authContextHash, b.authContextHash);
   assert.equal(a.gatewayId, b.gatewayId);
 });
@@ -100,16 +132,16 @@ await check('cookie 轮换不改变 authContextHash（不把 cookie 当身份）
 await check('同服务器地址变化：未重新验证时安全阻断', async () => {
   await seed({ baseUrl: BASE });
   await assert.rejects(
-    () => loadPendingSendBinding('http://127.0.0.1:3096'),
+    () => load('http://127.0.0.1:3096'),
     (e) => e instanceof PendingSendIdentityError && e.code === 'address-changed',
   );
 });
 
 await check('不同服务器同地址：gatewayId 变化被识别', async () => {
   await seed({ gatewayId: GW_A });
-  const oldBinding = await loadPendingSendBinding(BASE);
+  const oldBinding = await load();
   await seed({ gatewayId: GW_B });
-  const newBinding = await loadPendingSendBinding(BASE);
+  const newBinding = await load(BASE, GW_B);
   assert.notEqual(oldBinding.gatewayId, newBinding.gatewayId);
   const recordBinding = { ...oldBinding };
   const verdict = evaluatePendingSendBinding(recordBinding, {
@@ -123,9 +155,9 @@ await check('不同服务器同地址：gatewayId 变化被识别', async () => 
 
 await check('切换授权上下文：设备 UUID 变化 → hash 变化并被拒绝', async () => {
   await seed({ serverDeviceId: 'server-device-A', clientDeviceId: 'client-device-A' });
-  const oldBinding = await loadPendingSendBinding(BASE);
+  const oldBinding = await load();
   await seed({ serverDeviceId: 'server-device-B', clientDeviceId: 'client-device-A' });
-  const newBinding = await loadPendingSendBinding(BASE);
+  const newBinding = await load();
   assert.notEqual(oldBinding.authContextHash, newBinding.authContextHash);
   const verdict = evaluatePendingSendBinding(oldBinding, {
     baseUrl: newBinding.baseUrl,
@@ -139,7 +171,7 @@ await check('切换授权上下文：设备 UUID 变化 → hash 变化并被拒
 await check('缺 gatewayId 安全阻断', async () => {
   await seed({ gatewayId: null });
   await assert.rejects(
-    () => loadPendingSendBinding(BASE),
+    () => load(),
     (e) => e instanceof PendingSendIdentityError && e.code === 'gateway-missing',
   );
 });
@@ -148,7 +180,7 @@ await check('缺服务端/客户端设备 id 安全阻断', async () => {
   await seed();
   await clearCredential(CredentialKey.gatewayServerDeviceId);
   await assert.rejects(
-    () => loadPendingSendBinding(BASE),
+    () => load(),
     (e) => e instanceof PendingSendIdentityError && e.code === 'device-context-missing',
   );
 });

@@ -118,11 +118,12 @@ export function transitionPendingSend(
       return patched(record, { state: 'sending' }, now);
 
     case 'accept':
+      if (from === 'confirmed') return record;
       if (from !== 'sending') return fail();
       return patched(record, { state: 'accepted', acceptedAt: now }, now);
 
     case 'definite-failure':
-      if (from !== 'queued' && from !== 'preparing' && from !== 'sending') return fail();
+      if (from !== 'queued' && from !== 'preparing' && from !== 'ready' && from !== 'sending') return fail();
       return patched(
         record,
         {
@@ -133,6 +134,7 @@ export function transitionPendingSend(
       );
 
     case 'unknown-failure':
+      if (from === 'confirmed') return record;
       if (from !== 'sending') return fail();
       return patched(
         record,
@@ -144,7 +146,8 @@ export function transitionPendingSend(
       );
 
     case 'confirm':
-      if (from !== 'accepted') return fail();
+      // confirm 是服务端事实；即使本地 accepted 响应还没落地，也不能回退。
+      if (from !== 'accepted' && from !== 'sending' && from !== 'unknown') return fail();
       return patched(record, { state: 'confirmed', confirmedAt: now }, now);
 
     case 'abandon':

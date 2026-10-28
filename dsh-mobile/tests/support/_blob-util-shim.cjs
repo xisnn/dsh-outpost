@@ -27,27 +27,61 @@ const fs = {
     DownloadDir: '/tmp/dsh-test-downloads',
     DCIMDir: '/tmp/dsh-test-dcim',
   },
-  async exists() {
-    return false;
+  async exists(path) {
+    try {
+      return require('node:fs').existsSync(path);
+    } catch {
+      return false;
+    }
   },
-  async stat() {
-    return { size: 0 };
+  async stat(path) {
+    try {
+      const s = require('node:fs').statSync(path);
+      return { size: s.size };
+    } catch {
+      return { size: 0 };
+    }
   },
-  async unlink() {
+  async unlink(path) {
+    try {
+      require('node:fs').unlinkSync(path);
+    } catch {
+      /* ignore */
+    }
     return true;
   },
-  async readFile() {
-    // base64 / utf8 都返回空串，调用方自己会判定「文件为空」
-    return '';
+  async readFile(path, encoding) {
+    try {
+      const bytes = require('node:fs').readFileSync(path);
+      return encoding === 'base64' ? bytes.toString('base64') : bytes.toString(encoding || 'utf8');
+    } catch {
+      return '';
+    }
   },
-  async writeFile() {
-    return '/tmp/dsh-test-file';
+  async writeFile(path, data, encoding) {
+    require('node:fs').writeFileSync(path, data, encoding);
+    return path;
   },
-  async mkdir() {
+  async mkdir(path) {
+    require('node:fs').mkdirSync(path, { recursive: true });
     return true;
   },
-  async ls() {
-    return [];
+  async ls(path) {
+    return require('node:fs').readdirSync(path);
+  },
+  async cp(source, dest) {
+    require('node:fs').copyFileSync(source, dest);
+    return true;
+  },
+  async mv(source, dest) {
+    require('node:fs').renameSync(source, dest);
+    return true;
+  },
+  async hash(path) {
+    return require('node:crypto')
+      .createHash('sha256')
+      .update(require('node:fs').readFileSync(path))
+      .digest('hex');
   },
 };
 
