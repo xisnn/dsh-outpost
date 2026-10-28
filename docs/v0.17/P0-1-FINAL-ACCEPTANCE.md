@@ -126,7 +126,17 @@ APK 签名：`CN=Android Debug, OU=Android`，证书 SHA-256 `fac61745dc0903786f
   - 用户点击真实 retry 时 debug-only 解除 block。
 - 覆盖确认入口：当前源码只有 `reconcilePendingNow()` 会执行 `confirm`；WebSocket/snapshot 最终都调用该入口。
 - 自动化：`npx tsx tests/p0-verify-spec.mjs` **3/3 PASS**；`npx tsx tests/p0-verify-behavior-spec.mjs` **4/4 PASS**；typecheck PASS。行为测试覆盖一次性注入、同 requestId 重试、提前确认隔离、身份验证失败不解除、confirmed 清理和其他 requestId 不受影响。
-- 真实 UI 结果：**NOT COMPLETED**。本轮构建/配对后，ChatScreen 导航操作未稳定落到目标会话，未获得 unknown + 安全重试按钮的实际 UI 证据，因此任务 A 不标记 PASS。
+- 真实 UI 结果：**FAIL / BLOCKED at confirmed**
+  - 真实 ChatScreen 已通过导航脚本进入；
+  - 测试消息 `[P0_BLOCK]A` 实际发送；
+  - 日志确认 `arm requestId=req-mvsgzvg4-1-1gvllpp1wqq9fc`；
+  - 日志确认 `unknown requestId=req-mvsgzvg4-1-1gvllpp1wqq9fc`；
+  - 截图确认「安全重试（复用原 ID）」按钮；
+  - 真实 UI 点击重试；
+  - 日志确认 `release-after-retry requestId=req-mvsgzvg4-1-1gvllpp1wqq9fc`，requestId 完全一致；
+  - 但重试后 UI 停在「已受理，等待会话确认」，隔离 DSH 实例的 `session/page` 返回 `records=0`（其 sessionController 不可用），未获得真实 confirmed 事件和 Keychain 清理证据。
+  - 因此任务 A 不标记 PASS；阻断在隔离 DSH 测试实例的 sessionController/事件流，不是发送状态机代码。
+  - unknown UI 截图：[P0-1-FINAL-CHATSCREEN-UNKNOWN.png](P0-1-FINAL-CHATSCREEN-UNKNOWN.png)
 
 ## 10. 最终结论
 
