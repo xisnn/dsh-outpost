@@ -185,6 +185,7 @@ export class PendingSendStore {
   private doc: PendingSendDocumentState | null = null;
   /** 串行化所有读写；一条 Promise 链就是进程内 mutex。 */
   private lock: Promise<void> = Promise.resolve();
+  private readonly listeners = new Set<() => void>();
 
   constructor(options: PendingSendStoreOptions = {}) {
     this.persistence = options.persistence ?? new KeychainPendingSendPersistence();
@@ -198,6 +199,30 @@ export class PendingSendStore {
 
   get isHydrated(): boolean {
     return this.doc !== null;
+  }
+
+  /** 订阅待发送记录变化；返回取消订阅函数。 */
+  subscribe(listener: () => void): () => void {
+    this.listeners.add(listener);
+    return () => {
+      this.listeners.delete(listener);
+    };
+  }
+
+  private emit(): void {
+    for (const listener of [...this.listeners]) {
+      try {
+        listener();
+      } catch {
+        // UI 订阅者异常不能影响存储状态
+      }
+    }
+  }
+
+  /** 启动时可以显式 hydrate；重复调用会重新读取磁盘。 */
+  async ensureHydrated(): Promise<void> {
+    if (this.doc) return;
+    await this.hydrate();
   }
 
   private runExclusive<T>(fn: () => Promise<T> | T): Promise<T> {
@@ -256,6 +281,7 @@ export class PendingSendStore {
       );
     }
     this.doc = document;
+    this.emit();
     return document;
   }
 
@@ -268,6 +294,7 @@ export class PendingSendStore {
       this.doc = raw === undefined ? emptyDocument(this.now()) : parseDocument(raw);
       const recovered = await this.recoverInternal();
       const prunedRecords = await this.pruneInternal();
+      this.emit();
       return { recovered, pruned: prunedRecords.length };
     });
   }

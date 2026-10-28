@@ -19,6 +19,7 @@ import AsyncStorage from '@react-native-async-storage/async-storage';
 import { DshConnection } from './core/transport';
 import { checkBaseUrlSecurity } from './core/net-security';
 import { Store } from './core/store';
+import { PendingSendStore } from './core/pendingSend/store';
 import {
   CredentialKey,
   clearAllCredentials,
@@ -146,6 +147,8 @@ interface LocalCleanupResult {
    * 撤销标记仍可能没写进去，下次启动就会自动重新申请配对。
    */
   revocation: RevocationPersistResult;
+  /** P0-1 待发送记录是否清除并回读确认 */
+  pendingSends: 'cleared' | 'failed';
 }
 
 /**
@@ -174,7 +177,9 @@ function isFullyClear(result: ClearAuthorizationResult): boolean {
     // cookie 容器「平台没有」不算残留（这个平台上没有第二份存储）
     (result.local.cookieJar === 'cleared' || result.local.cookieJar === 'unavailable') &&
     // 撤销决定必须真的落盘 —— 只留在内存里的话重启后会被推翻（P0-1）
-    result.local.revocation.ok
+    result.local.revocation.ok &&
+    // 待发送记录也必须清除；未清除时不能让用户以为全部清干净
+    result.local.pendingSends === 'cleared'
   );
 }
 
@@ -311,6 +316,12 @@ function notifyClearResult(result: ClearAuthorizationResult): void {
         '  必要时在电脑上手动移除这台设备。',
     );
   }
+  if (result.local.pendingSends === 'failed') {
+    problems.push(
+      '待发送消息记录没能确认清除。\n' +
+        '  这些记录可能仍留在本机安全存储里，建议重启后再次执行清除。',
+    );
+  }
 
   // 不该发生：调用方只在 !isFullyClear 时进来
   if (problems.length === 0) return;
@@ -423,6 +434,8 @@ export default function App() {
   /** 安全存储 / 迁移失败说明（null = 正常） */
   const [secureStorageError, setSecureStorageError] = useState<string | null>(null);
 
+  const pendingSends = useMemo(() => new PendingSendStore(), []);
+
   const store = useMemo(() => {
     // ⚠️ baseUrl 在「未配对 / 刚清过数据」时是空字符串。
     //
@@ -443,8 +456,23 @@ export default function App() {
     // 不会把凭据发到外部。
     const safeBaseUrl = baseUrl || PLACEHOLDER_BASE_URL;
     const conn = new DshConnection({ baseUrl: safeBaseUrl, cookie });
-    return new Store(conn);
-  }, [baseUrl, cookie]);
+    return new Store(conn, { pendingSendStore: pendingSends });
+  }, [baseUrl, cookie, pendingSends]);
+
+  // P0-1：启动时读取待发送缓存并恢复（不自动重发，只恢复可视状态）。
+  useEffect(() => {
+    let alive = true;
+    void pendingSends.hydrate().catch(() => {
+      if (alive) {
+        setSecureStorageError(
+          '待发送消息缓存读取失败；在恢复安全存储前发送会被阻止。请检查锁屏状态后重启 App。',
+        );
+      }
+    });
+    return () => {
+      alive = false;
+    };
+  }, [pendingSends]);
 
   /**
    * 把迁移结果翻译成界面状态。
@@ -950,6 +978,16 @@ export default function App() {
       secureStorage = 'failed';
     }
 
+    // P0-1：待发送记录属于本机授权上下文，彻底清除授权时必须一并清除。
+    // signOut（断开连接）不调用这里，保留待发送记录。
+    let pendingSends: 'cleared' | 'failed' = 'cleared';
+    try {
+      await store.pendingSends.ensureHydrated();
+      await store.pendingSends.clearAll();
+    } catch {
+      pendingSends = 'failed';
+    }
+
     setCookie(undefined);
     setAuthed(false);
     setHasLastPairing(false);
@@ -959,7 +997,7 @@ export default function App() {
 
     const result: ClearAuthorizationResult = {
       server,
-      local: { secureStorage, legacyPlaintext, cookieJar, revocation },
+      local: { secureStorage, legacyPlaintext, cookieJar, revocation, pendingSends },
     };
 
     // ── 如实告知用户 ──────────────────────────────────────────
