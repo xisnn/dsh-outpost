@@ -10,7 +10,7 @@ import assert from 'node:assert/strict';
 import { createHash } from 'node:crypto';
 import { mkdtempSync, readFileSync, statSync, writeFileSync } from 'node:fs';
 import os from 'node:os';
-import { register } from 'node:module';
+import { register, createRequire } from 'node:module';
 import Module from 'node:module';
 import { pathToFileURL } from 'node:url';
 import path from 'node:path';
@@ -18,6 +18,7 @@ import { fileURLToPath } from 'node:url';
 
 register('./support/rn-module-hook.mjs', import.meta.url);
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
+const require = createRequire(import.meta.url);
 const SHIM_DIR = path.join(__dirname, 'support');
 const origResolve = Module._resolveFilename;
 Module._resolveFilename = function (request, parent, ...rest) {
@@ -43,7 +44,10 @@ const imp = (p) => import(pathToFileURL(p).href);
 const { DshConnection } = await imp(path.join(__dirname, '..', 'src', 'core', 'transport', 'index.ts'));
 const { Store } = await imp(path.join(__dirname, '..', 'src', 'core', 'store.ts'));
 const { PendingSendStore } = await imp(path.join(__dirname, '..', 'src', 'core', 'pendingSend', 'store.ts'));
-const { PendingSendStagingError } = await imp(path.join(__dirname, '..', 'src', 'core', 'pendingSend', 'staging.ts'));
+const {
+  PendingSendStagingError,
+  ReactNativePendingSendStaging,
+} = await imp(path.join(__dirname, '..', 'src', 'core', 'pendingSend', 'staging.ts'));
 const { ensureWebSocket } = await imp(path.join(__dirname, '..', 'tests', 'support', 'ws-compat.mjs'));
 
 ensureWebSocket();
@@ -586,6 +590,160 @@ await check('clearAll 同时清理待发送记录与附件暂存文件', async (
   await h.pending.clearAll();
   assert.equal(h.staging.files.size, 0);
   assert.equal((await h.pending.list()).length, 0);
+});
+
+await check('ReactNativePendingSendStaging：受控单文件容量上限（attachment-too-large）回滚目标文件且不创建记录', async () => {
+  const blobUtil = require('react-native-blob-util');
+  const tmpDocDir = mkdtempSync(path.join(os.tmpdir(), 'rn-staging-cap-'));
+  blobUtil.fs.dirs.DocumentDir = tmpDocDir;
+  const srcFile = path.join(tmpDocDir, 'over-limit.bin');
+  writeFileSync(srcFile, Buffer.alloc(128, 0x41));
+
+  const rnStaging = new ReactNativePendingSendStaging({
+    maxFileBytes: 64,
+    maxTotalBytes: 1024,
+  });
+  const persistence = new MemoryPersistence();
+  const pending = new PendingSendStore({
+    persistence,
+    staging: rnStaging,
+    now: () => clock,
+    idFactory: () => `req-rn-cap-${++seq}`,
+  });
+  await pending.hydrate();
+  const prompts = [];
+  const store = new Store(
+    new DshConnection({ baseUrl: 'http://127.0.0.1:1', cookie: 'dsh-auth-test=v1' }),
+    {
+      pendingSendStore: pending,
+      loadPendingBinding: async () => binding,
+      verifyPendingBinding: async () => undefined,
+    },
+  );
+  store.api.prompt = async (params) => { prompts.push(params); };
+
+  await assert.rejects(
+    () => store.sendPending('s1', 'too-large', [fileDraft(srcFile, 'over-limit.bin', 128)]),
+    (err) => err instanceof PendingSendStagingError && err.code === 'attachment-too-large',
+  );
+  assert.equal((await pending.list()).length, 0);
+  assert.equal(prompts.length, 0);
+  const stagedFiles = await blobUtil.fs.ls(path.join(tmpDocDir, 'dsh-pending-send'));
+  assert.equal(stagedFiles.length, 0, '超限暂存文件必须被回滚清理');
+});
+
+await check('ReactNativePendingSendStaging：受控暂存总空间不足（staging-full）回滚新增文件且保留已有暂存文件', async () => {
+  const blobUtil = require('react-native-blob-util');
+  const tmpDocDir = mkdtempSync(path.join(os.tmpdir(), 'rn-staging-full-'));
+  blobUtil.fs.dirs.DocumentDir = tmpDocDir;
+  const src1 = path.join(tmpDocDir, 'first.bin');
+  const src2 = path.join(tmpDocDir, 'second.bin');
+  writeFileSync(src1, Buffer.alloc(80, 0x42));
+  writeFileSync(src2, Buffer.alloc(80, 0x43));
+
+  const rnStaging = new ReactNativePendingSendStaging({
+    maxFileBytes: 100,
+    maxTotalBytes: 120,
+  });
+  const persistence = new MemoryPersistence();
+  const pending = new PendingSendStore({
+    persistence,
+    staging: rnStaging,
+    now: () => clock,
+    idFactory: () => `req-rn-full-${++seq}`,
+  });
+  await pending.hydrate();
+
+  const firstStaged = await pending.stageDrafts([fileDraft(src1, 'first.bin', 80)]);
+  assert.equal(firstStaged.length, 1);
+
+  await assert.rejects(
+    () => pending.stageDrafts([fileDraft(src2, 'second.bin', 80)]),
+    (err) => err instanceof PendingSendStagingError && err.code === 'staging-full',
+  );
+  const stagedFiles = await blobUtil.fs.ls(path.join(tmpDocDir, 'dsh-pending-send'));
+  assert.equal(stagedFiles.length, 1, '第 2 个触发空间不足的文件已回滚，第 1 个保留');
+  await pending.discardStaged(firstStaged);
+  const afterDiscard = await blobUtil.fs.ls(path.join(tmpDocDir, 'dsh-pending-send'));
+  assert.equal(afterDiscard.length, 0);
+});
+
+await check('ReactNativePendingSendStaging：文件复制失败（attachment-copy-failed）回滚本批已复制文件且不调用 prompt', async () => {
+  const blobUtil = require('react-native-blob-util');
+  const tmpDocDir = mkdtempSync(path.join(os.tmpdir(), 'rn-staging-copyfail-'));
+  blobUtil.fs.dirs.DocumentDir = tmpDocDir;
+  const okFile = path.join(tmpDocDir, 'ok.txt');
+  const missingFile = path.join(tmpDocDir, 'does-not-exist.txt');
+  writeFileSync(okFile, 'hello staging');
+
+  const rnStaging = new ReactNativePendingSendStaging();
+  const persistence = new MemoryPersistence();
+  const pending = new PendingSendStore({
+    persistence,
+    staging: rnStaging,
+    now: () => clock,
+    idFactory: () => `req-rn-copy-${++seq}`,
+  });
+  await pending.hydrate();
+  const prompts = [];
+  const store = new Store(
+    new DshConnection({ baseUrl: 'http://127.0.0.1:1', cookie: 'dsh-auth-test=v1' }),
+    {
+      pendingSendStore: pending,
+      loadPendingBinding: async () => binding,
+      verifyPendingBinding: async () => undefined,
+    },
+  );
+  store.api.prompt = async (params) => { prompts.push(params); };
+
+  await assert.rejects(
+    () =>
+      store.sendPending('s1', 'copy-fail', [
+        fileDraft(okFile, 'ok.txt', 13),
+        fileDraft(missingFile, 'does-not-exist.txt', 10),
+      ]),
+    (err) => err instanceof PendingSendStagingError && err.code === 'attachment-copy-failed',
+  );
+  assert.equal((await pending.list()).length, 0);
+  assert.equal(prompts.length, 0);
+  const stagedFiles = await blobUtil.fs.ls(path.join(tmpDocDir, 'dsh-pending-send'));
+  assert.equal(stagedFiles.length, 0, '同批已复制的第 1 个文件也必须被回滚清理');
+});
+
+await check('ReactNativePendingSendStaging：Android SAF content:// URI 通过 MediaCollection.copyToInternal 或 fs.cp 复制到私有目录', async () => {
+  const blobUtil = require('react-native-blob-util');
+  const tmpDocDir = mkdtempSync(path.join(os.tmpdir(), 'rn-staging-content-uri-'));
+  blobUtil.fs.dirs.DocumentDir = tmpDocDir;
+  const realSource = path.join(tmpDocDir, 'picker-source.png');
+  const pngBytes = Buffer.from([137, 80, 78, 71, 13, 10, 26, 10, 1, 2, 3, 4]);
+  writeFileSync(realSource, pngBytes);
+
+  let copiedUri = null;
+  blobUtil.MediaCollection = {
+    async copyToInternal(contentUri, destPath) {
+      copiedUri = contentUri;
+      writeFileSync(destPath, readFileSync(realSource));
+      return destPath;
+    },
+  };
+
+  const rnStaging = new ReactNativePendingSendStaging();
+  const staged = await rnStaging.stage({
+    kind: 'image',
+    uri: 'content://media/picker/0/com.android.providers.media.photopicker/media/1000000018',
+    name: 'p0c_image.png',
+    size: pngBytes.length,
+    mime: 'image/png',
+  });
+  assert.equal(
+    copiedUri,
+    'content://media/picker/0/com.android.providers.media.photopicker/media/1000000018',
+  );
+  assert.equal(staged.size, pngBytes.length);
+  assert.equal(staged.contentSha256, createHash('sha256').update(pngBytes).digest('hex'));
+  await rnStaging.verify(staged);
+  await rnStaging.removeAttachments([staged]);
+  delete blobUtil.MediaCollection;
 });
 
 console.log('');

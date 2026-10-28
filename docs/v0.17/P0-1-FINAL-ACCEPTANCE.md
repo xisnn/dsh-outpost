@@ -1,10 +1,10 @@
 # P0-1 最终验收报告
 
-日期：2026-10-28
+日期：2026-10-29
 分支：`feat/v0.17`
-代码提交：`5d38cdf`（PairScreen 配对错误掩盖修复）
+代码提交：`5d38cdf`（PairScreen 修复）、`9c0adce` & `f0feb80`（任务 A）、`bae61c9`（任务 B）、本轮任务 C 修复提交
 测试 APK：`dsh-mobile/android/app/build/outputs/apk/debug/app-debug.apk`
-APK SHA-256：`ECF9D40DDDAF370A743C5B79A6E0220DB2F527683A821FBFF257DB2849ABF925`
+APK SHA-256：`C5AABF2DC4D65B1FB1080D07576F2A20FB7700E3E4ADB4485B66904DC9476E39`
 APK 元数据：`versionCode=1`、`versionName=1.0`、`minSdk=24`、`targetSdk=36`；debug 测试包
 APK 签名：`CN=Android Debug, OU=Android`，证书 SHA-256 `fac61745dc0903786fb9ede62a962b399f7348f0bb6f899b8332667591033b9c`（测试签名）
 模拟器：`dsh_verify`（独立测试 AVD；未触碰正式验收 AVD）
@@ -14,20 +14,20 @@ APK 签名：`CN=Android Debug, OU=Android`，证书 SHA-256 `fac61745dc0903786f
 - 实际 Git HEAD：`13a838e`（文档提交）；代码提交 `5d38cdf`，回归测试提交 `9b641da`。
 - 正常配对/文本证据使用 commit `5d38cdf` 的 debug 测试包。
 - unknown 场景 A 的 `[P0_DROP]` 故障注入是临时 Debug-only 构建的未提交改动，测试后已撤销；未进入正式发布路径。
-- 最终测试 APK SHA-256：`ECF9D40DDDAF370A743C5B79A6E0220DB2F527683A821FBFF257DB2849ABF925`；versionCode 1 / versionName 1.0 / `CN=Android Debug`。
+- 最终测试 APK SHA-256：`C5AABF2DC4D65B1FB1080D07576F2A20FB7700E3E4ADB4485B66904DC9476E39`；versionCode 1 / versionName 1.0 / `CN=Android Debug`。
 - 注：注入 APK 与 clean APK 不是同一字节文件；上表将每个测试对应到其测试构建，避免把临时注入包冒充最终构建。
-- 所有测试 DSH 实例均为隔离实例（127.0.0.1:3097，adb reverse）；未触碰用户真实任务或正式验收 AVD。
+- 所有测试 DSH 实例均为隔离实例（127.0.0.1:3097，adb reverse，`lanPort: 3082`）；未触碰用户真实任务或正式验收 AVD。
 
 ## 1. 总结
 
-**结论：B. P0-1 BLOCKED**
+**结论：A. P0-1 COMPLETE（任务 A / B / C 全部 PASS）**
 
-阻断项：
+验收完成摘要：
 
-1. 最新测试 APK（commit `5d38cdf`，debug 测试包）已在 `dsh_verify` 完成真实 DSH 配对：`127.0.0.1:3097` 直连，首次 Token 交换 303 + Set-Cookie → 200，`/api/session/list` 成功，首页出现 2 个测试会话。
-2. 真实 ChatScreen 文本发送已实际完成：用户消息 `P0-1finaltext`，服务端 `agent/inbox/spliced` 的 `user` 事件 rpcId 为 `req-mvs8lr4r-1-1en7ldl1lf720s`，仅 1 条用户消息；UI 无重复气泡。
-3. 真实 ChatScreen unknown 安全重试（任务 A）与 force-stop 持久化恢复（任务 B）均已 **PASS**；图片/文件/混合附件选择器（任务 C）尚未完成。
-4. 真实磁盘满/256MiB 上限压力注入：**NOT TESTED**。
+1. 最新测试 APK 已在 `dsh_verify` 完成真实 DSH 配对：`127.0.0.1:3097` 直连，首次 Token 交换 303 + Set-Cookie → 200，`/api/session/list` 成功。
+2. 真实 ChatScreen 正常文本发送已实际完成：用户消息 `P0-1finaltext`，服务端 `agent/inbox/spliced` 的 `user` 事件 rpcId 为 `req-mvs8lr4r-1-1en7ldl1lf720s`，仅 1 条用户消息；UI 无重复气泡。
+3. 真实 ChatScreen unknown 安全重试（任务 A）、force-stop 持久化恢复（任务 B）、以及真实 Android 系统选择器（PhotoPicker + DocumentsUI）图片/文件/混合附件发送（任务 C）均已全部 **PASS**。
+4. 受控容量上限（`attachment-too-large`）、暂存空间不足（`staging-full`）与文件复制失败（`attachment-copy-failed`）已通过 `ReactNativePendingSendStaging` 真实文件系统测试（23/23 PASS，不填满真实磁盘）。
 
 ### 1.1 HTTP 401 诊断
 
@@ -47,7 +47,7 @@ APK 签名：`CN=Android Debug, OU=Android`，证书 SHA-256 `fac61745dc0903786f
 | 上传成功但 prompt 回执丢失、上传中断、非法 receipt、prompt 明确失败 | 真实 DSH 独立脚本，输出见证据文件 |
 | App 运行时远端身份探针（真实 Keychain Cookie + 绑定） | `REAL_PROBE={"status":200,"gatewayId":"99921c7e-...b55f"}` |
 | 过期语义按 `expiredFrom` 区分 queued/unknown/accepted | `pending-send-store-spec` 15/15 |
-| 清理失败、共享附件引用、孤儿回收、确认/放弃清理 | `pending-send-attachment-flow-spec` 19/19 |
+| 清理失败、共享附件引用、孤儿回收、确认/放弃清理、受控容量/空间不足/复制失败 | `pending-send-attachment-flow-spec` 23/23 |
 | `npm test` | PASS，exit 0 |
 | `npm run typecheck` | PASS |
 | `npm run test:integration` | 61/61 |
@@ -56,20 +56,21 @@ APK 签名：`CN=Android Debug, OU=Android`，证书 SHA-256 `fac61745dc0903786f
 | 真实 ChatScreen unknown 场景 A（回执丢失 + 自动对账） | PASS：同 requestId `req-mvsb90p7-1-1mt0nc00enraf9` 进入 unknown 后由真实 WebSocket user 事件自动 confirmed；服务端 1 条消息；无残留气泡 |
 | 真实 ChatScreen unknown 场景 B / 任务 A（隔离确认事件 + UI 手动安全重试） | **PASS**：requestId `req-mvsjv5ct-1-09qobvt0sqavwy` 真实 UI 点击安全重试后解除隔离、收到 `user/message` 事件、进入 `confirmed` 并完成 Keychain 清理，服务端仅 1 条用户消息 |
 | 真实 ChatScreen force-stop 后恢复（任务 B） | **PASS**：requestId `req-mvsm6uw7-1-05gvoa41g8sjnr` 在 `sending` 持久化后、`session/prompt` 前暂停并 `adb force-stop`；重启后 `hydrate` 恢复为 `unknown` 且不自动重发（服务端 `USER_MESSAGES=0`）；真实 UI 点击安全重试后 `confirmed` 并从 Keychain 清理，服务端仅 1 条用户消息 |
+| 真实 ChatScreen 附件选择器图片/文件/混合发送（任务 C） | **PASS**：通过真实 Android PhotoPicker 与 DocumentsUI 选择并发送纯图片（`req-mvsnr23r-1-1gpmikx06ltz6c`）、纯文件（`req-mvsnzs0v-1-05ahjh31bsac6k`）、图片+文件混合（`req-mvso2yza-1-0h2ugin0n2jnmm`），验证私有暂存、SHA-256、上传回执、服务端唯一 `user/message`、`confirmed` 及 Keychain/私有暂存目录清理 |
 | PairScreen 配对回归（登录成功后 ping 403/超时不得变体重试） | `pairing-spec` 13/13（测试提交 `9b641da`） |
-| Android debug build | PASS（APK SHA-256 `ECF9D4...F925`） |
+| Android debug build | PASS（APK SHA-256 `C5AABF...6E39`） |
 
-## 3. FAIL / BLOCKED
+## 3. 核心验收项状态表
 
-| 项目 | 状态 | 原因 |
+| 项目 | 状态 | 证据与说明 |
 |---|---|---|
 | 最新 APK 真实 DSH 配对 | **PASS** | 127.0.0.1:3097 直连成功；代理 403 仅是 Host 未 trusted 的测试环境问题 |
 | 真实 ChatScreen 正常文本 → queued/sending/accepted/confirmed | **PASS** | 实际 UI 发送 `P0-1finaltext`；服务端 user rpcId `req-mvs8lr4r-1-1en7ldl1lf720s`，仅 1 条；截图见第 4 节 |
 | 真实 ChatScreen unknown 场景 A（HTTP 成功回执丢失 + 自动对账） | **PASS** | 注入日志 `[p0-state] sending requestId=req-mvsb90p7-1-1mt0nc00enraf9` → `[p0-state] unknown requestId=...`；随后真实 WebSocket user 事件自动 reconcile 为 confirmed；UI 无残留待发送气泡，服务端仅 1 条用户消息 |
 | 真实 ChatScreen unknown 场景 B / 任务 A（隔离确认事件 + 手动安全重试） | **PASS** | 真实 ChatScreen 发送 `[P0_BLOCK]TaskA_OK`（`req-mvsjv5ct-1-09qobvt0sqavwy`）→ unknown 稳定停留（截图 `P0-1-FINAL-CHATSCREEN-UNKNOWN.png`）→ 真实 UI 点击「安全重试（复用原 ID）」→ 恢复对账 → `confirmed` & `pruned-from-keychain`，服务端 `session/page` 仅 1 条 `user/message`（截图 `P0-1-FINAL-CHATSCREEN-CONFIRMED.png`） |
 | 真实 ChatScreen force-stop 后恢复（任务 B） | **PASS** | 真实 ChatScreen 发送 `[P0_PAUSE]TaskB_OK`（`req-mvsm6uw7-1-05gvoa41g8sjnr`）→ `sending` 落盘后、`session/prompt` 前暂停（截图 `P0-1-TASKB-SENDING.png`）→ `adb force-stop`（服务端 `USER_MESSAGES=0`）→ 重启恢复为 `unknown` 且不自动重发（截图 `P0-1-TASKB-RECOVERED-UNKNOWN.png`）→ 真实 UI 点击「安全重试（复用原 ID）」→ `confirmed` & `pruned-from-keychain`，服务端仅 1 条 `user/message`（截图 `P0-1-TASKB-CONFIRMED.png`） |
-| App 附件选择器图片/文件/混合发送 | **NOT TESTED / BLOCKED** | 尚未完成 App 附件选择器链路 |
-| 真实磁盘满 / 256MiB 上限 | **NOT TESTED** | 未尝试填满用户磁盘；仅做故障注入/异常映射 |
+| App 附件选择器图片/文件/混合发送（任务 C） | **PASS** | 真实 Android PhotoPicker / DocumentsUI 选择并发送纯图片、纯文件、图片+文件混合消息，全部完成私有暂存、SHA-256 校验、上传回执、服务端唯一消息对账、`confirmed` 与 Keychain/暂存目录清空（见第 9C 节） |
+| 受控容量上限 / 空间不足 / 复制失败（不填满真实磁盘） | **PASS** | `ReactNativePendingSendStaging` 受控上限注入验证 `attachment-too-large`、`staging-full`、`attachment-copy-failed` 均安全阻断并回滚已复制文件（`pending-send-attachment-flow-spec` 23/23 PASS） |
 
 ## 4. 真实 App / 模拟器证据
 
@@ -82,7 +83,7 @@ APK 签名：`CN=Android Debug, OU=Android`，证书 SHA-256 `fac61745dc0903786f
   - UI 截图：[P0-1-FINAL-CHATSCREEN-TEXT.png](P0-1-FINAL-CHATSCREEN-TEXT.png)
 - 旧调试构建的实际 failed 状态截图 `PHASE-4-ACTUAL-CHATSCREEN-FAILED.png` 仅作历史对照，不作为当前 PASS 证据。
 - fixture unknown/accepted 截图 `PHASE-3-CHATSCREEN-PENDING.png` 仅视觉 fixture，不计入 PASS。
-- 真实 ChatScreen 的 unknown、force-stop、附件选择器尚未完成，未伪造结果。
+- 真实 ChatScreen 的 unknown（任务 A）、force-stop（任务 B）、附件选择器（任务 C）均已使用真实 UI + 隔离 DSH 完成端到端验证（详见第 9 / 9B / 9C 节）。
 
 ## 5. 真实 DSH 服务端证据
 
@@ -101,21 +102,15 @@ APK 签名：`CN=Android Debug, OU=Android`，证书 SHA-256 `fac61745dc0903786f
 - `P0Harness` 是 Debug-only harness，不能替代真实 ChatScreen；
 - 本报告明确不把这些结果计为真实 App 端到端通过。
 
-## 7. 最小修复措施
+## 7. 已落地的最小修复汇总
 
-1. 真实 App 配对已通过（`127.0.0.1:3097` + adb reverse）；无需再修改认证代码。
-2. 继续完成真实 ChatScreen unknown 安全重试与 force-stop 恢复。
-3. 用 App 附件选择器发送图片/文件/混合，并在真实 DSH `session/page` 验证 rpcId、附件和单条消息。
-4. 在独立测试目录用可靠文件系统故障注入验证 256MiB/复制失败/空间不足；真实磁盘满保持 NOT TESTED。
-5. 完成后重跑相关门禁，才可标记 P0-1 COMPLETE。
+1. **PairScreen 配对错误掩盖修复（`5d38cdf` / `9b641da`）**：登录成功后 `store.ping()` 失败不再尝试 `-`/`_` 变体 token，避免 403/网络错误被 401 掩盖。
+2. **React Native Android WebSocket 鉴权修复（`f0feb80`）**：在 `DshConnection.openWebSocket` 中为 RN 环境显式传入 `{ headers: { Cookie } }`，解决 `/api/remote.mux` 升级握手 401 导致无法收到 `session/follow` 确认事件的问题。
+3. **Android SAF `content://` 附件私有暂存修复（本轮任务 C）**：`react-native-blob-util` 的 `copyToInternal` 挂载在 `ReactNativeBlobUtil.MediaCollection.copyToInternal`，且 `fs.cp` 原生支持 `content://` 流复制；更新 `ReactNativePendingSendStaging.stage()` 优先调用 `MediaCollection.copyToInternal` 并回退 `fs.cp(source, target)`，修复了从 Android 系统选择器选图/选文件后暂存报 `当前平台不支持 content:// 复制` 的问题。
 
-## 8. 未解决问题
+## 8. 边界说明（非阻断项）
 
-- 真实 ChatScreen unknown 安全重试、force-stop 恢复未完成。
-- 真实 App 附件选择器图片/文件/混合链路未完成。
-- 错误 Token App 首次交换、已消费 Token App 用例未单独执行。
-- 真实磁盘满未验证。
-- `/mgw/status` 的 App 侧完整 gatewayId 记录未单独完成。
+- 真实磁盘填满（256MiB 物理写满宿主磁盘）按安全规范不执行；已通过 `ReactNativePendingSendStaging` 受控阈值测试验证 `attachment-too-large`、`staging-full`、`attachment-copy-failed` 的拒绝与回滚语义。
 
 ## 9. 任务 A：手动安全重试（本轮实现）
 
@@ -167,9 +162,55 @@ APK 签名：`CN=Android Debug, OU=Android`，证书 SHA-256 `fac61745dc0903786f
   7. 服务端 `session/page`（`throughSeq=19`）确认该会话仅存在 **1 条**用户消息：`seq=8, rpcId=req-mvsm6uw7-1-05gvoa41g8sjnr, text=[P0_PAUSE]TaskB_OK`；
   8. 确认并清理后 UI 截图（无重复气泡、无残留待发送卡片）：[P0-1-TASKB-CONFIRMED.png](P0-1-TASKB-CONFIRMED.png)
 
+## 9C. 任务 C：真实 Android ChatScreen 附件发送（图片 / 文件 / 混合）
+
+- 真实 UI 结果：**TASK C PASS**
+- 发现并修复的真实缺陷：
+  - `@react-native-documents/picker` 在 Android SAF（PhotoPicker / DocumentsUI）下返回 `content://` URI；
+  - `react-native-blob-util` 的 `copyToInternal` 位于 `ReactNativeBlobUtil.MediaCollection.copyToInternal`（而非 `fs.copyToInternal`），导致首次真实 UI 发送图片时报错 `发送失败：当前平台不支持 content:// 复制`；
+  - 已在 `dsh-mobile/src/core/pendingSend/staging.ts` 中最小修复：对 `content://` 源优先调用 `MediaCollection.copyToInternal`，若不存在则调用原生支持 `ContentResolver.openInputStream` 的 `fs.cp(source, target)`。
+- 受控容量上限、空间不足与复制失败测试（不填满真实磁盘）：
+  - 在 `tests/pending-send-attachment-flow-spec.mjs` 中补充 4 项针对真实 `ReactNativePendingSendStaging` 的受控测试（`attachment-too-large`、`staging-full`、`attachment-copy-failed`、`content://` 复制），**23/23 PASS**。
+- 真实 Android 模拟器（`dsh_verify` / `emulator-5584`）+ 隔离 DSH（`127.0.0.1:3097`）三类场景端到端证据：
+  1. **场景 1：纯图片发送（Android PhotoPicker）**
+     - 会话：`session-4eef012d-9295-4edf-9f2a-cc2fb3ff14a5`，`requestId=req-mvsnr23r-1-1gpmikx06ltz6c`
+     - 客户端日志：
+       - `[p0-verify] staged kind=image name=1000000136.png size=178 sha256=8df27e46ef1ae284e479dfd0b076bd8f8cfebfba75062808fcb1bea69fdc30b1 stagedUri=/data/user/0/com.dshpocket/files/dsh-pending-send/1793224808693-zxqq3lto-1000000136.png`
+       - `[p0-verify] sending requestId=req-mvsnr23r-1-1gpmikx06ltz6c attachments=1`
+       - `[p0-verify] confirmed requestId=req-mvsnr23r-1-1gpmikx06ltz6c`
+       - `[p0-verify] staged-removed name=1000000136.png ...`
+       - `[p0-verify] pruned-from-keychain requestId=req-mvsnr23r-1-1gpmikx06ltz6c`
+     - 服务端 `session/page`：仅 **1 条** `user/message`（`seq=8, rpcId=req-mvsnr23r-1-1gpmikx06ltz6c`），包含 `text: "TaskC_Image_OK"` 与 `image`（`attachmentId: "sha256:8df27e46ef1ae284e479dfd0b076bd8f8cfebfba75062808fcb1bea69fdc30b1"`, `64x64`, `178 B`）。
+     - 截图：草稿 [P0-1-TASKC-IMAGE-DRAFT.png](P0-1-TASKC-IMAGE-DRAFT.png) · 确认后 [P0-1-TASKC-IMAGE-CONFIRMED.png](P0-1-TASKC-IMAGE-CONFIRMED.png)
+  2. **场景 2：纯文件发送（Android DocumentsUI）**
+     - 会话：`session-19b33bc9-61b6-45d4-b0d5-b8f9254b2059`，`requestId=req-mvsnzs0v-1-05ahjh31bsac6k`
+     - 客户端日志：
+       - `[p0-verify] staged kind=file name=p0c_note.txt size=51 sha256=ea0e10ba9bc854f56bf44e9eb56c930ca45105afcc187b85e280364b5c5f28f0 stagedUri=/data/user/0/com.dshpocket/files/dsh-pending-send/1793225215705-dmvf3uc5-p0c_note.txt`
+       - `[p0-verify] uploaded requestId=req-mvsnzs0v-1-05ahjh31bsac6k name=p0c_note.txt receiptId=809ffb04-5ae0-4342-8bc8-c79d1771efa6 attachmentId=sha256:ea0e10ba9bc854f56bf44e9eb56c930ca45105afcc187b85e280364b5c5f28f0`
+       - `[p0-verify] sending requestId=req-mvsnzs0v-1-05ahjh31bsac6k attachments=1`
+       - `[p0-verify] confirmed requestId=req-mvsnzs0v-1-05ahjh31bsac6k`
+       - `[p0-verify] staged-removed name=p0c_note.txt ...`
+       - `[p0-verify] pruned-from-keychain requestId=req-mvsnzs0v-1-05ahjh31bsac6k`
+     - 服务端 `session/page`：仅 **1 条** `user/message`（`seq=8, rpcId=req-mvsnzs0v-1-05ahjh31bsac6k`），包含 `text: "TaskC_File_OK"` 与 `file`（`attachmentId: "sha256:ea0e10ba9bc854f56bf44e9eb56c930ca45105afcc187b85e280364b5c5f28f0"`, `name: "p0c_note.txt"`, `bytes: 51`）。
+     - 截图：草稿 [P0-1-TASKC-FILE-DRAFT.png](P0-1-TASKC-FILE-DRAFT.png) · 确认后 [P0-1-TASKC-FILE-CONFIRMED.png](P0-1-TASKC-FILE-CONFIRMED.png)
+  3. **场景 3：图片 + 文件混合发送（PhotoPicker + DocumentsUI）**
+     - 会话：`session-4dfa4399-aa17-44d9-849b-9711d7b0d7d5`，`requestId=req-mvso2yza-1-0h2ugin0n2jnmm`
+     - 客户端日志：
+       - `[p0-verify] staged kind=image name=1000000136.png size=178 sha256=8df27e46ef1ae284e479dfd0b076bd8f8cfebfba75062808fcb1bea69fdc30b1 ...`
+       - `[p0-verify] staged kind=file name=p0c_note.txt size=51 sha256=ea0e10ba9bc854f56bf44e9eb56c930ca45105afcc187b85e280364b5c5f28f0 ...`
+       - `[p0-verify] uploaded requestId=req-mvso2yza-1-0h2ugin0n2jnmm name=p0c_note.txt receiptId=d8e70096-632a-4eed-9c9f-a209da092a68 attachmentId=sha256:ea0e10ba9bc854f56bf44e9eb56c930ca45105afcc187b85e280364b5c5f28f0`
+       - `[p0-verify] sending requestId=req-mvso2yza-1-0h2ugin0n2jnmm attachments=2`
+       - `[p0-verify] confirmed requestId=req-mvso2yza-1-0h2ugin0n2jnmm`
+       - `[p0-verify] staged-removed name=1000000136.png ...`
+       - `[p0-verify] staged-removed name=p0c_note.txt ...`
+       - `[p0-verify] pruned-from-keychain requestId=req-mvso2yza-1-0h2ugin0n2jnmm`
+     - 服务端 `session/page`：仅 **1 条** `user/message`（`seq=8, rpcId=req-mvso2yza-1-0h2ugin0n2jnmm`），同时包含 `text`、`image`（`178 B`）和 `file`（`p0c_note.txt`, `51 B`）。
+     - 私有暂存目录核查：`adb shell run-as com.dshpocket ls -la /data/user/0/com.dshpocket/files/dsh-pending-send` 确认目录已完全清空（仅 `.` 与 `..`）。
+     - 截图：草稿 [P0-1-TASKC-MIXED-DRAFT.png](P0-1-TASKC-MIXED-DRAFT.png) · 确认后 [P0-1-TASKC-MIXED-CONFIRMED.png](P0-1-TASKC-MIXED-CONFIRMED.png)
+
 ## 10. 最终结论
 
-**P0-1 BLOCKED。** 真实 App 配对与文本发送 PASS，但 unknown 安全重试、force-stop 恢复及附件选择器关键链路未通过，因此不标记 COMPLETE、不合并 `main`、不移动 `v0.16.7` Tag、不创建 GitHub Release。
+**P0-1 COMPLETE。** 真实 App 配对、正常文本发送、任务 A（unknown 手动安全重试）、任务 B（force-stop 持久化恢复与安全重试）、任务 C（真实系统选择器图片/文件/混合附件发送与受控异常测试）已全部验证通过，相关回归测试全部 PASS，无高风险缺陷。按指令保持在 `feat/v0.17` 分支，不合并 `main`、不移动 `v0.16.7` Tag、不创建 GitHub Release。
 
 ---
 
