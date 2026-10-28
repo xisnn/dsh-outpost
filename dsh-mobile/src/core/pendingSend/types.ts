@@ -88,6 +88,8 @@ export interface PendingSendRecord {
   /** 文本 + 附件内容哈希的指纹；只用于展示/冲突检测，不用于自动复用 ID */
   fingerprint: string;
   state: PendingSendState;
+  /** 过期前状态，用于过期提示区分未发送 / unknown / accepted；非过期记录为空 */
+  expiredFrom?: PendingSendState;
   attemptCount: number;
   binding: PendingSendBinding;
   createdAt: number;

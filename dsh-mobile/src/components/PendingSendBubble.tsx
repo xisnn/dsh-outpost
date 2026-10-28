@@ -28,8 +28,22 @@ function statusOf(record: PendingSendRecord): { label: string; tone: 'muted' | '
       return { label: '结果未知，可能已在电脑执行', tone: 'warning' };
     case 'failed':
       return { label: '未发出', tone: 'danger' };
-    case 'expired':
+    case 'expired': {
+      const from = record.expiredFrom;
+      if (from === 'unknown' || from === 'sending') {
+        return {
+          label: '已过期，发送结果未确认，可能已执行（附件已清理）',
+          tone: 'warning',
+        };
+      }
+      if (from === 'accepted') {
+        return {
+          label: '已过期，服务端曾受理但未确认（附件已清理）',
+          tone: 'muted',
+        };
+      }
       return { label: '已过期，未发送（附件已清理）', tone: 'muted' };
+    }
     case 'abandoned':
       return { label: '已放弃', tone: 'muted' };
     case 'confirmed':

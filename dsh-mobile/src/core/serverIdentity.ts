@@ -186,23 +186,31 @@ const STATUS_TIMEOUT_MS = 5000;
  *
  * @returns gatewayId；拿不到返回 undefined
  */
-export async function fetchServerGatewayId(
+export interface ServerGatewayProbe {
+  /** HTTP 状态；网络层失败时 undefined */
+  status?: number;
+  /** 已认证成功时的 gatewayId */
+  gatewayId?: string;
+  /** 脱敏错误摘要（不含 Cookie/Token） */
+  error?: string;
+}
+
+/**
+ * 诊断用探针：只返回状态/错误摘要和 gatewayId，不返回 cookie 或响应正文。
+ * fetchServerGatewayId 保留原返回契约，生产调用方不需要区分细节。
+ */
+export async function probeServerGatewayId(
   baseUrl: string,
   cookie?: string,
-): Promise<string | undefined> {
+): Promise<ServerGatewayProbe> {
   const base = normalizeBaseUrl(baseUrl);
-  if (!base) return undefined;
-  // normalizeBaseUrl 产出的是 «scheme»//host[:port][/path]，
-  // 拼 path 时要注意它已经去掉了尾斜杠，这里直接接上去即可。
+  if (!base) return { error: 'base-url-missing' };
   const url = `${base}/mgw/status`;
   try {
     const ctrl = new AbortController();
     const timer = setTimeout(() => ctrl.abort(), STATUS_TIMEOUT_MS);
     let res: Response;
     try {
-      // React Native 的 fetch 使用原生 cookie 容器；显式 Cookie 头在部分 RN
-      // 版本会被忽略/拒绝，因此 RN 侧依赖 credentials:'include'，Node 侧
-      // 仍用显式 Cookie 头保证真实 DSH 探针可认证。
       const isReactNative =
         typeof navigator !== 'undefined' &&
         (navigator as { product?: string }).product === 'ReactNative';
@@ -211,8 +219,6 @@ export async function fetchServerGatewayId(
         credentials: 'include',
         headers: {
           ...(cookie && !isReactNative ? { Cookie: cookie } : {}),
-          // RN 的 fetch 对 Cookie/Origin/Referer 等浏览器受控头支持不一致；
-          // RN 侧依靠原生 cookie 容器（credentials: include），不设置这些头。
           ...(!isReactNative
             ? {
                 Origin: baseUrl.replace(/\/+$/, ''),
@@ -225,18 +231,28 @@ export async function fetchServerGatewayId(
     } finally {
       clearTimeout(timer);
     }
-    if (res.status !== 200) return undefined;
+    if (res.status !== 200) return { status: res.status, error: `http-${res.status}` };
     let json: unknown;
     try {
       json = await res.json();
     } catch {
-      return undefined;
+      return { status: res.status, error: 'non-json' };
     }
-    return readGatewayId(json);
-  } catch {
-    // 网络不通 / 超时 / 明文 HTTP 被拦 —— 都只是「问不到」，不是错误
-    return undefined;
+    return { status: res.status, gatewayId: readGatewayId(json) };
+  } catch (e) {
+    const err = e as { name?: string; message?: string };
+    return {
+      error: `${err?.name ?? 'error'}: ${(err?.message ?? 'unknown').slice(0, 160)}`,
+    };
   }
+}
+
+/** 读取当前已认证的服务端 gatewayId；任何异常/非 200 返回 undefined。 */
+export async function fetchServerGatewayId(
+  baseUrl: string,
+  cookie?: string,
+): Promise<string | undefined> {
+  return (await probeServerGatewayId(baseUrl, cookie)).gatewayId;
 }
 
 /** 把绑定序列化成存储值（字段顺序固定，便于断言与排错） */

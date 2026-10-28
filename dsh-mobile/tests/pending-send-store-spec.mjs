@@ -231,11 +231,42 @@ await check('过期提示：未决记录到期后先标记 expired 并保留提�
   const afterExpire = await store.list();
   assert.equal(afterExpire.length, 1);
   assert.equal(afterExpire[0].state, 'expired');
+  assert.equal(afterExpire[0].expiredFrom, 'queued');
   // 超过过期提示保留期后真正删除
   clock += 2 * 60 * 60 * 1000;
   const removed = await store.prune();
   assert.equal(removed.length, 1);
   assert.equal((await store.list()).length, 0);
+});
+
+await check('过期保留原状态：unknown 不能被显示成未发送', async () => {
+  clock = CLOCK0;
+  const { store } = await hydrated();
+  const r = await store.create(input({ text: 'unknown-expire', expiresAt: clock + 1000 }));
+  await store.apply(r.requestId, { type: 'begin-preparing' });
+  await store.apply(r.requestId, { type: 'attachments-ready' });
+  await store.apply(r.requestId, { type: 'begin-send' });
+  await store.apply(r.requestId, { type: 'unknown-failure', code: 'timeout' });
+  clock += 2000;
+  await store.prune();
+  const expired = await store.get(r.requestId);
+  assert.equal(expired.state, 'expired');
+  assert.equal(expired.expiredFrom, 'unknown');
+});
+
+await check('过期保留原状态：accepted 不能被显示成未发送', async () => {
+  clock = CLOCK0;
+  const { store } = await hydrated({ acceptedTtlMs: 1000 });
+  const r = await store.create(input({ text: 'accepted-expire' }));
+  await store.apply(r.requestId, { type: 'begin-preparing' });
+  await store.apply(r.requestId, { type: 'attachments-ready' });
+  await store.apply(r.requestId, { type: 'begin-send' });
+  await store.apply(r.requestId, { type: 'accept' });
+  clock += 2000;
+  await store.prune();
+  const expired = await store.get(r.requestId);
+  assert.equal(expired.state, 'expired');
+  assert.equal(expired.expiredFrom, 'accepted');
 });
 
 await check('重启恢复：sending→unknown，用户 retry 仍用旧 requestId', async () => {
