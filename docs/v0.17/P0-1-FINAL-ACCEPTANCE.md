@@ -5,6 +5,7 @@
 代码提交：`2988688`（最新修复；报告提交见文末）
 测试 APK：`dsh-mobile/android/app/build/outputs/apk/release/app-release.apk`
 APK SHA-256：`ACC6AFAD0A204F39B27EF17505CD91A0B11BFA52E8B19DAC795180F88CAC9C64`
+APK 元数据：`versionCode=1`、`versionName=1.0`、`minSdk=24`、`targetSdk=36`；release 测试包使用 `DSH_ALLOW_DEBUG_RELEASE_SIGNING=true`，不可发布
 模拟器：`dsh_verify`（独立测试 AVD；未触碰正式验收 AVD）
 
 ## 1. 总结
@@ -17,6 +18,14 @@ APK SHA-256：`ACC6AFAD0A204F39B27EF17505CD91A0B11BFA52E8B19DAC795180F88CAC9C64`
 2. 因此真实 ChatScreen accepted/confirmed 用户操作、unknown 回执丢失重试、force-stop 恢复均未在最新 APK 上完成。
 3. App 附件选择器发送图片/文件/混合消息也未完成；真实 DSH 附件链路只由独立脚本验证，不能冒充 App 端到端。
 4. 真实磁盘满/256MiB 上限压力注入：**NOT TESTED**。
+
+### 1.1 HTTP 401 诊断
+
+- 原始 DSH `dsh-web-3095.log` 记录了启动 token URL；同一进程的 token 已使用过多轮。
+- 另建隔离 DSH 测试实例（复制 profile、独立 port 3097，不重启用户 DSH），其 token URL 直接 `GET` 返回 **303 + Set-Cookie**（host 侧验证有效）。
+- 同一隔离 token 输入最新 release APK 后仍返回 `token exchange failed: HTTP 401`；另用 `127.0.0.1:3097` 和 `172.27.58.79:3097` 两种地址均复现。
+- 因此当前证据不能支持“token 已过期/一次性消费”作为唯一原因；更符合 **303 后 App 端 native Cookie Jar 未取得/读回 dsh-auth cookie，重定向目标返回 401** 的历史问题。
+- 未关闭身份检查、未硬编码 gatewayId、未修改认证补丁；没有把 token/cookie 原文写入报告或提交。
 
 ## 2. PASS
 
@@ -37,7 +46,7 @@ APK SHA-256：`ACC6AFAD0A204F39B27EF17505CD91A0B11BFA52E8B19DAC795180F88CAC9C64`
 
 | 项目 | 状态 | 原因 |
 |---|---|---|
-| 最新 APK 真实 DSH 配对 | **FAIL** | `token exchange failed: HTTP 401`，当前配对 token 已失效 |
+| 最新 APK 真实 DSH 配对 | **FAIL** | `token exchange failed: HTTP 401`；host 侧新 token 303 + Set-Cookie 有效，App 端仍 401（native Cookie Jar/303 重定向差异） |
 | 真实 ChatScreen 正常文本 → queued/sending/accepted/confirmed | **NOT TESTED / BLOCKED** | 最新 APK 无法完成配对；旧构建的 accepted/confirmed 不是当前验收 |
 | 真实 ChatScreen unknown → 用户点击安全重试 | **NOT TESTED / BLOCKED** | 同上 |
 | 真实 ChatScreen force-stop 后恢复 | **NOT TESTED / BLOCKED** | 同上 |
@@ -70,7 +79,8 @@ APK SHA-256：`ACC6AFAD0A204F39B27EF17505CD91A0B11BFA52E8B19DAC795180F88CAC9C64`
 
 ## 7. 最小修复措施
 
-1. 使用有效真实 DSH 配对 token（重新从独立 DSH 测试实例生成；不重启正在运行的用户 DSH）重新配对最新 APK。
+1. 修复/重新验证 App 端 303 Set-Cookie 处理：确认 `@react-native-cookies/cookies` 在 release APK 中实际读写 dsh-auth cookie，或在 `DshConnection.loginWithToken` 中对 303 + Set-Cookie 做安全读取；不得关闭认证。
+2. 使用独立 DSH 测试实例的新 token 重新配对最新 APK，先证明正确 token 成功、错误 token 401。
 2. 在 `dsh_verify` 上重新执行真实 ChatScreen 文本 accepted/confirmed、unknown 重试、force-stop 恢复。
 3. 用 App 附件选择器发送图片/文件/混合，并在真实 DSH `session/page` 验证 requestId、附件和单条消息。
 4. 在独立测试目录用可靠文件系统故障注入验证 256MiB/复制失败/空间不足；真实磁盘满保持 NOT TESTED。
@@ -89,4 +99,4 @@ APK SHA-256：`ACC6AFAD0A204F39B27EF17505CD91A0B11BFA52E8B19DAC795180F88CAC9C64`
 
 ---
 
-*报告提交：`15adb6c`。*
+*报告维护：2026-10-28 · 具体文档提交见 `feat/v0.17` Git 历史。*
