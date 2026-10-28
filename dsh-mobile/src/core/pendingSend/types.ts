@@ -46,10 +46,21 @@ export interface PendingSendBinding {
   identityQuality: 'confirmed' | 'unverifiable';
 }
 
+export interface AttachmentDraft {
+  kind: 'image' | 'file';
+  /** 相册/文件选择器给的临时 URI，可能重启后失效 */
+  uri: string;
+  name: string;
+  size?: number;
+  mime?: string;
+}
+
 export interface PendingAttachment {
   kind: 'image' | 'file';
-  /** 本地文件 URI；重试时重新读取，不把文件内容存进 keychain */
+  /** 原始选择器 URI（展示/诊断用，重试不依赖它） */
   localUri: string;
+  /** 复制到应用私有目录后的稳定路径；重试只使用这个 */
+  stagedUri: string;
   name: string;
   size: number;
   mime?: string;

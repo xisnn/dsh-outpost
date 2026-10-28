@@ -20,6 +20,7 @@ import { DshConnection } from './core/transport';
 import { checkBaseUrlSecurity } from './core/net-security';
 import { Store } from './core/store';
 import { PendingSendStore } from './core/pendingSend/store';
+import { ReactNativePendingSendStaging } from './core/pendingSend/staging';
 import {
   CredentialKey,
   clearAllCredentials,
@@ -318,8 +319,8 @@ function notifyClearResult(result: ClearAuthorizationResult): void {
   }
   if (result.local.pendingSends === 'failed') {
     problems.push(
-      '待发送消息记录没能确认清除。\n' +
-        '  这些记录可能仍留在本机安全存储里，建议重启后再次执行清除。',
+      '待发送消息记录或附件暂存目录没能确认清除。\n' +
+        '  这些记录/文件可能仍留在本机安全存储或私有目录里，建议重启后再次执行清除。',
     );
   }
 
@@ -434,7 +435,10 @@ export default function App() {
   /** 安全存储 / 迁移失败说明（null = 正常） */
   const [secureStorageError, setSecureStorageError] = useState<string | null>(null);
 
-  const pendingSends = useMemo(() => new PendingSendStore(), []);
+  const pendingSends = useMemo(
+    () => new PendingSendStore({ staging: new ReactNativePendingSendStaging() }),
+    [],
+  );
 
   const store = useMemo(() => {
     // ⚠️ baseUrl 在「未配对 / 刚清过数据」时是空字符串。

@@ -92,6 +92,8 @@ function makeHarness() {
   const store = new Store(conn, {
     pendingSendStore: pending,
     loadPendingBinding: async () => binding,
+    // 网络身份验证由 service-binding 专项测试覆盖；这里避免测试访问真实网络。
+    verifyPendingBinding: async () => undefined,
   });
   store.api.prompt = async (params) => {
     prompts.push(params);
@@ -252,6 +254,62 @@ await check('accepted 与 confirmed 分开：只有真实 user/message.rpcId 命
   await store.reconcilePendingNow('s1');
   const after = await pending.get(record.requestId);
   assert.equal(after.state, 'confirmed');
+});
+
+await check('远端身份验证失败：不调用 session/prompt，记录标记失败', async () => {
+  const { store, pending, prompts } = await setup();
+  store.verifyPendingBinding = async () => {
+    throw new Error('remote identity mismatch');
+  };
+  await assert.rejects(
+    () => store.sendPending('s1', 'blocked-by-identity'),
+    /remote identity mismatch/,
+  );
+  assert.equal(prompts.length, 0);
+  const records = await pending.list('s1');
+  assert.equal(records[0].state, 'failed');
+  assert.equal(records[0].lastError.code, 'identity-verification-failed');
+});
+
+await check('事件乱序：confirmed 先于 accepted 到达时状态不倒退', async () => {
+  const { store, pending } = await setup();
+  const rec = await pending.create({
+    sessionId: 's1',
+    mode: 'queue',
+    text: 'out-of-order',
+    attachments: [],
+    binding,
+  });
+  await pending.apply(rec.requestId, { type: 'begin-preparing' });
+  await pending.apply(rec.requestId, { type: 'attachments-ready' });
+  await pending.apply(rec.requestId, { type: 'begin-send' });
+  store.streams = new Map([
+    [
+      's1',
+      {
+        handle: { close() {} },
+        cursor: 1,
+        records: new Map([
+          [
+            1,
+            {
+              event: {
+                seq: 1,
+                type: 'user/message',
+                data: { source: { kind: 'user', rpcId: rec.requestId } },
+              },
+            },
+          ],
+        ]),
+        snapshot: {},
+      },
+    ],
+  ]);
+  await store.reconcilePendingNow('s1');
+  assert.equal((await pending.get(rec.requestId)).state, 'confirmed');
+  // 迟到的 accepted 事件必须是 no-op，不能把 confirmed 退回去。
+  await pending.apply(rec.requestId, { type: 'accept' });
+  assert.equal((await pending.get(rec.requestId)).state, 'confirmed');
 });
 
 console.log('');

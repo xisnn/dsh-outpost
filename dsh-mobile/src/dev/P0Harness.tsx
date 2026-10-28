@@ -8,12 +8,14 @@
 import React, { useEffect, useState } from 'react';
 import { ScrollView, Text } from 'react-native';
 import AsyncStorage from '@react-native-async-storage/async-storage';
+import ReactNativeBlobUtil from 'react-native-blob-util';
 
 import { DshConnection } from '../core/transport';
 import { Store } from '../core/store';
 import { PendingSendStore } from '../core/pendingSend/store';
 import type { PendingSendPersistence } from '../core/pendingSend/persistence';
 import { loadPendingSendBinding } from '../core/pendingSend/serviceBinding';
+import { ReactNativePendingSendStaging } from '../core/pendingSend/staging';
 import { CredentialKey, saveCredential } from '../core/secureStore';
 
 const PHASE_KEY = '@dsh/p0HarnessPhase';
@@ -43,7 +45,7 @@ function log(msg: string): void {
 }
 
 async function freshPending(): Promise<PendingSendStore> {
-  const ps = new PendingSendStore();
+  const ps = new PendingSendStore({ staging: new ReactNativePendingSendStaging() });
   await ps.hydrate();
   await ps.clearAll();
   return ps;
@@ -52,7 +54,12 @@ async function freshPending(): Promise<PendingSendStore> {
 function makeStore(ps: PendingSendStore, promptImpl: (params: any) => Promise<void>): Store {
   const conn = new DshConnection({ baseUrl: BASE_URL, cookie: 'dsh-auth-test=v1' });
   // 不注入 binding：走真实 loadPendingSendBinding → Keychain 读取路径。
-  const store = new Store(conn, { pendingSendStore: ps });
+  const store = new Store(conn, {
+    pendingSendStore: ps,
+    // 这是本地 Keychain 接线 harness；真实远端 identity 验证由 Node
+    // service-binding 测试与真实 DSH 手工 e2e 覆盖。
+    verifyPendingBinding: async () => undefined,
+  });
   store.api.prompt = promptImpl;
   return store;
 }
@@ -75,19 +82,148 @@ class FailingPersistence implements PendingSendPersistence {
   }
 }
 
+async function loadHarnessBinding() {
+  return loadPendingSendBinding(BASE_URL, {
+    cookie: 'harness-cookie',
+    verifyRemote: async () => GATEWAY_ID,
+  });
+}
+
+async function runAttachmentSuite(): Promise<void> {
+  const dir = ReactNativeBlobUtil.fs.dirs.DocumentDir;
+  const imagePath = `${dir}/p0-image.png`;
+  const filePath = `${dir}/p0-file.txt`;
+  await ReactNativeBlobUtil.fs.writeFile(imagePath, 'PNG-DATA', 'utf8');
+  await ReactNativeBlobUtil.fs.writeFile(filePath, 'FILE-DATA', 'utf8');
+
+  // 纯图片：不 upload，prompt 内联真实字节 base64。
+  {
+    const ps = await freshPending();
+    const prompts: any[] = [];
+    const store = makeStore(ps, async (params) => {
+      prompts.push(params);
+    });
+    const rec = await store.sendPending('attach', '', [
+      { kind: 'image', uri: imagePath, name: 'p0-image.png', size: 8, mime: 'image/png' },
+    ]);
+    if (
+      rec.state !== 'accepted' ||
+      prompts[0].parts[0].type !== 'image' ||
+      !prompts[0].parts[0].data ||
+      !/^[a-f0-9]{64}$/.test(rec.attachments[0].contentSha256)
+    ) {
+      throw new Error('pure-image attachment path failed');
+    }
+    log('PASS attachment-pure-image');
+    await ps.clearAll();
+  }
+
+  // 纯文件 + 混合：真实私有暂存 + mock upload 回执。
+  {
+    const ps = await freshPending();
+    const prompts: any[] = [];
+    const uploads: string[] = [];
+    const store = makeStore(ps, async (params) => {
+      prompts.push(params);
+    });
+    store.upload.uploadBinary = async (_sessionId, stagedUri, name) => {
+      uploads.push(`${stagedUri}:${name}`);
+      return {
+        receiptId: `receipt-p0-${uploads.length}`,
+        file: { attachmentId: `att-p0-${uploads.length}`, name, bytes: 9 },
+      };
+    };
+    const fileRec = await store.sendPending('attach', '', [
+      { kind: 'file', uri: filePath, name: 'p0-file.txt', size: 9, mime: 'text/plain' },
+    ]);
+    if (fileRec.state !== 'accepted' || prompts[0].parts[0].type !== 'file') {
+      throw new Error('pure-file attachment path failed');
+    }
+    const mixedRec = await store.sendPending('attach', 'mixed', [
+      { kind: 'image', uri: imagePath, name: 'p0-image.png', size: 8, mime: 'image/png' },
+      { kind: 'file', uri: filePath, name: 'p0-file.txt', size: 9, mime: 'text/plain' },
+    ]);
+    if (
+      mixedRec.state !== 'accepted' ||
+      prompts[1].parts.map((p: any) => p.type).join(',') !== 'text,image,file' ||
+      uploads.length !== 2
+    ) {
+      throw new Error('mixed attachment path failed');
+    }
+    log('PASS attachment-pure-file-and-mixed');
+    await ps.clearAll();
+  }
+
+  // 相同文件名/大小、不同内容：真实暂存 SHA-256 必须不同。
+  {
+    const dir2 = ReactNativeBlobUtil.fs.dirs.DocumentDir;
+    const aPath = `${dir2}/p0-same-a.bin`;
+    const bPath = `${dir2}/p0-same-b.bin`;
+    await ReactNativeBlobUtil.fs.writeFile(aPath, 'AAAA', 'utf8');
+    await ReactNativeBlobUtil.fs.writeFile(bPath, 'BBBB', 'utf8');
+    const ps = await freshPending();
+    const store = makeStore(ps, async () => undefined);
+    store.upload.uploadBinary = async (_s, _p, name) => ({
+      receiptId: `receipt-same-${name}`,
+      file: { attachmentId: `att-same-${name}`, name, bytes: 4 },
+    });
+    const a = await store.sendPending('attach', '', [
+      { kind: 'file', uri: aPath, name: 'same.bin', size: 4, mime: 'application/octet-stream' },
+    ]);
+    const b = await store.sendPending('attach', '', [
+      { kind: 'file', uri: bPath, name: 'same.bin', size: 4, mime: 'application/octet-stream' },
+    ]);
+    if (
+      a.requestId === b.requestId ||
+      a.attachments[0].contentSha256 === b.attachments[0].contentSha256
+    ) {
+      throw new Error('same-name-size-different-content was merged');
+    }
+    log('PASS attachment-same-name-size-different-content');
+    await ps.clearAll();
+  }
+
+  // 暂存源删除后，重启记录仍能靠私有副本恢复（原始 URI 失效）。
+  {
+    const ps = await freshPending();
+    const staged = await ps.stageDrafts([
+      { kind: 'file', uri: filePath, name: 'p0-file.txt', size: 9, mime: 'text/plain' },
+    ]);
+    const binding = await loadHarnessBinding();
+    const rec = await ps.create({
+      sessionId: 'attach',
+      mode: 'queue',
+      text: '',
+      attachments: staged,
+      binding,
+    });
+    await ReactNativeBlobUtil.fs.unlink(filePath).catch(() => undefined);
+    const ps2 = new PendingSendStore({ staging: new ReactNativePendingSendStaging() });
+    await ps2.hydrate();
+    const restored = await ps2.get(rec.requestId);
+    if (!restored || restored.attachments[0].stagedUri !== staged[0].stagedUri) {
+      throw new Error('staged attachment did not survive source deletion');
+    }
+    log('PASS attachment-source-uri-gone-staged-survives');
+    await ps2.clearAll();
+  }
+}
+
 async function runFreshSuite(): Promise<void> {
   await seedHarnessIdentity();
 
   // 0. 真实服务身份路径：gatewayId + 设备上下文，cookie 轮换不影响 hash。
   {
-    const a = await loadPendingSendBinding(BASE_URL);
+    const a = await loadHarnessBinding();
     await saveCredential(CredentialKey.cookie, 'harness-cookie-2');
-    const b = await loadPendingSendBinding(BASE_URL);
+    const b = await loadHarnessBinding();
     if (a.gatewayId !== GATEWAY_ID || a.authContextHash !== b.authContextHash) {
       throw new Error('service binding path failed');
     }
     log('PASS service-binding-cookie-rotation');
   }
+
+  await runAttachmentSuite();
   // 1. 首次发送前持久化：prompt 被调用时记录必须已在 Keychain 中。
   {
     const ps = await freshPending();
@@ -185,7 +321,7 @@ async function runFreshSuite(): Promise<void> {
   // 6. 实际 Keychain 容量/重复写入性能：20 条 × 8KiB。
   {
     const ps = await freshPending();
-    const binding = await loadPendingSendBinding(BASE_URL);
+    const binding = await loadHarnessBinding();
     const text = 'x'.repeat(8 * 1024);
     const start = Date.now();
     for (let i = 0; i < 20; i += 1) {
@@ -240,7 +376,7 @@ async function runFreshSuite(): Promise<void> {
 
 async function setupForceStop(): Promise<void> {
   const ps = await freshPending();
-  const binding = await loadPendingSendBinding(BASE_URL);
+  const binding = await loadHarnessBinding();
   const rec = await ps.create({
     sessionId: 'force-stop',
     mode: 'queue',
@@ -263,7 +399,7 @@ async function recoverAfterForceStop(): Promise<void> {
     throw new Error(`force-stop recovery unexpected: ${JSON.stringify(records)}`);
   }
   const rec = records[0];
-  const binding = await loadPendingSendBinding(BASE_URL);
+  const binding = await loadHarnessBinding();
   const retried = await ps.retry(rec.requestId, binding);
   if (retried.requestId !== rec.requestId || retried.state !== 'preparing') {
     throw new Error('force-stop retry id mismatch');

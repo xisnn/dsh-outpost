@@ -58,6 +58,15 @@ export function PendingSendBubble({
     <View style={styles.wrap}>
       <View style={styles.bubble}>
         <Text style={styles.text}>{record.text}</Text>
+        {record.attachments.length > 0 ? (
+          <View style={styles.attachments}>
+            {record.attachments.map((a) => (
+              <Text key={`${a.stagedUri}-${a.name}`} style={styles.attachment} numberOfLines={1}>
+                {a.kind === 'image' ? '图片' : '文件'}：{a.name}
+              </Text>
+            ))}
+          </View>
+        ) : null}
         <View style={styles.footer}>
           {record.state === 'sending' || record.state === 'preparing' ? (
             <ActivityIndicator size="small" color={tv.colors.accent} />
@@ -106,6 +115,14 @@ function makeStyles(tv: ReturnType<typeof useTheme>) {
       color: C.text,
       fontSize: type.base,
       lineHeight: Math.round(type.base * 1.4),
+    },
+    attachments: {
+      marginTop: space.xs,
+      gap: 2,
+    },
+    attachment: {
+      color: C.textTertiary,
+      fontSize: type.xs,
     },
     footer: {
       flexDirection: 'row',

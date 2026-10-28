@@ -26,8 +26,8 @@ function check(name, fn) {
   }
 }
 
-check('ChatScreen 文本发送走 store.sendPending', () => {
-  assert.match(chat, /store\.sendPending\(sessionId,\s*text\)/);
+check('ChatScreen 文本/附件统一走 store.sendPending', () => {
+  assert.match(chat, /store\.sendPending\(sessionId,\s*text,\s*pendingAttachments\)/);
 });
 
 check('ChatScreen 渲染 PendingSendBubble 并调用 retryPending', () => {
@@ -44,9 +44,10 @@ check('Store.sendPending 先 create 持久化，再调用 send；文本路径关
   assert.match(store, /optimistic:\s*false/);
 });
 
-check('App 启动 hydrate PendingSendStore', () => {
+check('App 启动 hydrate PendingSendStore（注入真实附件暂存）', () => {
   assert.match(app, /pendingSends\.hydrate\(\)/);
-  assert.match(app, /new PendingSendStore\(\)/);
+  assert.match(app, /new PendingSendStore\(\{/);
+  assert.match(app, /ReactNativePendingSendStaging/);
 });
 
 console.log('');
