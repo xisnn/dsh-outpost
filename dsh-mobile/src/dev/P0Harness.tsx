@@ -237,7 +237,13 @@ async function probeActualIdentity(): Promise<void> {
 
 async function runFreshSuite(): Promise<void> {
   await probeActualIdentity();
+  const existingCookie = await loadCredential(CredentialKey.cookie).catch(() => undefined);
+  const owner = await AsyncStorage.getItem('@dsh/p0HarnessOwner').catch(() => null);
+  if (existingCookie && owner !== 'harness') {
+    throw new Error('P0Harness refuses to overwrite real paired credentials; use isolated app data');
+  }
   await seedHarnessIdentity();
+  await AsyncStorage.setItem('@dsh/p0HarnessOwner', 'harness').catch(() => undefined);
 
   // 0. 真实服务身份路径：gatewayId + 设备上下文，cookie 轮换不影响 hash。
   {

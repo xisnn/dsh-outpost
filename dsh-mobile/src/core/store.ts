@@ -42,8 +42,9 @@ import {
 import type { PendingSendBinding, PendingSendRecord, AttachmentDraft, PendingAttachment } from './pendingSend/types';
 import { guessImageMime, readFileBase64 } from './rpc/upload';
 import {
-  blockP0Confirmation,
+  armP0TestRequest,
   isP0ConfirmationBlocked,
+  shouldDropP0Response,
   unblockP0Confirmation,
 } from '../dev/p0Verify';
 
@@ -1585,8 +1586,8 @@ export class Store {
         binding,
       });
       if (__DEV__ && trimmed.includes('[P0_BLOCK]')) {
-        blockP0Confirmation(record.requestId);
-        console.log(`[p0-verify] block requestId=${record.requestId}`);
+        armP0TestRequest(record.requestId, true);
+        console.log(`[p0-verify] arm requestId=${record.requestId}`);
       }
     } catch (e) {
       await this.pendingSends.discardStaged(staged);
@@ -1604,17 +1605,27 @@ export class Store {
       throw new Error('找不到待发送记录');
     }
     const binding = await this.loadPendingBinding(this.conn.baseUrl);
-    // Debug-only: the user's explicit retry lifts the test confirmation block
-    // after the unknown UI has been observed. Release never enters.
-    if (__DEV__ && isP0ConfirmationBlocked(requestId)) {
-      unblockP0Confirmation(requestId);
-      console.log(`[p0-verify] unblock requestId=${requestId}`);
-    }
     // 重试前必须有已认证的远端 gatewayId 验证；验证失败时不改变记录状态。
     await this.verifyPendingBinding(existing.binding, this.conn.baseUrl, this.conn.currentCookie);
+    // Debug-only: if the test request was already confirmed by a real event,
+    // do not start an unnecessary retry; clear the test block safely.
+    if (__DEV__ && existing.state === 'confirmed') {
+      unblockP0Confirmation(requestId);
+      console.log(`[p0-verify] already-confirmed requestId=${requestId}`);
+      return existing;
+    }
     const record = await this.pendingSends.retry(requestId, binding);
     this.emit();
-    return this.runPendingSend(record, { identityVerified: true });
+    const result = await this.runPendingSend(record, { identityVerified: true });
+    // Unblock only after the controlled retry has started and completed its
+    // local send transition. Any cached confirmation is replayed by reconcile
+    // below, never before the retry state is safe.
+    if (__DEV__ && isP0ConfirmationBlocked(requestId)) {
+      unblockP0Confirmation(requestId);
+      console.log(`[p0-verify] release-after-retry requestId=${requestId}`);
+      await this.reconcilePendingNow(sessionId);
+    }
+    return (await this.pendingSends.get(requestId)) ?? result;
   }
 
   private runPendingSingleFlight(
@@ -1816,7 +1827,7 @@ export class Store {
         throw e;
       }
 
-      if (__DEV__ && current.text.includes('[P0_BLOCK]')) {
+      if (__DEV__ && shouldDropP0Response(requestId)) {
         const lost = await this.pendingSends.apply(requestId, {
           type: 'unknown-failure',
           code: 'simulated-response-lost',
