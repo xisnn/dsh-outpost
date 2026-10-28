@@ -9,6 +9,15 @@ APK 元数据：`versionCode=1`、`versionName=1.0`、`minSdk=24`、`targetSdk=3
 APK 签名：`CN=Android Debug, OU=Android`，证书 SHA-256 `fac61745dc0903786fb9ede62a962b399f7348f0bb6f899b8332667591033b9c`（测试签名）
 模拟器：`dsh_verify`（独立测试 AVD；未触碰正式验收 AVD）
 
+## 0. 构建追溯
+
+- 实际 Git HEAD：`13a838e`（文档提交）；代码提交 `5d38cdf`，回归测试提交 `9b641da`。
+- 正常配对/文本证据使用 commit `5d38cdf` 的 debug 测试包。
+- unknown 场景 A 的 `[P0_DROP]` 故障注入是临时 Debug-only 构建的未提交改动，测试后已撤销；未进入正式发布路径。
+- 最终 clean APK SHA-256：`1C0E51D3408E7AF93F2026AE08F42DE17E9B40F9B836D9F68CA2D092C1A5C59A`；versionCode 1 / versionName 1.0 / `CN=Android Debug`。
+- 注：注入 APK 与 clean APK 不是同一字节文件；上表将每个测试对应到其测试构建，避免把临时注入包冒充最终构建。
+- 所有测试 DSH 实例均为隔离实例（127.0.0.1:3097，adb reverse）；未触碰用户真实任务或正式验收 AVD。
+
 ## 1. 总结
 
 **结论：B. P0-1 BLOCKED**
@@ -44,6 +53,7 @@ APK 签名：`CN=Android Debug, OU=Android`，证书 SHA-256 `fac61745dc0903786f
 | `npm run test:integration` | 61/61 |
 | 真实 App 配对（`127.0.0.1:3097` 直连） | PASS：303/200、Cookie Jar 有 dsh-auth、`/api/session/list` 成功、首页加载 2 个会话 |
 | 真实 ChatScreen 文本发送/accepted/confirmed | PASS：服务端 user 事件 rpcId `req-mvs8lr4r-1-1en7ldl1lf720s`，1 条消息；截图 `P0-1-FINAL-CHATSCREEN-TEXT.png` |
+| 真实 ChatScreen unknown 场景 A（回执丢失 + 自动对账） | PASS：同 requestId `req-mvsb90p7-1-1mt0nc00enraf9` 进入 unknown 后由真实 WebSocket user 事件自动 confirmed；服务端 1 条消息；无残留气泡 |
 | PairScreen 配对回归（登录成功后 ping 403/超时不得变体重试） | `pairing-spec` 13/13（测试提交 `9b641da`） |
 | Android debug build | PASS（APK SHA-256 `1C0E51...C59A`） |
 
@@ -53,7 +63,8 @@ APK 签名：`CN=Android Debug, OU=Android`，证书 SHA-256 `fac61745dc0903786f
 |---|---|---|
 | 最新 APK 真实 DSH 配对 | **PASS** | 127.0.0.1:3097 直连成功；代理 403 仅是 Host 未 trusted 的测试环境问题 |
 | 真实 ChatScreen 正常文本 → queued/sending/accepted/confirmed | **PASS** | 实际 UI 发送 `P0-1finaltext`；服务端 user rpcId `req-mvs8lr4r-1-1en7ldl1lf720s`，仅 1 条；截图见第 4 节 |
-| 真实 ChatScreen unknown → 用户点击安全重试 | **FAIL / BLOCKED** | Debug 注入实际执行到 `[p0-state] sending requestId=req-mvsb90p7-1-1mt0nc00enraf9` → `[p0-state] unknown requestId=req-mvsb90p7-1-1mt0nc00enraf9`，服务端 user 事件随后经 WebSocket/reconcile 自动确认，unknown 未稳定停留，无法完成 UI 重试 |
+| 真实 ChatScreen unknown 场景 A（HTTP 成功回执丢失 + 自动对账） | **PASS** | 注入日志 `[p0-state] sending requestId=req-mvsb90p7-1-1mt0nc00enraf9` → `[p0-state] unknown requestId=...`；随后真实 WebSocket user 事件自动 reconcile 为 confirmed；UI 无残留待发送气泡，服务端仅 1 条用户消息 |
+| 真实 ChatScreen unknown 场景 B（隔离确认事件 + 手动安全重试） | **NOT TESTED / BLOCKED** | 需要 Debug-only 隔离 session/follow/reconcile 事件，当前尚未完成；未伪造 unknown 按钮或重试结果 |
 | 真实 ChatScreen force-stop 后恢复 | **NOT TESTED / BLOCKED** | 尚未完成可控 `[P0_PAUSE]` 持久化屏障 + force-stop 用例 |
 | App 附件选择器图片/文件/混合发送 | **NOT TESTED / BLOCKED** | 尚未完成 App 附件选择器链路 |
 | 真实磁盘满 / 256MiB 上限 | **NOT TESTED** | 未尝试填满用户磁盘；仅做故障注入/异常映射 |
