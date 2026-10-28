@@ -5,9 +5,22 @@
 | 目标版本 | v0.17.0 |
 | 开发分支 | `feat/v0.17`（从 `06a33e1` 创建） |
 | 基线代码 | `3349bbf`（运行时代码与当前 `v0.16.7` 一致） |
-| 方案状态 | **待评审，未开始编码** |
+| 方案状态 | **评审后修订；阶段 0/1 已实施，待验收** |
 | 范围 | 只做 P0-1；P0-2/P0-3/P1 不在本方案内 |
 | 依赖边界 | 不复制 Cindy 源码；不引入 Cindy 云端服务；不修改 DSH 服务端 |
+
+---
+
+## 0.1 评审后修订（2026-10-28，优先级高于下文旧表述）
+
+1. **禁止按指纹自动复用 requestId**：正常新发送永远生成新 `requestId`；只有用户明确点“重试”某条未决记录时，`PendingSendStore.retry()` 才复用记录里的旧 ID。指纹只用于 UI 冲突提示和测试。连续两次发送完全相同文本必须得到两个不同 ID。
+2. **退出登录语义**：普通 `signOut`（断开连接、保留凭据）**保留**待发送记录；只有 `clearAuthorization`（彻底清除授权）才清除记录，并在清除未确认任务前向用户明确提示。
+3. **记录绑定服务实例与授权上下文**：每条记录保存 `{baseUrl, gatewayId, authContextHash}`；重试前三者必须全部匹配，禁止跨服务端/跨服务实例/跨授权上下文重试。缺 `gatewayId` 视为不可验证，不允许重试。
+4. **Android 安全存储先验证再依赖**：`accessible` 是 iOS/visionOS 参数，Android `react-native-keychain` 不读取它。Android 侧显式要求 `storage: KeystoreAESGCM_NoAuth` 并校验实际返回的 storage；实际加密、锁屏、备份、容量行为以 `docs/v0.17/ANDROID-SECURE-STORAGE-VERIFY.md` 的模拟器实测为准。
+5. **存储方案与并发**：接受最多 20 条 / 256 KiB 的加密单文档方案；所有写入串行化（单 Promise 队列），写后回读必须与写入字节完全一致；阶段 1 必须做容量、读写性能、并发写入、进程终止/重启测试。
+6. **`@noble/hashes`**：确认 MIT 许可证，锁定 `2.4.0`，并增加指纹测试。
+7. **重启恢复不自动重发**：`sending` 重启后归为 `unknown`，`preparing` 归为 `failed`；`queued/ready/accepted` 保持原状态。任何未知结果都必须由用户明确触发安全重试。
+8. **持久化/确认写入失败**：不生成新的 requestId、不改变内存状态、不执行网络请求；确认状态写入失败时保持 `accepted` 并保留原 ID。
 
 ---
 
@@ -82,7 +95,8 @@ ChatScreen.send()                         ChatScreen.tsx:298-335
 dsh-mobile/src/core/pendingSend/
   types.ts        PendingSendRecord / PendingSendState / PendingAttachment
   fingerprint.ts  文本规范化 + 附件 SHA-256 + fingerprint 生成
-  persistence.ts  SecurePendingSendPersistence（Keychain 单文档，读写校验）
+  persistence.ts  KeychainPendingSendPersistence（Keychain 单文档，Android AES-GCM 校验）
+  ids.ts          requestId 生成（每次正常发送新 ID）
   state.ts        纯状态机：transition(record, event) → record / 错误
   store.ts        PendingSendStore：load/list/create/update/retry/clear/prune/subscribe
 ```
@@ -91,14 +105,14 @@ dsh-mobile/src/core/pendingSend/
 
 - `dsh-mobile/src/core/store.ts`：新增 `Store.sendPending()` 编排入口；保留现有 `send()` 作为底层 API（继续接收 requestId）。
 - `dsh-mobile/src/screens/ChatScreen.tsx`：移除 `retryReq`；改为订阅 `PendingSendStore`，渲染待发送/未知/失败气泡。
-- `dsh-mobile/src/App.tsx`：启动时 `hydrate()` + `prune()`；`signOut` 与 `clearAuthorization` 调用 `clearAll()`，并把清理结果纳入 `ClearAuthorizationResult`。
+- `dsh-mobile/src/App.tsx`：启动时 `hydrate()` + `prune()`；`signOut` **保留**待发送记录，`clearAuthorization` 在用户确认后调用 `clearAll()`，并把清理结果纳入 `ClearAuthorizationResult`。
 - `dsh-mobile/package.json`：增加 `test:pendingSend` 等脚本并接入 `npm test`（不改变现有测试链语义）。
 
 ### 2.2 核心不变量
 
 1. **任何网络请求之前**，`requestId` 与完整发送意图已经通过“写入 + 回读校验”。
 2. **同一个 `PendingSendRecord` 的 requestId 永不重新生成**；只有新建记录才生成新 id。
-3. **内容指纹变化必须新建记录**；旧记录不被覆盖、不被静默删除。
+3. **正常发送永远新建记录**；指纹只用于提示/校验，绝不因指纹相同自动复用 ID；旧记录不被覆盖、不被静默删除。
 4. **持久化不可用 = 不发送**；不允许静默降级到内存/AsyncStorage 明文。
 5. **服务端已受理（`accepted`）不等于会话已确认（`confirmed`）**；两者分别记录，确认后清理。
 6. **发送状态只由纯状态机迁移**；UI 只渲染状态，不自行判断。
@@ -135,17 +149,24 @@ interface PendingAttachment {
   attachmentId?: string;
 }
 
+interface PendingSendBinding {
+  baseUrl: string;            // 归一化后的服务地址
+  gatewayId: string | null;   // DSH 稳定实例标识；null = 老协议不可验证
+  authContextHash: string;    // 服务端/客户端设备 id + 凭据上下文派生
+  identityQuality: 'confirmed' | 'unverifiable';
+}
+
 interface PendingSendRecord {
   schema: 1;
-  revision: number;          // 每次写入递增，用于回读校验
-  requestId: string;         // 稳定幂等键
+  requestId: string;         // 稳定幂等键；正常发送每次新建
   sessionId: string;
   mode: 'queue' | 'steer';
   text: string;              // 原样保存；发送时 trim
   attachments: PendingAttachment[];
-  fingerprint: string;       // sha256(text + attachments 内容哈希)
+  fingerprint: string;       // 仅用于 UI 冲突提示/测试，禁止自动复用 ID
   state: PendingSendState;
   attemptCount: number;
+  binding: PendingSendBinding;
   createdAt: number;
   updatedAt: number;
   expiresAt: number;         // 默认 createdAt + 7 天
@@ -174,7 +195,7 @@ interface PendingSendDocument {
 
 | 当前状态 | 事件 | 下一状态 | 说明 |
 |---|---|---|---|
-| （无） | 用户发送，且没有同指纹的未决记录 | `queued` | 新建 requestId 并先落盘 |
+| （无） | 用户发送（无论是否有相同文本/附件） | `queued` | **永远新建 requestId**；绝不按指纹自动复用 |
 | `queued` | 开始附件准备 | `preparing` | 此时仍不会发送 prompt |
 | `preparing` | 附件全部就绪 | `ready` | 回执/本地 URI 已写回 |
 | `preparing` | 附件读取/上传失败 | `failed` | 确定未调用 prompt |
@@ -182,11 +203,12 @@ interface PendingSendDocument {
 | `sending` | `session/prompt` resolve | `accepted` | 服务端只保证入队 |
 | `sending` | 明确拒绝（本地校验/4xx/结构化错误） | `failed` | 确定没执行 |
 | `sending` | 超时/断网/5xx/响应损坏/进程退出 | `unknown` | 可能已执行；retry 同 id |
-| `unknown` | 用户点“重试（安全）” | `sending` | 同 requestId、同指纹 |
-| `failed` | 用户点“重试” | `sending` | 同 requestId、同指纹 |
+| `unknown`/`failed`/`queued`/`preparing`/`ready` | **用户明确点重试** | `preparing` | 唯一允许复用旧 requestId 的入口 |
 | `accepted` | 会话记录出现 `user/message.source.rpcId === requestId` | `confirmed` | 强确认；随后删除 |
 | `accepted` | 24h 仍未确认 | `accepted`（保留）/清理 | 不自动重发 |
-| `queued`/`preparing`/`ready` | 用户取消/改内容 | `abandoned` | 未发送，可安全放弃 |
+| `queued`/`preparing`/`ready` | 用户取消 | `abandoned` | 未发送，可安全放弃 |
+| `sending` | App 重启恢复 | `unknown` | 不自动重发 |
+| `preparing` | App 重启恢复 | `failed` | prompt 一定没发 |
 | 任意未决 | `now >= expiresAt` | `expired` | 删除 payload，写非敏感墓碑 |
 | `confirmed`/`abandoned` | 清理 | 删除记录 | 不保留消息内容 |
 
@@ -202,7 +224,7 @@ interface PendingSendDocument {
 
 1. 生成 requestId（`req-<timestamp>-<counter>-<random>`；测试可注入固定 id）。
 2. 计算文本/附件指纹。
-3. `PendingSendStore.create()`：写入 Keychain 文档 → 回读校验 `revision` 与 `digest` → 才返回。
+3. `PendingSendStore.create()`：写入 Keychain 文档 → 回读字符串必须与写入完全一致 → 才返回。
 4. 进入 `preparing`，才允许读取附件/上传文件（上传也是网络请求）。
 5. 附件就绪后写入 `ready`。
 6. 写入 `sending` 并回读成功。
@@ -247,9 +269,10 @@ interface PendingSendDocument {
 
 ### 4.4 同一请求重试复用 requestId
 
-- `PendingSendStore.retry(requestId)`：只允许 `unknown`/`failed`；读取记录后以同一个 requestId 重新走 `sending → accepted`。
+- **只有用户明确重试** `PendingSendStore.retry(requestId, currentBinding)` 才允许复用旧 ID；普通 `create()` 永远生成新 ID。
+- 允许重试的状态：`queued`/`preparing`/`ready`/`unknown`/`failed`；重试进入 `preparing`，不是直接 `sending`，以便重新校验附件。
 - `attemptCount` 每次重试 +1；requestId 永远不重新生成。
-- UI 的“重试（安全）”按钮直接调用 `retry(record.requestId)`，不经过 `ChatScreen` 重算 id。
+- UI 的“重试（安全）”按钮直接调用 `retry(record.requestId, currentBinding)`，不经过 `ChatScreen` 重算 id。
 - 服务端去重由 `hasPromptRequest` 保证：同 id 重试返回 `{accepted:true}`，不会二次执行。
 
 ### 4.5 修改文字或附件时生成新的请求身份
@@ -270,23 +293,24 @@ fingerprint = SHA-256(JSON.stringify({
 
 **规则**：
 
-- 发送前先查找同一会话中状态为 `queued|preparing|ready|unknown|failed|accepted` 的记录。
-- 若最新记录的 `fingerprint` 与当前输入相同：视为同一次意图，重试/继续使用原 requestId。
-- 若不同：**新建记录、新 requestId**；旧记录保留：
-  - 旧记录是 `queued|preparing|ready`（确定没发 prompt）→ 标 `abandoned`，可清理；
-  - 旧记录是 `unknown|accepted`（可能已执行）→ 保留为未决证据，UI 提示“上一条结果未知，新消息使用新请求 ID；服务端不会把两条合并”。
-- 附件内容哈希使用 `react-native-blob-util` 的 `fs.hash(path, 'sha256')`（依赖已存在，`index.d.ts:364-373`）；文本/JSON 的 SHA-256 使用新增的纯 JS 依赖 `@noble/hashes`（约 5 KB，无原生代码；需你确认依赖）。
-- 文件名/大小相同但内容不同的附件，会因 `contentSha256` 不同而生成新 id；`localUri` 不参与指纹（同一文件移动路径不应改变身份）。
+- **正常发送永远新建记录、新 requestId**，不管是否存在相同文本/附件的旧记录。
+- 指纹只用于：UI 提示“当前输入与某条未决记录内容相同/不同”，以及测试证明改内容会换身份。
+- 用户明确重试时，校验当前输入指纹与记录指纹一致；不一致则拒绝复用并提示先修改/确认。
+- 旧记录不因新发送被覆盖：`queued|preparing|ready` 可标 `abandoned`；`unknown|accepted` 保留为未决证据，UI 提示“上一条结果未知，新消息使用新请求 ID；服务端不会把两条合并”。
+- 附件内容哈希使用 `react-native-blob-util` 的 `fs.hash(path, 'sha256')`（依赖已存在，`index.d.ts:364-373`）；文本/JSON 的 SHA-256 使用已确认的纯 JS 依赖 `@noble/hashes@2.4.0`（MIT，无原生代码）。
+- 文件名/大小相同但内容不同的附件，会因 `contentSha256` 不同而生成不同指纹；`localUri` 不参与指纹（同一文件移动路径不应改变身份）。
 - 文件读取/哈希失败时 fail closed：提示“无法确认附件内容，已阻止发送，请重新选择附件”。
 
 ### 4.6 敏感内容的保护、过期清理和退出登录清理
 
 **保护**：
 
-- 待发送记录（文本、附件本地路径/回执、错误信息）统一存入 `react-native-keychain`，service 为 `com.dshpocket.pendingSends`，`accessible = WHEN_UNLOCKED_THIS_DEVICE_ONLY`；不写 AsyncStorage、不写日志、不写 Android 通知。
-- `android:allowBackup="false"` 已存在（`AndroidManifest.xml:27`），配合 Keychain 的 `THIS_DEVICE_ONLY`，不进入云备份/换机迁移。
+- 待发送记录（文本、附件本地路径/回执、错误信息）统一存入 `react-native-keychain`，service 为 `com.dshpocket.pendingSends.v1`；不写 AsyncStorage、不写日志、不写 Android 通知。
+- **Android 实测结论**：`react-native-keychain@10.0.0` 使用 `CipherStorageKeystoreAesGcm`（Android Keystore AES-256/GCM）+ `DataStorePrefsStorage`；`accessible` 是 iOS/visionOS 参数，Android 不读取。实现显式要求 `storage: KeystoreAESGCM_NoAuth` 并校验 `setGenericPassword` 返回的 storage；实际验证见 `docs/v0.17/ANDROID-SECURE-STORAGE-VERIFY.md`。
+- `android:allowBackup="false"` 已存在（`AndroidManifest.xml:27`）；这是系统级备份控制，不把它误当成 Keychain 的锁屏认证保证。
 - UI 错误只显示固定安全文案；`lastError.message` 截断且不进入控制台。
 - 存储文档有硬上限：最多 20 条未决记录、单条文本 32 KiB、单条附件 8 个、文档总计 256 KiB。超限直接拒绝创建并提示，不丢旧记录、不静默截断。
+- **所有写入串行化**：`PendingSendStore` 内部单 Promise 队列；每次写前生成完整文档、写后回读必须与写入字节一致，成功后才替换内存状态。
 
 **过期清理**：
 
@@ -300,10 +324,12 @@ fingerprint = SHA-256(JSON.stringify({
 
 **退出登录清理**：
 
-- `App.tsx` 的 `signOut()`（断开连接，保留凭据）与 `clearAuthorization()`（彻底清除）都调用 `PendingSendStore.clearAll()`。
-- `clearAll()`：写空文档 → 回读校验为空 → 清内存缓存 → 清墓碑；失败时返回 `{ok:false, error}`。
+- `App.tsx` 的 `signOut()`（断开连接，保留凭据）**保留**待发送记录；只有 `clearAuthorization()`（彻底清除授权）调用 `PendingSendStore.clearAll()`。
+- `clearAuthorization` 在清除前必须提示：本机有 N 条未确认/待发送记录，清除后无法再安全重试，请确认；用户确认后才执行。
+- `clearAll()`：写空文档 → 回读校验为空；失败时返回 `{ok:false, error}`。
 - `clearAuthorization` 的 `ClearAuthorizationResult.local` 增加 `pendingSends: 'cleared' | 'failed'`，与现有 `secureStorage`/`cookieJar` 一样如实展示，不把失败当成功。
-- 退出登录后即使 Keychain 里有残留，下一次发送也不得复用旧记录；如果 `clearAll()` 失败，UI 明确提示“待发送缓存未清除”，并禁止发送直到恢复/再次清理。
+- 清理后即使 Keychain 里有残留，下一次发送也不得复用旧记录；如果 `clearAll()` 失败，UI 明确提示“待发送缓存未清除”，并禁止发送直到恢复/再次清理。
+- 记录本身带 `{baseUrl, gatewayId, authContextHash}` 绑定；即使记录未被清除，换服务端/换授权上下文后 `retry()` 也会被拒绝。
 
 ### 4.7 持久化写入失败时安全阻止发送
 
@@ -311,12 +337,12 @@ fingerprint = SHA-256(JSON.stringify({
 
 **实现**：
 
-- `SecurePendingSendPersistence.write()`：写 Keychain 后立刻 `read()`；解析并比对 `revision` 与 `digest`。以下任一情况抛 `PendingSendPersistenceError`：
+- `KeychainPendingSendPersistence.writeRaw()`：写 Keychain 后由 `PendingSendStore.save()` 立刻 `readRaw()`；**回读必须与写入字符串完全一致**，成功后才替换内存文档。以下任一情况抛错并保持旧内存状态：
   - `setGenericPassword` 抛错；
-  - 回读为空/无法解析；
-  - `revision` 不是预期值；
-  - `digest` 不匹配；
+  - 回读为空/无法解析/与写入不一致；
+  - Android 实际 storage 不是 `KeystoreAESGCM_NoAuth`；
   - 文档超出大小上限。
+- 所有 `create/update/retry/clear/prune/recover` 都经过同一 Promise 队列，避免并发读改写丢更新。
 - `Store.sendPending()` 一开始就 `await create()`；失败时：
   - 不调用 `uploadFileBinary`；
   - 不调用 `session/prompt`；
@@ -332,6 +358,12 @@ fingerprint = SHA-256(JSON.stringify({
 - `requestId` 是唯一键；服务端在入队前检查 `hasPromptRequest`；
 - 检查范围覆盖 `inbox.nextTurn` / `inbox.nextStep`（排队）与 `session.snapshotEvents()` 的 `user/message.rpcId`（已执行）；
 - 同一 requestId 的不同内容会被丢弃，因此客户端不能用同一 id 发送改过的内容。
+
+**服务实例与授权上下文绑定**：
+
+- 每条记录在创建时保存 `PendingSendBinding = {baseUrl, gatewayId, authContextHash, identityQuality}`。
+- `gatewayId` 取 DSH 网关稳定实例标识；`authContextHash` 由服务端设备 UUID、客户端设备 id、凭据上下文派生，只存 hash。
+- `PendingSendStore.retry()` 重试前调用 `evaluatePendingSendBinding()`：地址、`gatewayId`、`authContextHash` 必须全部匹配；任一缺失（尤其 `gatewayId=null`）都按 `server-identity-unverifiable` 拒绝，**绝不跨服务端重试**。
 
 **客户端对齐点**：
 
@@ -376,7 +408,7 @@ fingerprint = SHA-256(JSON.stringify({
 |---|---|
 | `tests/pending-send-state-spec.mjs` | 状态机所有合法/非法迁移、`accepted` vs `confirmed` |
 | `tests/pending-send-store-spec.mjs` | 创建/读取/更新/删除/回读校验/损坏文档/容量上限/过期/退出清理 |
-| `tests/pending-send-identity-spec.mjs` | 同文同附件同 id；改文字新 id；改附件（同文件名同大小不同内容）新 id；附件-only；模式变化 |
+| `tests/pending-send-identity-spec.mjs` | 指纹对文本/附件内容/顺序/模式敏感；连续两次同文同附件仍生成不同指纹但**不自动复用 ID**（由 store 测试断言） |
 | `tests/pending-send-recovery-spec.mjs` | 模拟进程重启：`sending→unknown`、`queued/ready` 可继续、`accepted` 遇历史消息转 confirmed、页面卸载恢复 |
 | `tests/pending-send-fault-spec.mjs` | Keychain 写失败/回读不一致/读失败/上传失败/超时/接受后丢回执/5xx/400 |
 | `tests/pending-send-integration-spec.mjs` | 真实 `Store.sendPending()` + fake DSH，验证完整调用链 |
@@ -386,9 +418,9 @@ fingerprint = SHA-256(JSON.stringify({
 | # | 场景 | 期望 |
 |---|---|---|
 | 1 | Keychain 第一次写入失败 | 无 upload/prompt；草稿恢复；显示“已阻止发送” |
-| 2 | 写入成功但回读 revision 不一致 | 同上；旧记录不被覆盖 |
-| 3 | 发送前杀进程（`sending`） | 重启显示“结果未知”；重试同 requestId |
-| 4 | 服务端接受后丢 HTTP 回执 | 状态 `unknown`；重试同 id；fake DSH `promptLog` 显示第二次 dedupe、`promptMessageCount=1` |
+| 2 | 写入成功但回读与写入不一致 | 同上；旧记录不被覆盖 |
+| 3 | 发送前杀进程（`sending`） | 重启显示“结果未知”；**不自动重发**；用户点重试才同 requestId |
+| 4 | 服务端接受后丢 HTTP 回执 | 状态 `unknown`；**用户点重试**同 id；fake DSH `promptLog` 显示第二次 dedupe、`promptMessageCount=1` |
 | 5 | prompt 超时 | 状态 `unknown`；重试同 id；不重复执行 |
 | 6 | prompt 返回 400 明确拒绝 | 状态 `failed`；重试同 id |
 | 7 | prompt 返回 500 | 状态 `unknown`（按可能已执行处理） |
@@ -408,19 +440,20 @@ fingerprint = SHA-256(JSON.stringify({
 
 > 每个阶段单独提交/PR 到 `feat/v0.17`；每阶段结束必须通过 `npm test` 与 `npm run typecheck`，不直接碰 `main`。
 
-### 阶段 0：契约与纯函数（0.5–1 天）
+### 阶段 0：契约与纯函数（0.5–1 天）✅ 已实施
 
-- 新增 `pendingSend/types.ts`、`state.ts`、`fingerprint.ts` 的接口与纯函数。
-- 固化状态迁移表、指纹定义、错误分类枚举。
-- 新增 `pending-send-state-spec.mjs`、`pending-send-identity-spec.mjs`（纯函数层）。
+- 新增 `pendingSend/types.ts`、`ids.ts`、`fingerprint.ts`、`state.ts` 的接口与纯函数。
+- 固化状态迁移表、指纹定义、错误分类枚举、requestId 生成规则。
+- 新增 `pending-send-state-spec.mjs`（10 项）、`pending-send-identity-spec.mjs`（11 项）。
 - **退出标准**：状态机/指纹测试全部通过；不接 UI、不发网络。
 
-### 阶段 1：安全持久化层（1–1.5 天）
+### 阶段 1：安全持久化层（1–1.5 天）✅ 已实施，待 Android 实测验收
 
-- 实现 `SecurePendingSendPersistence`：Keychain 单文档 `dsh.pendingSends.v1`、`revision`、写后回读、大小上限、损坏隔离。
-- 实现 `PendingSendStore`：`hydrate/list/create/update/remove/clearAll/prune/subscribe`。
-- 新增 `pending-send-store-spec.mjs`；覆盖 Keychain 失败注入、回读不一致、过期、退出清理、容量上限。
-- **退出标准**：不改 UI 也能证明“发送前可持久化、失败可阻断”。
+- 实现 `KeychainPendingSendPersistence`：Keychain 单文档 `com.dshpocket.pendingSends.v1`、Android `KeystoreAESGCM_NoAuth` 校验、写后回读、大小上限、损坏隔离。
+- 实现 `PendingSendStore`：`hydrate/list/create/get/apply/retry/clearAll/prune/recoverAfterRestart/stats`，全部写操作串行化。
+- 新增 `pending-send-store-spec.mjs`（13 项）、`pending-send-persistence-spec.mjs`（6 项）、`pending-send-storage-perf.mjs`。
+- 新增 Android 仪器测试 `androidTest/.../KeychainStorageValidationTest.kt`（加密、KeyInfo、DataStore、备份、240 KiB/20 次重写）。
+- **退出标准**：不改 UI 也能证明“发送前可持久化、失败可阻断、并发不丢更新”；Android 实测报告见 `docs/v0.17/ANDROID-SECURE-STORAGE-VERIFY.md`。
 
 ### 阶段 2：发送编排与恢复（1.5–2 天）
 
@@ -441,7 +474,7 @@ fingerprint = SHA-256(JSON.stringify({
 ### 阶段 4：清理策略与产品化（0.5–1 天）
 
 - 7 天 TTL、24h accepted 清理、1h abandoned 清理、30 天墓碑。
-- `signOut`/`clearAuthorization` 接入 `clearAll()` 并纳入清理结果。
+- `clearAuthorization` 接入 `clearAll()` 并纳入清理结果（`signOut` 保留记录）。
 - UI 文案、设置页说明、无网络/存储不可用状态。
 - **退出标准**：退出登录后 Keychain/墓碑均无残留；过期记录不可见内容；存储失败阻断提示可操作。
 
@@ -514,7 +547,7 @@ fingerprint = SHA-256(JSON.stringify({
 7. **成功确认**：`accepted` 后在会话事件中看到同一 `rpcId` 的 `user/message`，记录转 `confirmed` 并清理；历史加载不会重复显示。
 8. **存储失败阻断**：Keychain 写失败/回读不一致/文档损坏时 `session/prompt` 与 `uploadFileBinary` 均零调用；UI 有明确阻断提示；恢复存储后可重试。
 9. **安全存储**：AsyncStorage dump 中不含消息文本、附件名、附件路径、回执；Keychain 文档为唯一 payload 存储；日志不打印内容。
-10. **过期与退出清理**：7 天未决记录 payload 清除、仅留非敏感墓碑；`signOut` 与 `clearAuthorization` 后读取 outbox 为空、墓碑为空，清理失败可见。
+10. **过期与退出清理**：7 天未决记录 payload 清除、仅留非敏感墓碑；`clearAuthorization` 前有未确认任务提示，清除后读取 outbox 为空、墓碑为空，清理失败可见；`signOut` 不清除记录。
 
 ### 7.2 兼容性验收
 
@@ -542,11 +575,11 @@ fingerprint = SHA-256(JSON.stringify({
 
 ---
 
-## 8. 需要你确认的三个决策（编码前）
+## 8. 评审确认结果（编码前决策已解决）
 
-1. **存储形态**：接受“Keychain 单文档 + 256 KiB 上限 + 最多 20 条”的方案吗？如果希望支持更多待发送记录，需要改为“Keychain 索引 + 分片 payload”，工作量约 +1 天。
-2. **文本哈希依赖**：允许新增纯 JS 的 `@noble/hashes`（约 5 KB，无原生代码）用于文本 SHA-256；附件哈希继续用现有 `react-native-blob-util.fs.hash`。
-3. **退出登录语义**：建议 `signOut`（断开连接、保留凭据）与 `clearAuthorization`（彻底清除）都清空待发送记录；如果你希望“断开后保留待发送，恢复连接还能重试”，则只在 `clearAuthorization` 清理，需要明确产品文案与恢复逻辑。
+1. **存储形态**：已确认“Keychain 单文档 + 256 KiB 上限 + 最多 20 条”；阶段 1 增加了容量、读写性能、并发写入和重启恢复测试。若后续需要更多记录，再评估“Keychain 索引 + 分片 payload”。
+2. **文本哈希依赖**：已确认新增 `@noble/hashes@2.4.0`（MIT，`package-lock.json` 锁定）；附件哈希继续用 `react-native-blob-util.fs.hash`。
+3. **退出登录语义**：已确认 `signOut`（断开连接、保留凭据）**保留**待发送记录；只有 `clearAuthorization` 清除，且清除前必须提示未确认任务。
 
 ---
 
