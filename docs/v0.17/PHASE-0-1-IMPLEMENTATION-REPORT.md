@@ -53,7 +53,7 @@
 2. **signOut/clearAuthorization 语义**: 设计文档已改为 `signOut` 保留记录、`clearAuthorization` 才清理并先提示；阶段 1 只提供 `clearAll()` 和绑定校验，UI 接线在阶段 2/4。
 3. **绑定服务实例**: `PendingSendRecord.binding` 保存 `{baseUrl, gatewayId, authContextHash, identityQuality}`；`evaluatePendingSendBinding()` 拒绝地址/gateway/授权上下文任一不匹配，缺 gateway 时按 `server-identity-unverifiable` 拒绝重试。
 4. **Android 验证**: `KeychainPendingSendPersistence` 在 Android 不传 `accessible`，显式传 `storage: KeystoreAESGCM_NoAuth`，并校验返回 storage；实测 5 项通过，详见 `ANDROID-SECURE-STORAGE-VERIFY.md`。
-5. **容量/性能/并发/终止**: 单文档限 20 条/256 KiB；40 个并发 create 全部保留；20 条×8KiB create 基准 55.1ms（Node 内存后端）；重启恢复测试覆盖 `sending→unknown`、`preparing→failed`。
+5. **容量/性能/并发/终止**: 单文档限 20 条/256 KiB；40 个并发 create 全部保留；20 条×8KiB create 多次运行 55–78ms（Node 内存后端）；重启恢复测试覆盖 `sending→unknown`、`preparing→failed`。
 6. **@noble/hashes**: `2.4.0` 已锁定，MIT；`sha256Hex` 有已知向量测试。
 7. **失败安全**: Keychain 写失败/回读不一致时 `create` 不落内存、不生成新记录；确认写入失败保持 `accepted`、requestId 不变；无网络调用（阶段 1 无网络层）。
 
@@ -73,7 +73,7 @@
 | `npm run test:pendingSendIdentity` | 11 通过，0 失败 |
 | `npm run test:pendingSendStore` | 13 通过，0 失败 |
 | `npm run test:pendingSendPersistence` | 6 通过，0 失败 |
-| `npm run test:pendingSendPerf` | PASS；20×8KiB create 55.1ms；200 次 list 71.9ms；文档 173,665 bytes |
+| `npm run test:pendingSendPerf` | PASS；20×8KiB create 55–78ms（多次运行）；200 次 list 72–100ms；文档 173,665 bytes |
 | `npm run typecheck` | PASS（tsc --noEmit 无输出） |
 
 ### 3.2 Android 仪器测试
