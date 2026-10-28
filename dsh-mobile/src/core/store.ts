@@ -42,9 +42,11 @@ import {
 import type { PendingSendBinding, PendingSendRecord, AttachmentDraft, PendingAttachment } from './pendingSend/types';
 import { guessImageMime, readFileBase64 } from './rpc/upload';
 import {
+  armP0PauseBeforePrompt,
   armP0TestRequest,
   isP0ConfirmationBlocked,
   shouldDropP0Response,
+  shouldPauseP0BeforePrompt,
   unblockP0Confirmation,
 } from '../dev/p0Verify';
 
@@ -1591,6 +1593,10 @@ export class Store {
         armP0TestRequest(record.requestId, true);
         console.log(`[p0-verify] arm requestId=${record.requestId}`);
       }
+      if (IS_DEV && trimmed.includes('[P0_PAUSE]')) {
+        armP0PauseBeforePrompt(record.requestId);
+        console.log(`[p0-verify] arm-pause requestId=${record.requestId}`);
+      }
     } catch (e) {
       await this.pendingSends.discardStaged(staged);
       throw e;
@@ -1799,6 +1805,11 @@ export class Store {
 
       // 先写 sending 并回读，再发 prompt。
       current = await this.pendingSends.apply(requestId, { type: 'begin-send' });
+      if (IS_DEV && shouldPauseP0BeforePrompt(requestId)) {
+        console.log(`[p0-verify] paused-before-prompt requestId=${requestId}`);
+        this.emit();
+        await new Promise<void>(() => {});
+      }
 
       try {
         await this.send(current.sessionId, current.text, outgoing, current.mode, requestId, {

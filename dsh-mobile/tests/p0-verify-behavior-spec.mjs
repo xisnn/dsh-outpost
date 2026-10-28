@@ -157,5 +157,64 @@ await check('其他 requestId 不受影响', async () => {
   assert.equal(isP0ConfirmationBlocked(b.requestId), false);
 });
 
+await check('任务 B 屏障：[P0_PAUSE] 在 sending 持久化后、prompt 之前暂停；重启恢复为 unknown 且不自动重发', async () => {
+  clearP0TestState();
+  const persistence = new MemoryPersistence();
+  const pending1 = new PendingSendStore({
+    persistence,
+    now: () => 1_800_000_000_000,
+    idFactory: () => `req-pause-1`,
+  });
+  await pending1.hydrate();
+  const prompts = [];
+  const store1 = new Store(
+    new DshConnection({ baseUrl: 'http://127.0.0.1:1', cookie: 'dsh-auth-test=v1' }),
+    {
+      pendingSendStore: pending1,
+      loadPendingBinding: async () => binding,
+      verifyPendingBinding: async () => undefined,
+    },
+  );
+  store1.api.prompt = async (params) => { prompts.push(params); };
+
+  // Start sendPending without awaiting completion (pauses before prompt)
+  let settled = false;
+  void store1.sendPending('s1', '[P0_PAUSE] task B').then(() => { settled = true; });
+  await new Promise((r) => setTimeout(r, 30));
+
+  assert.equal(settled, false);
+  assert.equal(prompts.length, 0);
+  const inSending = await pending1.get('req-pause-1');
+  assert.equal(inSending.state, 'sending');
+
+  // Simulate process restart reading the same persistence
+  const pending2 = new PendingSendStore({
+    persistence,
+    now: () => 1_800_000_005_000,
+    idFactory: () => `req-pause-2`,
+  });
+  const store2 = new Store(
+    new DshConnection({ baseUrl: 'http://127.0.0.1:1', cookie: 'dsh-auth-test=v1' }),
+    {
+      pendingSendStore: pending2,
+      loadPendingBinding: async () => binding,
+      verifyPendingBinding: async () => undefined,
+    },
+  );
+  store2.api.prompt = async (params) => { prompts.push(params); };
+
+  const hydrated = await pending2.hydrate();
+  assert.equal(hydrated.recovered.length, 1);
+  assert.equal(hydrated.recovered[0].from, 'sending');
+  assert.equal(hydrated.recovered[0].to, 'unknown');
+  assert.equal(prompts.length, 0);
+
+  const retried = await store2.retryPending('s1', 'req-pause-1');
+  assert.equal(retried.requestId, 'req-pause-1');
+  assert.equal(retried.state, 'accepted');
+  assert.equal(prompts.length, 1);
+  assert.equal(prompts[0].requestId, 'req-pause-1');
+});
+
 console.log(`结果：${pass} 通过，${fail} 失败`);
 if (fail > 0) process.exitCode = 1;

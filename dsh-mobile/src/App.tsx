@@ -471,13 +471,22 @@ export default function App() {
   // P0-1：启动时读取待发送缓存并恢复（不自动重发，只恢复可视状态）。
   useEffect(() => {
     let alive = true;
-    void pendingSends.hydrate().catch(() => {
-      if (alive) {
-        setSecureStorageError(
-          '待发送消息缓存读取失败；在恢复安全存储前发送会被阻止。请检查锁屏状态后重启 App。',
-        );
-      }
-    });
+    void pendingSends
+      .hydrate()
+      .then((res) => {
+        if (__DEV__) {
+          for (const rec of res.recovered) {
+            console.log(`[p0-verify] hydrate-recover requestId=${rec.requestId} from=${rec.from} to=${rec.to}`);
+          }
+        }
+      })
+      .catch(() => {
+        if (alive) {
+          setSecureStorageError(
+            '待发送消息缓存读取失败；在恢复安全存储前发送会被阻止。请检查锁屏状态后重启 App。',
+          );
+        }
+      });
     return () => {
       alive = false;
     };

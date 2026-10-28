@@ -154,6 +154,13 @@ export function ChatScreen({
         })
         .then((records) => {
           if (!alive) return;
+          if (__DEV__) {
+            for (const r of records) {
+              if (r.state === 'unknown') {
+                console.log(`[p0-verify] hydrated-unknown requestId=${r.requestId}`);
+              }
+            }
+          }
           setPendingSends(
             records.filter((r) => r.state !== 'confirmed' && r.state !== 'abandoned'),
           );
