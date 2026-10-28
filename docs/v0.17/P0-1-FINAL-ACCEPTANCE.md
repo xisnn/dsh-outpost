@@ -23,9 +23,10 @@ APK 签名：`CN=Android Debug, OU=Android`，证书 SHA-256 `fac61745dc0903786f
 ### 1.1 HTTP 401 诊断
 
 - 原始 DSH `dsh-web-3095.log` 记录了启动 token URL；同一进程的 token 已使用过多轮。
-- 另建隔离 DSH 测试实例（复制 profile、独立 port 3097，不重启用户 DSH），其 token URL 直接 `GET` 返回 **303 + Set-Cookie**（host 侧验证有效）。
-- 同一隔离 token 输入最新 release APK 后仍返回 `token exchange failed: HTTP 401`；另用 `127.0.0.1:3097` 和 `172.27.58.79:3097` 两种地址均复现。
+- DSH 源码 `dsh-client-connection/lib/index.js:294-299` 显示 launch token 是进程级 256-bit 随机值、进程存活期间可重复匹配；`cookieMaxAgeDays` 默认 30 天，因此不能把 401 直接归因于一次性/过期 token。
+- 另建隔离 DSH 测试实例（复制 profile、独立 port 3097，不重启用户 DSH），Token A 主机侧直接 `GET` 返回 **303 + Set-Cookie**；另生成 Token B，**未在主机侧访问交换 URL**，只输入最新 release APK，仍返回 `token exchange failed: HTTP 401`；`127.0.0.1:3097` 与 `172.27.58.79:3097` 均复现。
 - 因此当前证据不能支持“token 已过期/一次性消费”作为唯一原因；更符合 **303 后 App 端 native Cookie Jar 未取得/读回 dsh-auth cookie，重定向目标返回 401** 的历史问题。
+- 详细源码证据与 Token A/B 设计见 [PAIRING-401-ROOT-CAUSE.md](PAIRING-401-ROOT-CAUSE.md)。
 - 未关闭身份检查、未硬编码 gatewayId、未修改认证补丁；没有把 token/cookie 原文写入报告或提交。
 
 ## 2. PASS
