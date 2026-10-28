@@ -4,7 +4,7 @@
 分支：`feat/v0.17`
 代码提交：`5d38cdf`（PairScreen 配对错误掩盖修复）
 测试 APK：`dsh-mobile/android/app/build/outputs/apk/debug/app-debug.apk`
-APK SHA-256：`8A7DA281654D149088D55717070946411F3E58D94D43351EFE6B295B033D36D8`
+APK SHA-256：`0C1861F3EE70E2DF7E25376FF7A3E55D8490C5E009C77BF7624DF2CC0581C87C`
 APK 元数据：`versionCode=1`、`versionName=1.0`、`minSdk=24`、`targetSdk=36`；debug 测试包
 APK 签名：`CN=Android Debug, OU=Android`，证书 SHA-256 `fac61745dc0903786fb9ede62a962b399f7348f0bb6f899b8332667591033b9c`（测试签名）
 模拟器：`dsh_verify`（独立测试 AVD；未触碰正式验收 AVD）
@@ -14,7 +14,7 @@ APK 签名：`CN=Android Debug, OU=Android`，证书 SHA-256 `fac61745dc0903786f
 - 实际 Git HEAD：`13a838e`（文档提交）；代码提交 `5d38cdf`，回归测试提交 `9b641da`。
 - 正常配对/文本证据使用 commit `5d38cdf` 的 debug 测试包。
 - unknown 场景 A 的 `[P0_DROP]` 故障注入是临时 Debug-only 构建的未提交改动，测试后已撤销；未进入正式发布路径。
-- 最终 clean APK SHA-256：`8A7DA281654D149088D55717070946411F3E58D94D43351EFE6B295B033D36D8`；versionCode 1 / versionName 1.0 / `CN=Android Debug`。
+- 最终测试 APK SHA-256：`0C1861F3EE70E2DF7E25376FF7A3E55D8490C5E009C77BF7624DF2CC0581C87C`；versionCode 1 / versionName 1.0 / `CN=Android Debug`。
 - 注：注入 APK 与 clean APK 不是同一字节文件；上表将每个测试对应到其测试构建，避免把临时注入包冒充最终构建。
 - 所有测试 DSH 实例均为隔离实例（127.0.0.1:3097，adb reverse）；未触碰用户真实任务或正式验收 AVD。
 
@@ -26,7 +26,7 @@ APK 签名：`CN=Android Debug, OU=Android`，证书 SHA-256 `fac61745dc0903786f
 
 1. 最新测试 APK（commit `5d38cdf`，debug 测试包）已在 `dsh_verify` 完成真实 DSH 配对：`127.0.0.1:3097` 直连，首次 Token 交换 303 + Set-Cookie → 200，`/api/session/list` 成功，首页出现 2 个测试会话。
 2. 真实 ChatScreen 文本发送已实际完成：用户消息 `P0-1finaltext`，服务端 `agent/inbox/spliced` 的 `user` 事件 rpcId 为 `req-mvs8lr4r-1-1en7ldl1lf720s`，仅 1 条用户消息；UI 无重复气泡。
-3. 真实 ChatScreen unknown 安全重试、force-stop 恢复、图片/文件/混合附件选择器尚未完成。
+3. 真实 ChatScreen unknown 安全重试（任务 A）已全部 **PASS**；force-stop 恢复（任务 B）、图片/文件/混合附件选择器（任务 C）尚未完成。
 4. 真实磁盘满/256MiB 上限压力注入：**NOT TESTED**。
 
 ### 1.1 HTTP 401 诊断
@@ -54,8 +54,9 @@ APK 签名：`CN=Android Debug, OU=Android`，证书 SHA-256 `fac61745dc0903786f
 | 真实 App 配对（`127.0.0.1:3097` 直连） | PASS：303/200、Cookie Jar 有 dsh-auth、`/api/session/list` 成功、首页加载 2 个会话 |
 | 真实 ChatScreen 文本发送/accepted/confirmed | PASS：服务端 user 事件 rpcId `req-mvs8lr4r-1-1en7ldl1lf720s`，1 条消息；截图 `P0-1-FINAL-CHATSCREEN-TEXT.png` |
 | 真实 ChatScreen unknown 场景 A（回执丢失 + 自动对账） | PASS：同 requestId `req-mvsb90p7-1-1mt0nc00enraf9` 进入 unknown 后由真实 WebSocket user 事件自动 confirmed；服务端 1 条消息；无残留气泡 |
+| 真实 ChatScreen unknown 场景 B / 任务 A（隔离确认事件 + UI 手动安全重试） | **PASS**：requestId `req-mvsjv5ct-1-09qobvt0sqavwy` 真实 UI 点击安全重试后解除隔离、收到 `user/message` 事件、进入 `confirmed` 并完成 Keychain 清理，服务端仅 1 条用户消息 |
 | PairScreen 配对回归（登录成功后 ping 403/超时不得变体重试） | `pairing-spec` 13/13（测试提交 `9b641da`） |
-| Android debug build | PASS（APK SHA-256 `8A7DA2...36D8`） |
+| Android debug build | PASS（APK SHA-256 `0C1861...C87C`） |
 
 ## 3. FAIL / BLOCKED
 
@@ -64,7 +65,7 @@ APK 签名：`CN=Android Debug, OU=Android`，证书 SHA-256 `fac61745dc0903786f
 | 最新 APK 真实 DSH 配对 | **PASS** | 127.0.0.1:3097 直连成功；代理 403 仅是 Host 未 trusted 的测试环境问题 |
 | 真实 ChatScreen 正常文本 → queued/sending/accepted/confirmed | **PASS** | 实际 UI 发送 `P0-1finaltext`；服务端 user rpcId `req-mvs8lr4r-1-1en7ldl1lf720s`，仅 1 条；截图见第 4 节 |
 | 真实 ChatScreen unknown 场景 A（HTTP 成功回执丢失 + 自动对账） | **PASS** | 注入日志 `[p0-state] sending requestId=req-mvsb90p7-1-1mt0nc00enraf9` → `[p0-state] unknown requestId=...`；随后真实 WebSocket user 事件自动 reconcile 为 confirmed；UI 无残留待发送气泡，服务端仅 1 条用户消息 |
-| 真实 ChatScreen unknown 场景 B（隔离确认事件 + 手动安全重试） | **NOT TESTED / BLOCKED** | 需要 Debug-only 隔离 session/follow/reconcile 事件，当前尚未完成；未伪造 unknown 按钮或重试结果 |
+| 真实 ChatScreen unknown 场景 B / 任务 A（隔离确认事件 + 手动安全重试） | **PASS** | 真实 ChatScreen 发送 `[P0_BLOCK]TaskA_OK`（`req-mvsjv5ct-1-09qobvt0sqavwy`）→ unknown 稳定停留（截图 `P0-1-FINAL-CHATSCREEN-UNKNOWN.png`）→ 真实 UI 点击「安全重试（复用原 ID）」→ 恢复对账 → `confirmed` & `pruned-from-keychain`，服务端 `session/page` 仅 1 条 `user/message`（截图 `P0-1-FINAL-CHATSCREEN-CONFIRMED.png`） |
 | 真实 ChatScreen force-stop 后恢复 | **NOT TESTED / BLOCKED** | 尚未完成可控 `[P0_PAUSE]` 持久化屏障 + force-stop 用例 |
 | App 附件选择器图片/文件/混合发送 | **NOT TESTED / BLOCKED** | 尚未完成 App 附件选择器链路 |
 | 真实磁盘满 / 256MiB 上限 | **NOT TESTED** | 未尝试填满用户磁盘；仅做故障注入/异常映射 |
@@ -126,17 +127,20 @@ APK 签名：`CN=Android Debug, OU=Android`，证书 SHA-256 `fac61745dc0903786f
   - 用户点击真实 retry 时 debug-only 解除 block。
 - 覆盖确认入口：当前源码只有 `reconcilePendingNow()` 会执行 `confirm`；WebSocket/snapshot 最终都调用该入口。
 - 自动化：`npx tsx tests/p0-verify-spec.mjs` **3/3 PASS**；`npx tsx tests/p0-verify-behavior-spec.mjs` **4/4 PASS**；typecheck PASS。行为测试覆盖一次性注入、同 requestId 重试、提前确认隔离、身份验证失败不解除、confirmed 清理和其他 requestId 不受影响。
-- 真实 UI 结果：**FAIL / BLOCKED at confirmed**
-  - 真实 ChatScreen 已通过导航脚本进入；
-  - 测试消息 `[P0_BLOCK]A` 实际发送；
-  - 日志确认 `arm requestId=req-mvsgzvg4-1-1gvllpp1wqq9fc`；
-  - 日志确认 `unknown requestId=req-mvsgzvg4-1-1gvllpp1wqq9fc`；
-  - 截图确认「安全重试（复用原 ID）」按钮；
-  - 真实 UI 点击重试；
-  - 日志确认 `release-after-retry requestId=req-mvsgzvg4-1-1gvllpp1wqq9fc`，requestId 完全一致；
-  - 但重试后 UI 停在「已受理，等待会话确认」，隔离 DSH 实例的 `session/page` 返回 `records=0`（其 sessionController 不可用），未获得真实 confirmed 事件和 Keychain 清理证据。
-  - 因此任务 A 不标记 PASS；阻断在隔离 DSH 测试实例的 sessionController/事件流，不是发送状态机代码。
-  - unknown UI 截图：[P0-1-FINAL-CHATSCREEN-UNKNOWN.png](P0-1-FINAL-CHATSCREEN-UNKNOWN.png)
+- 真实 UI 结果：**TASK A PASS**
+  - **服务端根因与预检**：隔离 DSH 实例（port 3097，独立 `DSH_HOME`/`DSH_STATE_DIR`，`lanPort: 3082`）拥有完整可用的 `sessionController`。启动第一秒的 `active Service "sessionController" is unavailable` 只是 `dsh-plugin-mobile-gateway` 早于 `workspaceRegistry` 异步初始化完成的首次探活日志；此前客户端收不到 `confirmed` 事件的真实根因是：React Native Android (OkHttp) 的 `new WebSocket(url)` 不会自动附带 `CookieManager` 里的 cookie，必须在 `DshConnection.openWebSocket` 第 3 个参数显式传入 `{ headers: { Cookie } }`，否则 `/api/remote.mux` 握手返回 401。预检已通过全部 6 项（`session/create`、`session/prompt`、`session/page`、`source.rpcId`、`session/follow`、同 `requestId` 去重无重复消息）。
+  - 真实 ChatScreen 进入独立会话 `session-16bfb704-dadf-44ca-bd43-fda6f8ce3645`，发送测试消息 `[P0_BLOCK]TaskA_OK`；
+  - 状态迁移与隔离日志：
+    - `[p0-verify] arm requestId=req-mvsjv5ct-1-09qobvt0sqavwy`
+    - `[p0-verify] suppressed confirm requestId=req-mvsjv5ct-1-09qobvt0sqavwy`
+    - `[p0-verify] unknown requestId=req-mvsjv5ct-1-09qobvt0sqavwy`
+  - 真实 UI 稳定显示「结果未知」与「安全重试（复用原 ID）」按钮（截图：[P0-1-FINAL-CHATSCREEN-UNKNOWN.png](P0-1-FINAL-CHATSCREEN-UNKNOWN.png)）；
+  - 真实 UI 点击「安全重试（复用原 ID）」按钮后，日志确认同一 `requestId` 解锁、确认并从 Keychain 清理：
+    - `[p0-verify] release-after-retry requestId=req-mvsjv5ct-1-09qobvt0sqavwy`
+    - `[p0-verify] confirmed requestId=req-mvsjv5ct-1-09qobvt0sqavwy`
+    - `[p0-verify] pruned-from-keychain requestId=req-mvsjv5ct-1-09qobvt0sqavwy`
+  - 服务端 `session/page`（`throughSeq=34`）验证该会话仅存在 **1 条**用户消息：`seq=8, rpcId=req-mvsjv5ct-1-09qobvt0sqavwy, text=[P0_BLOCK]TaskA_OK`；
+  - 确认后 UI 截图（无重复气泡、无残留重试按钮）：[P0-1-FINAL-CHATSCREEN-CONFIRMED.png](P0-1-FINAL-CHATSCREEN-CONFIRMED.png)
 
 ## 10. 最终结论
 

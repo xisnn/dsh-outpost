@@ -521,10 +521,21 @@ export class DshConnection {
    */
   protected openWebSocket(url: string, cookie: string): WebSocket {
     const Ctor = this.WS as unknown as {
-      new (u: string, p?: string | string[]): WebSocket;
+      new (
+        u: string,
+        p?: string | string[] | null,
+        opts?: { headers?: Record<string, string> },
+      ): WebSocket;
     };
-    // cookie 参数留给子类覆盖用；原生容器已负责携带，这里不重复注入
-    void cookie;
+    const isReactNative =
+      typeof navigator !== 'undefined' &&
+      (navigator as { product?: string }).product === 'ReactNative';
+    if (isReactNative && cookie) {
+      // RN Android OkHttp WebSocket 不会自动携带 CookieManager 里的 cookie，
+      // 必须通过第 3 个参数显式传 Cookie，否则 /api/remote.mux 返回 401，
+      // 导致 ChatScreen 顶部报 error、session/follow 无法接收 user/message。
+      return new Ctor(url, undefined, { headers: { Cookie: cookie } });
+    }
     return new Ctor(url);
   }
 
