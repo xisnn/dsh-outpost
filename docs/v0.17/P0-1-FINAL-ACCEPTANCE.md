@@ -4,7 +4,7 @@
 分支：`feat/v0.17`
 代码提交：`5d38cdf`（PairScreen 配对错误掩盖修复）
 测试 APK：`dsh-mobile/android/app/build/outputs/apk/debug/app-debug.apk`
-APK SHA-256：`1C0E51D3408E7AF93F2026AE08F42DE17E9B40F9B836D9F68CA2D092C1A5C59A`
+APK SHA-256：`8A7DA281654D149088D55717070946411F3E58D94D43351EFE6B295B033D36D8`
 APK 元数据：`versionCode=1`、`versionName=1.0`、`minSdk=24`、`targetSdk=36`；debug 测试包
 APK 签名：`CN=Android Debug, OU=Android`，证书 SHA-256 `fac61745dc0903786fb9ede62a962b399f7348f0bb6f899b8332667591033b9c`（测试签名）
 模拟器：`dsh_verify`（独立测试 AVD；未触碰正式验收 AVD）
@@ -14,7 +14,7 @@ APK 签名：`CN=Android Debug, OU=Android`，证书 SHA-256 `fac61745dc0903786f
 - 实际 Git HEAD：`13a838e`（文档提交）；代码提交 `5d38cdf`，回归测试提交 `9b641da`。
 - 正常配对/文本证据使用 commit `5d38cdf` 的 debug 测试包。
 - unknown 场景 A 的 `[P0_DROP]` 故障注入是临时 Debug-only 构建的未提交改动，测试后已撤销；未进入正式发布路径。
-- 最终 clean APK SHA-256：`1C0E51D3408E7AF93F2026AE08F42DE17E9B40F9B836D9F68CA2D092C1A5C59A`；versionCode 1 / versionName 1.0 / `CN=Android Debug`。
+- 最终 clean APK SHA-256：`8A7DA281654D149088D55717070946411F3E58D94D43351EFE6B295B033D36D8`；versionCode 1 / versionName 1.0 / `CN=Android Debug`。
 - 注：注入 APK 与 clean APK 不是同一字节文件；上表将每个测试对应到其测试构建，避免把临时注入包冒充最终构建。
 - 所有测试 DSH 实例均为隔离实例（127.0.0.1:3097，adb reverse）；未触碰用户真实任务或正式验收 AVD。
 
@@ -55,7 +55,7 @@ APK 签名：`CN=Android Debug, OU=Android`，证书 SHA-256 `fac61745dc0903786f
 | 真实 ChatScreen 文本发送/accepted/confirmed | PASS：服务端 user 事件 rpcId `req-mvs8lr4r-1-1en7ldl1lf720s`，1 条消息；截图 `P0-1-FINAL-CHATSCREEN-TEXT.png` |
 | 真实 ChatScreen unknown 场景 A（回执丢失 + 自动对账） | PASS：同 requestId `req-mvsb90p7-1-1mt0nc00enraf9` 进入 unknown 后由真实 WebSocket user 事件自动 confirmed；服务端 1 条消息；无残留气泡 |
 | PairScreen 配对回归（登录成功后 ping 403/超时不得变体重试） | `pairing-spec` 13/13（测试提交 `9b641da`） |
-| Android debug build | PASS（APK SHA-256 `1C0E51...C59A`） |
+| Android debug build | PASS（APK SHA-256 `8A7DA2...36D8`） |
 
 ## 3. FAIL / BLOCKED
 
@@ -117,7 +117,7 @@ APK 签名：`CN=Android Debug, OU=Android`，证书 SHA-256 `fac61745dc0903786f
 
 ## 9. 任务 A：手动安全重试（本轮实现）
 
-- 代码提交：`5b8da43`
+- 代码提交：`9c0adce`
 - 新增 `dsh-mobile/src/dev/p0Verify.ts`：
   - 仅 Debug 调用；
   - 按 requestId 精确 block/unblock 确认；
@@ -125,7 +125,7 @@ APK 签名：`CN=Android Debug, OU=Android`，证书 SHA-256 `fac61745dc0903786f
   - `reconcilePendingNow()` 对所有被 block 的 requestId 跳过自动 confirm；
   - 用户点击真实 retry 时 debug-only 解除 block。
 - 覆盖确认入口：当前源码只有 `reconcilePendingNow()` 会执行 `confirm`；WebSocket/snapshot 最终都调用该入口。
-- 自动化：`npx tsx tests/p0-verify-spec.mjs` **3/3 PASS**；typecheck PASS。
+- 自动化：`npx tsx tests/p0-verify-spec.mjs` **3/3 PASS**；`npx tsx tests/p0-verify-behavior-spec.mjs` **4/4 PASS**；typecheck PASS。行为测试覆盖一次性注入、同 requestId 重试、提前确认隔离、身份验证失败不解除、confirmed 清理和其他 requestId 不受影响。
 - 真实 UI 结果：**NOT COMPLETED**。本轮构建/配对后，ChatScreen 导航操作未稳定落到目标会话，未获得 unknown + 安全重试按钮的实际 UI 证据，因此任务 A 不标记 PASS。
 
 ## 10. 最终结论
