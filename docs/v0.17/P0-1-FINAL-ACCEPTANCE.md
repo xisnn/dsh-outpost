@@ -115,7 +115,20 @@ APK 签名：`CN=Android Debug, OU=Android`，证书 SHA-256 `fac61745dc0903786f
 - 真实磁盘满未验证。
 - `/mgw/status` 的 App 侧完整 gatewayId 记录未单独完成。
 
-## 9. 最终结论
+## 9. 任务 A：手动安全重试（本轮实现）
+
+- 代码提交：`5b8da43`
+- 新增 `dsh-mobile/src/dev/p0Verify.ts`：
+  - 仅 Debug 调用；
+  - 按 requestId 精确 block/unblock 确认；
+  - `[P0_BLOCK]` 测试消息创建后 block 对应 requestId；
+  - `reconcilePendingNow()` 对所有被 block 的 requestId 跳过自动 confirm；
+  - 用户点击真实 retry 时 debug-only 解除 block。
+- 覆盖确认入口：当前源码只有 `reconcilePendingNow()` 会执行 `confirm`；WebSocket/snapshot 最终都调用该入口。
+- 自动化：`npx tsx tests/p0-verify-spec.mjs` **3/3 PASS**；typecheck PASS。
+- 真实 UI 结果：**NOT COMPLETED**。本轮构建/配对后，ChatScreen 导航操作未稳定落到目标会话，未获得 unknown + 安全重试按钮的实际 UI 证据，因此任务 A 不标记 PASS。
+
+## 10. 最终结论
 
 **P0-1 BLOCKED。** 真实 App 配对与文本发送 PASS，但 unknown 安全重试、force-stop 恢复及附件选择器关键链路未通过，因此不标记 COMPLETE、不合并 `main`、不移动 `v0.16.7` Tag、不创建 GitHub Release。
 
