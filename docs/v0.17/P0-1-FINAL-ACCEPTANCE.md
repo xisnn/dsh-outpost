@@ -4,7 +4,7 @@
 分支：`feat/v0.17`
 代码提交：`5d38cdf`（PairScreen 配对错误掩盖修复）
 测试 APK：`dsh-mobile/android/app/build/outputs/apk/debug/app-debug.apk`
-APK SHA-256：`01A30A444DACCC799A6F2DC0B3A9BBD93A10240E10FA091C4FDED05A7779745F`
+APK SHA-256：`1C0E51D3408E7AF93F2026AE08F42DE17E9B40F9B836D9F68CA2D092C1A5C59A`
 APK 元数据：`versionCode=1`、`versionName=1.0`、`minSdk=24`、`targetSdk=36`；debug 测试包
 APK 签名：`CN=Android Debug, OU=Android`，证书 SHA-256 `fac61745dc0903786fb9ede62a962b399f7348f0bb6f899b8332667591033b9c`（测试签名）
 模拟器：`dsh_verify`（独立测试 AVD；未触碰正式验收 AVD）
@@ -45,7 +45,7 @@ APK 签名：`CN=Android Debug, OU=Android`，证书 SHA-256 `fac61745dc0903786f
 | 真实 App 配对（`127.0.0.1:3097` 直连） | PASS：303/200、Cookie Jar 有 dsh-auth、`/api/session/list` 成功、首页加载 2 个会话 |
 | 真实 ChatScreen 文本发送/accepted/confirmed | PASS：服务端 user 事件 rpcId `req-mvs8lr4r-1-1en7ldl1lf720s`，1 条消息；截图 `P0-1-FINAL-CHATSCREEN-TEXT.png` |
 | PairScreen 配对回归（登录成功后 ping 403/超时不得变体重试） | `pairing-spec` 13/13（测试提交 `9b641da`） |
-| Android debug build | PASS（APK SHA-256 `01A30A...745F`） |
+| Android debug build | PASS（APK SHA-256 `1C0E51...C59A`） |
 
 ## 3. FAIL / BLOCKED
 

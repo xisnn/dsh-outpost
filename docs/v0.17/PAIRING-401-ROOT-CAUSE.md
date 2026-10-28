@@ -108,7 +108,7 @@ for candidate:
 - HTTP RPC：**PASS**（`session/list`、`session/create`、`session/page`）。
 - WebSocket：**PASS**（真实 ChatScreen 接收模型运行事件并显示“进行中/继续中”）。
 - 修复后 debug APK：
-  - APK SHA-256：`01A30A444DACCC799A6F2DC0B3A9BBD93A10240E10FA091C4FDED05A7779745`
+  - APK SHA-256：`1C0E51D3408E7AF93F2026AE08F42DE17E9B40F9B836D9F68CA2D092C1A5C59A`
   - versionCode 1 / versionName 1.0 / debug 签名
   - 该 APK 用于功能验收，不可作为正式发布包。
 
