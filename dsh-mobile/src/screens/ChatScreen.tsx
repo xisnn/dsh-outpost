@@ -142,7 +142,16 @@ export function ChatScreen({
       void store.pendingSends
         .ensureHydrated()
         .then(() => store.pendingSends.prune())
-        .then(() => store.pendingSends.list(sessionId))
+        .then((pruned) => {
+          if (__DEV__) {
+            for (const p of pruned) {
+              if (p.state === 'confirmed') {
+                console.log(`[p0-verify] pruned-from-keychain requestId=${p.requestId}`);
+              }
+            }
+          }
+          return store.pendingSends.list(sessionId);
+        })
         .then((records) => {
           if (!alive) return;
           setPendingSends(

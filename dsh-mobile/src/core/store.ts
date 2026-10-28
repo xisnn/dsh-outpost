@@ -48,6 +48,8 @@ import {
   unblockP0Confirmation,
 } from '../dev/p0Verify';
 
+const IS_DEV = typeof __DEV__ !== 'undefined' && __DEV__;
+
 /** 延迟加载待发送模块：避免 Store 的 Node 测试被 RN 原生模块解析链拖死。 */
 function createDefaultPendingSendStore(): PendingSendStore {
   // eslint-disable-next-line @typescript-eslint/no-var-requires
@@ -1585,7 +1587,7 @@ export class Store {
         attachments: staged,
         binding,
       });
-      if (__DEV__ && trimmed.includes('[P0_BLOCK]')) {
+      if (IS_DEV && trimmed.includes('[P0_BLOCK]')) {
         armP0TestRequest(record.requestId, true);
         console.log(`[p0-verify] arm requestId=${record.requestId}`);
       }
@@ -1609,7 +1611,7 @@ export class Store {
     await this.verifyPendingBinding(existing.binding, this.conn.baseUrl, this.conn.currentCookie);
     // Debug-only: if the test request was already confirmed by a real event,
     // do not start an unnecessary retry; clear the test block safely.
-    if (__DEV__ && existing.state === 'confirmed') {
+    if (IS_DEV && existing.state === 'confirmed') {
       unblockP0Confirmation(requestId);
       console.log(`[p0-verify] already-confirmed requestId=${requestId}`);
       return existing;
@@ -1620,7 +1622,7 @@ export class Store {
     // Unblock only after the controlled retry has started and completed its
     // local send transition. Any cached confirmation is replayed by reconcile
     // below, never before the retry state is safe.
-    if (__DEV__ && isP0ConfirmationBlocked(requestId)) {
+    if (IS_DEV && isP0ConfirmationBlocked(requestId)) {
       unblockP0Confirmation(requestId);
       console.log(`[p0-verify] release-after-retry requestId=${requestId}`);
       await this.reconcilePendingNow(sessionId);
@@ -1827,7 +1829,7 @@ export class Store {
         throw e;
       }
 
-      if (__DEV__ && shouldDropP0Response(requestId)) {
+      if (IS_DEV && shouldDropP0Response(requestId)) {
         const lost = await this.pendingSends.apply(requestId, {
           type: 'unknown-failure',
           code: 'simulated-response-lost',
@@ -1873,7 +1875,7 @@ export class Store {
       .list(sessionId)
       .then(async (records) => {
         for (const record of records) {
-          if (__DEV__ && isP0ConfirmationBlocked(record.requestId)) {
+          if (IS_DEV && isP0ConfirmationBlocked(record.requestId)) {
             console.log(`[p0-verify] suppressed confirm requestId=${record.requestId}`);
             continue;
           }
@@ -1883,6 +1885,9 @@ export class Store {
           ) {
             try {
               await this.pendingSends.apply(record.requestId, { type: 'confirm' });
+              if (IS_DEV) {
+                console.log(`[p0-verify] confirmed requestId=${record.requestId}`);
+              }
             } catch {
               // 可能已被其他路径确认；忽略非法迁移
             }
