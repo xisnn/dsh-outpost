@@ -141,13 +141,12 @@ export function ChatScreen({
     const reload = () => {
       void store.pendingSends
         .ensureHydrated()
+        .then(() => store.pendingSends.prune())
         .then(() => store.pendingSends.list(sessionId))
         .then((records) => {
           if (!alive) return;
           setPendingSends(
-            records.filter(
-              (r) => r.state !== 'confirmed' && r.state !== 'abandoned' && r.state !== 'expired',
-            ),
+            records.filter((r) => r.state !== 'confirmed' && r.state !== 'abandoned'),
           );
         })
         .catch(() => {

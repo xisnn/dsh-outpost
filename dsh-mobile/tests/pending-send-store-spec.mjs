@@ -221,11 +221,18 @@ await check('文档大小上限：拒绝超大文档', async () => {
   assert.equal((await store.list()).length, 0);
 });
 
-await check('过期清理：未决记录到期后 prune 删除', async () => {
+await check('过期提示：未决记录到期后先标记 expired 并保留提示', async () => {
   clock = CLOCK0;
   const { store } = await hydrated();
   await store.create(input({ text: 'old', expiresAt: clock + 1000 }));
   clock += 2000;
+  const affected = await store.prune();
+  assert.equal(affected.length, 1);
+  const afterExpire = await store.list();
+  assert.equal(afterExpire.length, 1);
+  assert.equal(afterExpire[0].state, 'expired');
+  // 超过过期提示保留期后真正删除
+  clock += 2 * 60 * 60 * 1000;
   const removed = await store.prune();
   assert.equal(removed.length, 1);
   assert.equal((await store.list()).length, 0);

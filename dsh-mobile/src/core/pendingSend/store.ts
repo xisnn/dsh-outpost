@@ -11,6 +11,7 @@
 import {
   DEFAULT_ABANDONED_TTL_MS,
   DEFAULT_ACCEPTED_TTL_MS,
+  DEFAULT_EXPIRED_TTL_MS,
   DEFAULT_PENDING_SEND_LIMITS,
   DEFAULT_PENDING_SEND_TTL_MS,
   PENDING_SEND_SCHEMA,
@@ -53,6 +54,7 @@ export interface PendingSendStoreOptions {
   ttlMs?: number;
   acceptedTtlMs?: number;
   abandonedTtlMs?: number;
+  expiredTtlMs?: number;
 }
 
 export type PendingSendStoreErrorCode =
@@ -79,6 +81,11 @@ export class PendingSendStoreError extends Error {
     this.code = code;
     if (cause !== undefined) this.cause = cause;
   }
+}
+
+export interface PendingSendClearResult {
+  records: 'cleared' | 'failed';
+  staging: 'cleared' | 'failed';
 }
 
 export class PendingSendBindingError extends Error {
@@ -192,6 +199,7 @@ export class PendingSendStore {
   private readonly ttlMs: number;
   private readonly acceptedTtlMs: number;
   private readonly abandonedTtlMs: number;
+  private readonly expiredTtlMs: number;
 
   private doc: PendingSendDocumentState | null = null;
   /** 串行化所有读写；一条 Promise 链就是进程内 mutex。 */
@@ -207,6 +215,7 @@ export class PendingSendStore {
     this.ttlMs = options.ttlMs ?? DEFAULT_PENDING_SEND_TTL_MS;
     this.acceptedTtlMs = options.acceptedTtlMs ?? DEFAULT_ACCEPTED_TTL_MS;
     this.abandonedTtlMs = options.abandonedTtlMs ?? DEFAULT_ABANDONED_TTL_MS;
+    this.expiredTtlMs = options.expiredTtlMs ?? DEFAULT_EXPIRED_TTL_MS;
   }
 
   get isHydrated(): boolean {
@@ -361,29 +370,47 @@ export class PendingSendStore {
     const doc = this.requireDoc();
     const now = this.now();
     const removed: PendingSendRecord[] = [];
+    const expiredNow: PendingSendRecord[] = [];
     const keep: PendingSendRecord[] = [];
     for (const record of doc.records) {
       let remove = false;
-      if (record.state === 'confirmed' || record.state === 'expired') {
+      if (record.state === 'confirmed') {
         remove = true;
+      } else if (record.state === 'expired') {
+        // 过期记录先保留 1h 展示提示；附件在进入 expired 时已清理。
+        remove = now - record.updatedAt >= this.expiredTtlMs;
       } else if (record.state === 'abandoned') {
         remove = now - record.updatedAt >= this.abandonedTtlMs;
       } else if (record.state === 'accepted') {
         remove = now - (record.acceptedAt ?? record.updatedAt) >= this.acceptedTtlMs;
       } else if (now >= record.expiresAt) {
-        remove = true;
+        const expired = transitionPendingSend(record, { type: 'expire' }, now);
+        expiredNow.push(expired);
+        keep.push(expired);
+        continue;
       }
       if (remove) removed.push(cloneRecord(record));
       else keep.push(record);
     }
-    if (removed.length > 0) {
+    if (removed.length > 0 || expiredNow.length > 0) {
       await this.save({ ...doc, records: keep });
-      // 文件清理失败不应该让记录重新出现；孤儿文件由下次 cleanupOrphans 处理。
-      await this.staging
-        .removeAttachments(removed.flatMap((r) => r.attachments))
-        .catch(() => undefined);
+      // 共享同一 stagedUri 的未决记录可能仍在使用该文件；只清理不再被引用的。
+      const stillReferenced = new Set(
+        keep
+          .filter(
+            (r) =>
+              r.state !== 'confirmed' &&
+              r.state !== 'abandoned' &&
+              r.state !== 'expired',
+          )
+          .flatMap((r) => r.attachments.map((a) => a.stagedUri)),
+      );
+      const cleanupAttachments = [...removed, ...expiredNow]
+        .flatMap((r) => r.attachments)
+        .filter((a) => !stillReferenced.has(a.stagedUri));
+      await this.staging.removeAttachments(cleanupAttachments).catch(() => undefined);
     }
-    return removed;
+    return [...removed, ...expiredNow];
   }
 
   /** 把 UI 草稿复制到私有暂存区并计算真实字节 SHA-256。 */
@@ -576,15 +603,21 @@ export class PendingSendStore {
     });
   }
 
-  async clearAll(): Promise<void> {
+  async clearAll(): Promise<PendingSendClearResult> {
     return this.runExclusive(async () => {
       const doc = this.requireDoc();
-      // save() 会递增 revision 并写入空记录；不要在此后重置 revision。
-      await this.save({ ...doc, records: [] });
+      // 先清记录：记录写入失败时目录尚未动，调用方仍可重试并保留完整数据。
+      try {
+        await this.save({ ...doc, records: [] });
+      } catch (e) {
+        throw new PendingSendStoreError('write-failed', '待发送记录清除失败', e);
+      }
+      // 记录已清除后，目录清理失败只报告 partial；残留文件由下次启动 cleanupOrphans 继续清理。
       try {
         await this.staging.clearAll();
-      } catch (e) {
-        throw new PendingSendStoreError('cleanup-failed', '附件暂存目录清理失败', e);
+        return { records: 'cleared', staging: 'cleared' } as const;
+      } catch {
+        return { records: 'cleared', staging: 'failed' } as const;
       }
     });
   }

@@ -50,6 +50,16 @@ check('App 启动 hydrate PendingSendStore（注入真实附件暂存）', () =>
   assert.match(app, /ReactNativePendingSendStaging/);
 });
 
+check('普通断开连接不清理待发送记录，只有彻底清除授权才清理', () => {
+  const signOutStart = app.indexOf('const signOut =');
+  const clearStart = app.indexOf('const clearAuthorization =');
+  assert.ok(signOutStart >= 0 && clearStart > signOutStart);
+  const signOutSeg = app.slice(signOutStart, clearStart);
+  assert.doesNotMatch(signOutSeg, /pendingSends\.(clearAll|discardStaged)/);
+  const clearSeg = app.slice(clearStart, clearStart + 9000);
+  assert.match(clearSeg, /pendingSends\.clearAll\(\)/);
+});
+
 console.log('');
 console.log(`结果：${pass} 通过，${fail} 失败`);
 if (fail > 0) process.exit(1);

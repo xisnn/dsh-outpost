@@ -74,7 +74,7 @@
 - ChatScreen UI：已完成（截图；fixture 限制见 1.2）。
 - 远端身份验证：已实现并真实 DSH 验证（1.3）。
 - accepted/confirmed 乱序：已测试（1.4）。
-- 仍存在的限制：真实 DSH 附件上传 e2e 未做（本报告第 4 节）；不是 mock 冒充。
+- 仍存在的限制：阶段 4 已补齐真实 DSH 附件上传 e2e（见阶段 4 报告 1.1）；真实 ChatScreen accepted/confirmed 用户操作仍未完成（阶段 4 报告 1.2）。
 
 ---
 
@@ -185,8 +185,8 @@ P0HARNESS PASS force-stop-restart-recovery
 
 ## 4. 剩余风险与未完成项
 
-1. **真实 DSH 附件上传 e2e 未做**：Node 和 Android harness 的 `uploadBinary` 是 mock；真实 DSH 的 `uploadFileBinary` 对真实文件/图片尚未做网络级验收。真实 DSH 文本 prompt 已完成。
-2. **ChatScreen UI fixture 不是真实发送产生的待发送记录**：真实组件/真实配对/真实会话，但气泡由调试 fixture 创建；真实 prompt 的 UI 发送尚未逐步截图。
+1. ~~**真实 DSH 附件上传 e2e 未做**~~：阶段 4 已补齐真实 `uploadFileBinary → prompt → page`（图片/文件/混合、回执丢失、非法 receipt、上传中断、prompt 明确失败）。
+2. **ChatScreen UI fixture 不是真实发送产生的待发送记录**：阶段 4 已补实际用户操作触发 failed 状态（见 `PHASE-4-ACTUAL-CHATSCREEN-FAILED.png`）；accepted/confirmed 仍未完成。
 3. **Android 原生 Keychain 故障注入**：写失败/回读失败在 JS 持久化边界注入；未强行制造 Keystore 原生错误。原生成功路径已实测。
 4. **附件上传回执的服务端有效性**：复用条件是本地暂存 SHA-256 + 保存的 receipt；没有做服务端 receipt 有效性查询（服务端没有单独查询接口）；若服务端已清理 receipt，当前行为是 prompt 收到 attachment 错误后标记失败，不自动重发。
 5. **附件暂存上限**：单文件 50MiB / 总 256MiB，目录位于 DocumentDir；未来可在设置中调整。
@@ -200,7 +200,7 @@ P0HARNESS PASS force-stop-restart-recovery
 
 进入阶段 4 前必须补：
 1. 真实 DSH `uploadFileBinary` 的图片/文件/混合 e2e（真实网络，不接受 mock 冒充）；
-2. 真实 ChatScreen 中由用户实际操作产生的待发送/失败/未知状态截图验收；
+2. 真实 ChatScreen 中由用户实际操作产生的 accepted/confirmed 状态截图验收；failed 状态已由阶段 4 补测。
 3. 服务端 receipt 失效时的错误码识别与可控重传验证。
 
 ---
