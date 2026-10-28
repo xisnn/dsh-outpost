@@ -41,4 +41,15 @@ for (const bad of ['', '   ', 'hello world', '只有中文', 'http://h:1/no-toke
 assert.equal(normalizeBaseUrl('http://h:1///'), 'http://h:1');
 passed += 1;
 
+// PairScreen 回归：登录成功后的 ping 失败不能触发 token 变体重试，
+// 否则真实 403/超时会再次被变体 token 的 401 覆盖。
+const { readFileSync } = await import('node:fs');
+const pairScreen = readFileSync(new URL('../src/screens/PairScreen.tsx', import.meta.url), 'utf8');
+assert.match(pairScreen, /只有 token 交换失败才尝试下一个候选/);
+const loginCatch = pairScreen.indexOf('lastErr = e;');
+const pingCall = pairScreen.indexOf('const ok = await store.ping();');
+assert.ok(loginCatch >= 0 && pingCall > loginCatch, 'ping 必须位于登录失败 catch 之后');
+assert.ok(!/try \{\s*cookie = await store\.loginWithToken\(candidate\);\s*const ok = await store\.ping\(\);/s.test(pairScreen));
+passed += 1;
+
 console.log(`结果：${passed} 通过，0 失败`);
