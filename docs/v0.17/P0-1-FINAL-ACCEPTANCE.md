@@ -15,8 +15,8 @@ APK 签名：`CN=Android Debug, OU=Android`，证书 SHA-256 `fac61745dc0903786f
 
 阻断项：
 
-1. 最新 release 测试 APK（commit `2988688`）在 `dsh_verify` 安装成功，但真实 DSH 配对 token 返回 HTTP 401（`token exchange failed: HTTP 401`），无法在该 APK 上完成真实 ChatScreen 配对。
-2. 因此真实 ChatScreen accepted/confirmed 用户操作、unknown 回执丢失重试、force-stop 恢复均未在最新 APK 上完成。
+1. 最新测试 APK（commit `5d38cdf`，debug 测试包）已安装到 `dsh_verify`；首次 Token 交换与 Cookie Jar 已通过脱敏链路验证，但 `/api/session/list` 在测试代理 Host 下返回 403，完整配对尚未完成，因此真实 ChatScreen 仍无法开始。
+2. 因此真实 ChatScreen accepted/confirmed 用户操作、unknown 回执丢失重试、force-stop 恢复均未在最新 APK 上完成；旧构建截图不计入。
 3. App 附件选择器发送图片/文件/混合消息也未完成；真实 DSH 附件链路只由独立脚本验证，不能冒充 App 端到端。
 4. 真实磁盘满/256MiB 上限压力注入：**NOT TESTED**。
 
@@ -42,6 +42,7 @@ APK 签名：`CN=Android Debug, OU=Android`，证书 SHA-256 `fac61745dc0903786f
 | `npm test` | PASS，exit 0 |
 | `npm run typecheck` | PASS |
 | `npm run test:integration` | 61/61 |
+| PairScreen 配对回归（登录成功后 ping 403/超时不得变体重试） | `pairing-spec` 13/13（测试提交 `9b641da`） |
 | Android debug build | PASS |
 
 ## 3. FAIL / BLOCKED
