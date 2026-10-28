@@ -123,17 +123,24 @@ export function PairScreen() {
       for (const candidate of candidates) {
         const conn = new DshConnection({ baseUrl: trimmedUrl });
         const store = new Store(conn);
+
+        // 只有 token 交换失败才尝试下一个候选；一旦 cookie 已拿到，
+        // 后续 ping 失败不能再回退到另一个 token。否则第一个正确 token
+        // 成功后被 403/网络错误打断，会被变体 token 的 401 覆盖，用户
+        // 最终只看到误导性的“token exchange failed: HTTP 401”。
         try {
           cookie = await store.loginWithToken(candidate);
-          const ok = await store.ping();
-          if (!ok) throw new Error('cookie 已拿到但验证失败，请检查服务是否正常');
-          store.close();
-          break;
         } catch (e) {
           lastErr = e;
           store.close();
           cookie = undefined;
+          continue;
         }
+
+        const ok = await store.ping();
+        store.close();
+        if (!ok) throw new Error('cookie 已拿到但验证失败，请检查服务是否正常');
+        break;
       }
       if (!cookie) throw lastErr instanceof Error ? lastErr : new Error(String(lastErr));
 
