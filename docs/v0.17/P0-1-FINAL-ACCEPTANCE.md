@@ -15,9 +15,9 @@ APK 签名：`CN=Android Debug, OU=Android`，证书 SHA-256 `fac61745dc0903786f
 
 阻断项：
 
-1. 最新测试 APK（commit `5d38cdf`，debug 测试包）已安装到 `dsh_verify`；首次 Token 交换与 Cookie Jar 已通过脱敏链路验证，但 `/api/session/list` 在测试代理 Host 下返回 403，完整配对尚未完成，因此真实 ChatScreen 仍无法开始。
-2. 因此真实 ChatScreen accepted/confirmed 用户操作、unknown 回执丢失重试、force-stop 恢复均未在最新 APK 上完成；旧构建截图不计入。
-3. App 附件选择器发送图片/文件/混合消息也未完成；真实 DSH 附件链路只由独立脚本验证，不能冒充 App 端到端。
+1. 最新测试 APK（commit `5d38cdf`，debug 测试包）已在 `dsh_verify` 完成真实 DSH 配对：`127.0.0.1:3097` 直连，首次 Token 交换 303 + Set-Cookie → 200，`/api/session/list` 成功，首页出现 2 个测试会话。
+2. 真实 ChatScreen 文本发送已实际完成：用户消息 `P0-1finaltext`，服务端 `agent/inbox/spliced` 的 `user` 事件 rpcId 为 `req-mvs8lr4r-1-1en7ldl1lf720s`，仅 1 条用户消息；UI 无重复气泡。
+3. 真实 ChatScreen unknown 安全重试、force-stop 恢复、图片/文件/混合附件选择器尚未完成。
 4. 真实磁盘满/256MiB 上限压力注入：**NOT TESTED**。
 
 ### 1.1 HTTP 401 诊断
@@ -42,28 +42,34 @@ APK 签名：`CN=Android Debug, OU=Android`，证书 SHA-256 `fac61745dc0903786f
 | `npm test` | PASS，exit 0 |
 | `npm run typecheck` | PASS |
 | `npm run test:integration` | 61/61 |
+| 真实 App 配对（`127.0.0.1:3097` 直连） | PASS：303/200、Cookie Jar 有 dsh-auth、`/api/session/list` 成功、首页加载 2 个会话 |
+| 真实 ChatScreen 文本发送/accepted/confirmed | PASS：服务端 user 事件 rpcId `req-mvs8lr4r-1-1en7ldl1lf720s`，1 条消息；截图 `P0-1-FINAL-CHATSCREEN-TEXT.png` |
 | PairScreen 配对回归（登录成功后 ping 403/超时不得变体重试） | `pairing-spec` 13/13（测试提交 `9b641da`） |
-| Android debug build | PASS |
+| Android debug build | PASS（APK SHA-256 `01A30A...745F`） |
 
 ## 3. FAIL / BLOCKED
 
 | 项目 | 状态 | 原因 |
 |---|---|---|
-| 最新 APK 真实 DSH 配对 | **FAIL / PARTIAL** | 首次 token 交换已 PASS（303 + Set-Cookie → 200，Cookie Jar 有 dsh-auth）；`/api/session/list` 403 后旧 PairScreen 用变体 token 重试得到 401。修复后 UI 尚未重新完成完整配对 |
-| 真实 ChatScreen 正常文本 → queued/sending/accepted/confirmed | **NOT TESTED / BLOCKED** | 完整配对未完成；旧构建的 accepted/confirmed 不是当前验收 |
-| 真实 ChatScreen unknown → 用户点击安全重试 | **NOT TESTED / BLOCKED** | 同上 |
+| 最新 APK 真实 DSH 配对 | **PASS** | 127.0.0.1:3097 直连成功；代理 403 仅是 Host 未 trusted 的测试环境问题 |
+| 真实 ChatScreen 正常文本 → queued/sending/accepted/confirmed | **PASS** | 实际 UI 发送 `P0-1finaltext`；服务端 user rpcId `req-mvs8lr4r-1-1en7ldl1lf720s`，仅 1 条；截图见第 4 节 |
+| 真实 ChatScreen unknown → 用户点击安全重试 | **NOT TESTED / BLOCKED** | force-stop 发送未成功落地，尚未获得 unknown UI |
 | 真实 ChatScreen force-stop 后恢复 | **NOT TESTED / BLOCKED** | 同上 |
-| App 附件选择器图片/文件/混合发送 | **NOT TESTED / BLOCKED** | 完整配对未完成，未进入 ChatScreen |
+| App 附件选择器图片/文件/混合发送 | **NOT TESTED / BLOCKED** | 尚未完成 App 附件选择器链路 |
 | 真实磁盘满 / 256MiB 上限 | **NOT TESTED** | 未尝试填满用户磁盘；仅做故障注入/异常映射 |
 
 ## 4. 真实 App / 模拟器证据
 
-- 脱敏代理已证明 Android 首次 Token 交换：`GET /?token=...` → 303 + Set-Cookie；跟随 `GET /` → 200；Cookie Jar `dsh-auth` present；详见 [PAIRING-401-ROOT-CAUSE.md](PAIRING-401-ROOT-CAUSE.md)。
-- 最终 401 来自 `PairScreen` 的变体 token 重试；修复提交 `5d38cdf`。
-- 旧调试构建的实际用户操作 failed 状态：
-  `docs/v0.17/PHASE-4-ACTUAL-CHATSCREEN-FAILED.png`（实际 UI，但不是最新 APK 的 accepted/confirmed 证据）。
-- fixture unknown/accepted 截图：`PHASE-3-CHATSCREEN-PENDING.png`，仅视觉 fixture，不计入 PASS。
-- 修复后的 debug APK 已构建，未完成完整配对后的 ChatScreen 测试；未伪造 UI 结果。
+- 真实 App 配对：`dsh_verify` + 隔离 DSH `127.0.0.1:3097`（adb reverse），首页显示 1 个目录、2 个会话。
+- 真实 ChatScreen 实际 UI 发送：
+  - 消息文本：`P0-1finaltext`
+  - 会话：`session-ea7ca051-be8a-46fd-9a36-140e98bcbfd0`
+  - 服务端 `agent/inbox/spliced` 的 user 事件 rpcId：`req-mvs8lr4r-1-1en7ldl1lf720s`
+  - 服务端用户消息数量：**1**
+  - UI 截图：[P0-1-FINAL-CHATSCREEN-TEXT.png](P0-1-FINAL-CHATSCREEN-TEXT.png)
+- 旧调试构建的实际 failed 状态截图 `PHASE-4-ACTUAL-CHATSCREEN-FAILED.png` 仅作历史对照，不作为当前 PASS 证据。
+- fixture unknown/accepted 截图 `PHASE-3-CHATSCREEN-PENDING.png` 仅视觉 fixture，不计入 PASS。
+- 真实 ChatScreen 的 unknown、force-stop、附件选择器尚未完成，未伪造结果。
 
 ## 5. 真实 DSH 服务端证据
 
@@ -84,23 +90,23 @@ APK 签名：`CN=Android Debug, OU=Android`，证书 SHA-256 `fac61745dc0903786f
 
 ## 7. 最小修复措施
 
-1. 将测试代理 Host 加入隔离 DSH 的 `--trusted-host`，或直接使用 DSH 可信 Host，消除 `/api/session/list` 403。
-2. 使用独立 DSH 测试实例的新 token 重新配对修复后的 APK，先证明正确 token 成功、错误 token 401。
-3. 在 `dsh_verify` 上重新执行真实 ChatScreen 文本 accepted/confirmed、unknown 重试、force-stop 恢复。
-4. 用 App 附件选择器发送图片/文件/混合，并在真实 DSH `session/page` 验证 requestId、附件和单条消息。
-5. 在独立测试目录用可靠文件系统故障注入验证 256MiB/复制失败/空间不足；真实磁盘满保持 NOT TESTED。
-6. 完成上述后重跑 `npm test`、`typecheck`、61 项集成测试和 Android 测试，才可标记 P0-1 COMPLETE。
+1. 真实 App 配对已通过（`127.0.0.1:3097` + adb reverse）；无需再修改认证代码。
+2. 继续完成真实 ChatScreen unknown 安全重试与 force-stop 恢复。
+3. 用 App 附件选择器发送图片/文件/混合，并在真实 DSH `session/page` 验证 rpcId、附件和单条消息。
+4. 在独立测试目录用可靠文件系统故障注入验证 256MiB/复制失败/空间不足；真实磁盘满保持 NOT TESTED。
+5. 完成后重跑相关门禁，才可标记 P0-1 COMPLETE。
 
 ## 8. 未解决问题
 
-- 完整配对仍被测试环境 Host/trust 与 UI 自动化阻断；需要重跑修复后的 APK。
-- 真实 ChatScreen 文本/附件端到端未完成。
+- 真实 ChatScreen unknown 安全重试、force-stop 恢复未完成。
+- 真实 App 附件选择器图片/文件/混合链路未完成。
 - 错误 Token App 首次交换、已消费 Token App 用例未单独执行。
 - 真实磁盘满未验证。
+- `/mgw/status` 的 App 侧完整 gatewayId 记录未单独完成。
 
 ## 9. 最终结论
 
-**P0-1 BLOCKED。** 不标记 COMPLETE，不合并 `main`，不移动 `v0.16.7` Tag，不创建 GitHub Release。待真实 DSH 配对 token 恢复并在最新 APK 上完成真实 ChatScreen 文本/附件端到端后，才能重新评估 A. P0-1 COMPLETE。
+**P0-1 BLOCKED。** 真实 App 配对与文本发送 PASS，但 unknown 安全重试、force-stop 恢复及附件选择器关键链路未通过，因此不标记 COMPLETE、不合并 `main`、不移动 `v0.16.7` Tag、不创建 GitHub Release。
 
 ---
 

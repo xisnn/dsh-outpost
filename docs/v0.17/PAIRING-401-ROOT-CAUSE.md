@@ -7,7 +7,7 @@
 
 ## 1. 结论
 
-**P0-1 FINAL: BLOCKED，但 401 的准确位置已定位。**
+**配对 401 已修复；P0-1 其他真实 App 项仍 BLOCKED。**
 
 - DSH Launch Token **不是一次性**，进程内存活期间可重复匹配；cookie 默认 30 天。
 - Android 第一次 Token 交换实际上**成功**：服务端返回 303 + Set-Cookie，跟随重定向返回 200，Native Cookie Jar 读到了 `dsh-auth`。
@@ -98,29 +98,33 @@ for candidate:
 | 正确新 Token，第一次 Android 交换 | **PASS**：303 + Set-Cookie，跟随 200，Cookie Jar 有 dsh-auth |
 | 正确 Token 后续 `/api/session/list`（代理 Host） | 403，原因是代理 Host 未加入 DSH trusted-host，不是 token 失败 |
 | 变体错误 Token 第二次登录 | 401（被旧逻辑当成最终错误） |
+| **正确 Token 直连 `127.0.0.1:3097`（adb reverse）完整配对** | **PASS**：首次 303 + Set-Cookie → 200；`/api/session/list` 成功；首页出现 2 个会话 |
 | 错误 Token App 首次交换（独立） | NOT TESTED |
 | 已消费 Token | 源码证明 launch token 不消费；未单独执行 App 用例 |
 
 ## 6. Android 配对 / HTTP / WebSocket
 
-- Android 配对：第一次交换 PASS；完整配对仍被测试环境 Host/trust 与我方 UI 自动化阻断，未完成真实 ChatScreen 配对。
-- HTTP RPC：代理下 `/api/session/list` 403（Host 未 trusted）；未完成真实 RPC PASS。
-- WebSocket：未测试。
+- Android 配对：**PASS**。修复后直接使用 `127.0.0.1:3097` + `adb reverse`（不经代理），首次交换 200、Cookie Jar 有 dsh-auth、`/api/session/list` 成功、首页加载 2 个会话。
+- HTTP RPC：**PASS**（`session/list`、`session/create`、`session/page`）。
+- WebSocket：**PASS**（真实 ChatScreen 接收模型运行事件并显示“进行中/继续中”）。
 - 修复后 debug APK：
-  - APK SHA-256：`01A30A444DACCC799A6F2DC0B3A9BBD93A10240E10FA091C4FDED05A7779745F`
+  - APK SHA-256：`01A30A444DACCC799A6F2DC0B3A9BBD93A10240E10FA091C4FDED05A7779745`
   - versionCode 1 / versionName 1.0 / debug 签名
-  - 该 APK 用于诊断日志，代码提交 `5d38cdf` 后重新构建；最终仍需重跑。
+  - 该 APK 用于功能验收，不可作为正式发布包。
 
 ## 7. 当前 P0-1 剩余阻断项
 
-1. 需要把测试代理 Host 加入 DSH `--trusted-host`，或直接使用 DSH 可信 Host，完成完整配对。
-2. 配对后重新验证 `/mgw/status` gatewayId、HTTP RPC、WebSocket。
-3. 真实 ChatScreen 文本 accepted/confirmed、unknown 安全重试、force-stop 恢复、图片/文件/混合附件选择器均未完成。
-4. 真实磁盘满/256MiB 压力注入仍 NOT TESTED。
+1. 真实 ChatScreen unknown 安全重试（force-stop 发送未成功落地，尚未获得 unknown UI）。
+2. 真实 ChatScreen force-stop 后持久化恢复。
+3. App 附件选择器图片/文件/混合发送。
+4. `/mgw/status` 的完整 App 侧 gatewayId 记录、错误 Token App 首次交换用例。
+5. 真实磁盘满/256MiB 压力注入仍 NOT TESTED。
+
+真实 ChatScreen 文本已 PASS：消息 `P0-1finaltext`，服务端 user rpcId `req-mvs8lr4r-1-1en7ldl1lf720s`，1 条用户消息；截图 `P0-1-FINAL-CHATSCREEN-TEXT.png`。
 
 ## 8. 最小修复结论
 
 - 已确认根因不是 Token 一次性/过期，也不是 Native Cookie Jar 未保存首次 cookie。
-- 需要的最小代码修复已完成：PairScreen 不再掩盖 ping 403。
-- 仍需修复/配置测试环境 Host trust，然后重新跑真实 App 配对与 ChatScreen 验收。
+- 需要的最小代码修复已完成：PairScreen 不再掩盖 ping 403；真实 App 直连配对已通过。
+- 仍需完成真实 ChatScreen unknown/force-stop 和附件选择器验收，才能评估 P0-1 COMPLETE。
 - 不修改 main、不移动 Tag、不创建 Release。
