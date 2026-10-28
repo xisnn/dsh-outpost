@@ -41,6 +41,11 @@ import {
 } from './pendingSend/errors';
 import type { PendingSendBinding, PendingSendRecord, AttachmentDraft, PendingAttachment } from './pendingSend/types';
 import { guessImageMime, readFileBase64 } from './rpc/upload';
+import {
+  blockP0Confirmation,
+  isP0ConfirmationBlocked,
+  unblockP0Confirmation,
+} from '../dev/p0Verify';
 
 /** 延迟加载待发送模块：避免 Store 的 Node 测试被 RN 原生模块解析链拖死。 */
 function createDefaultPendingSendStore(): PendingSendStore {
@@ -1579,6 +1584,10 @@ export class Store {
         attachments: staged,
         binding,
       });
+      if (__DEV__ && trimmed.includes('[P0_BLOCK]')) {
+        blockP0Confirmation(record.requestId);
+        console.log(`[p0-verify] block requestId=${record.requestId}`);
+      }
     } catch (e) {
       await this.pendingSends.discardStaged(staged);
       throw e;
@@ -1595,6 +1604,12 @@ export class Store {
       throw new Error('找不到待发送记录');
     }
     const binding = await this.loadPendingBinding(this.conn.baseUrl);
+    // Debug-only: the user's explicit retry lifts the test confirmation block
+    // after the unknown UI has been observed. Release never enters.
+    if (__DEV__ && isP0ConfirmationBlocked(requestId)) {
+      unblockP0Confirmation(requestId);
+      console.log(`[p0-verify] unblock requestId=${requestId}`);
+    }
     // 重试前必须有已认证的远端 gatewayId 验证；验证失败时不改变记录状态。
     await this.verifyPendingBinding(existing.binding, this.conn.baseUrl, this.conn.currentCookie);
     const record = await this.pendingSends.retry(requestId, binding);
@@ -1801,6 +1816,17 @@ export class Store {
         throw e;
       }
 
+      if (__DEV__ && current.text.includes('[P0_BLOCK]')) {
+        const lost = await this.pendingSends.apply(requestId, {
+          type: 'unknown-failure',
+          code: 'simulated-response-lost',
+          message: 'debug injection: accepted response lost',
+        });
+        console.log(`[p0-verify] unknown requestId=${requestId}`);
+        this.emit();
+        return lost;
+      }
+
       try {
         await this.pendingSends.apply(requestId, { type: 'accept' });
       } catch (e) {
@@ -1836,6 +1862,10 @@ export class Store {
       .list(sessionId)
       .then(async (records) => {
         for (const record of records) {
+          if (__DEV__ && isP0ConfirmationBlocked(record.requestId)) {
+            console.log(`[p0-verify] suppressed confirm requestId=${record.requestId}`);
+            continue;
+          }
           if (
             rpcIds.has(record.requestId) &&
             (record.state === 'accepted' || record.state === 'sending' || record.state === 'unknown')
