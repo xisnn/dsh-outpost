@@ -86,3 +86,7 @@ APK SHA-256：`ACC6AFAD0A204F39B27EF17505CD91A0B11BFA52E8B19DAC795180F88CAC9C64`
 ## 9. 最终结论
 
 **P0-1 BLOCKED。** 不标记 COMPLETE，不合并 `main`，不移动 `v0.16.7` Tag，不创建 GitHub Release。待真实 DSH 配对 token 恢复并在最新 APK 上完成真实 ChatScreen 文本/附件端到端后，才能重新评估 A. P0-1 COMPLETE。
+
+---
+
+*报告提交：`15adb6c`。*
