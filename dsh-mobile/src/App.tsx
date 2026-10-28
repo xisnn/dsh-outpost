@@ -148,8 +148,8 @@ interface LocalCleanupResult {
    * 撤销标记仍可能没写进去，下次启动就会自动重新申请配对。
    */
   revocation: RevocationPersistResult;
-  /** P0-1 待发送记录是否清除并回读确认 */
-  pendingSends: 'cleared' | 'failed';
+  /** P0-1 待发送记录/附件暂存是否清除并回读确认；partial = 记录已清但目录未确认清空 */
+  pendingSends: 'cleared' | 'partial' | 'failed';
 }
 
 /**
@@ -317,7 +317,12 @@ function notifyClearResult(result: ClearAuthorizationResult): void {
         '  必要时在电脑上手动移除这台设备。',
     );
   }
-  if (result.local.pendingSends === 'failed') {
+  if (result.local.pendingSends === 'partial') {
+    problems.push(
+      '待发送记录已清除，但附件暂存目录没能确认清空。\n' +
+        '  残留文件可能在下次启动时继续清理；请重启后再次执行清除确认。',
+    );
+  } else if (result.local.pendingSends === 'failed') {
     problems.push(
       '待发送消息记录或附件暂存目录没能确认清除。\n' +
         '  这些记录/文件可能仍留在本机安全存储或私有目录里，建议重启后再次执行清除。',
@@ -984,10 +989,11 @@ export default function App() {
 
     // P0-1：待发送记录属于本机授权上下文，彻底清除授权时必须一并清除。
     // signOut（断开连接）不调用这里，保留待发送记录。
-    let pendingSends: 'cleared' | 'failed' = 'cleared';
+    let pendingSends: 'cleared' | 'partial' | 'failed' = 'cleared';
     try {
       await store.pendingSends.ensureHydrated();
-      await store.pendingSends.clearAll();
+      const cleared = await store.pendingSends.clearAll();
+      if (cleared.staging !== 'cleared') pendingSends = 'partial';
     } catch {
       pendingSends = 'failed';
     }

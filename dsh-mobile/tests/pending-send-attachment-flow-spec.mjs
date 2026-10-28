@@ -76,6 +76,7 @@ class MemoryStaging {
     this.files = new Map();
     this.next = 0;
     this.failStage = false;
+    this.failClear = false;
     this.dir = mkdtempSync(`${os.tmpdir()}/p0-attach-`);
   }
   addSource(uri, bytes) {
@@ -133,6 +134,9 @@ class MemoryStaging {
     }
   }
   async clearAll() {
+    if (this.failClear) {
+      throw new PendingSendStagingError('cleanup-failed', 'simulated staging clear failure');
+    }
     const fs = await import('node:fs');
     for (const key of this.files.keys()) {
       try {
@@ -481,6 +485,97 @@ await check('暂存失败：没有记录、没有 prompt', async () => {
   await assert.rejects(() => h.store.sendPending('s1', '', [fileDraft('mem://file')]), /stage failure/);
   assert.equal((await h.pending.list('s1')).length, 0);
   assert.equal(h.prompts.length, 0);
+});
+
+await check('共享附件引用：一条过期时不能误删另一条仍在使用的文件', async () => {
+  const h = await makeHarness();
+  await h.pending.hydrate();
+  h.staging.addSource('mem://shared', Buffer.from('SHARED'));
+  const staged = await h.pending.stageDrafts([fileDraft('mem://shared', 'shared.bin', 6)]);
+  const first = await h.pending.create({
+    sessionId: 's1',
+    mode: 'queue',
+    text: '',
+    attachments: staged,
+    binding,
+    expiresAt: clock + 1000,
+  });
+  const second = await h.pending.create({
+    sessionId: 's1',
+    mode: 'queue',
+    text: '',
+    attachments: staged,
+    binding,
+    expiresAt: clock + 60000,
+  });
+  clock += 2000;
+  await h.pending.prune();
+  assert.equal((await h.pending.get(first.requestId)).state, 'expired');
+  assert.equal((await h.pending.get(second.requestId)).state, 'queued');
+  assert.ok(h.staging.files.has(staged[0].stagedUri), '共享文件仍被第二条引用');
+  clock += 120000;
+  await h.pending.prune();
+  assert.equal((await h.pending.get(first.requestId)).state, 'expired');
+  assert.equal((await h.pending.get(second.requestId)).state, 'expired');
+  assert.equal(h.staging.files.has(staged[0].stagedUri), false);
+});
+
+await check('暂存目录清理失败：不虚报成功，后续可再次清理', async () => {
+  const h = await makeHarness().setup();
+  h.staging.addSource('mem://file', Buffer.from('FILE'));
+  await h.store.sendPending('s1', '', [fileDraft('mem://file')]);
+  h.staging.failClear = true;
+  const partial = await h.pending.clearAll();
+  assert.equal(partial.records, 'cleared');
+  assert.equal(partial.staging, 'failed');
+  assert.equal((await h.pending.list()).length, 0);
+  assert.ok(h.staging.files.size > 0, '清理失败时文件应仍存在');
+  h.staging.failClear = false;
+  await h.pending.clearAll();
+  assert.equal(h.staging.files.size, 0);
+});
+
+await check('启动时清理无记录引用的孤儿暂存文件', async () => {
+  const h = await makeHarness();
+  h.staging.files.set(`mem://orphan`, Buffer.from('ORPHAN'));
+  await h.pending.hydrate();
+  assert.equal(h.staging.files.has('mem://orphan'), false);
+});
+
+await check('已确认/已放弃任务清理时释放附件', async () => {
+  const h = await makeHarness();
+  await h.pending.hydrate();
+  h.staging.addSource('mem://cleanup', Buffer.from('CLEAN'));
+  const staged = await h.pending.stageDrafts([fileDraft('mem://cleanup', 'clean.txt', 5)]);
+  const confirmed = await h.pending.create({
+    sessionId: 's1',
+    mode: 'queue',
+    text: '',
+    attachments: staged,
+    binding,
+  });
+  await h.pending.apply(confirmed.requestId, { type: 'begin-preparing' });
+  await h.pending.apply(confirmed.requestId, { type: 'attachments-ready' });
+  await h.pending.apply(confirmed.requestId, { type: 'begin-send' });
+  await h.pending.apply(confirmed.requestId, { type: 'accept' });
+  await h.pending.apply(confirmed.requestId, { type: 'confirm' });
+  assert.equal(h.staging.files.has(staged[0].stagedUri), true);
+  await h.pending.prune();
+  assert.equal(h.staging.files.has(staged[0].stagedUri), false);
+
+  h.staging.addSource('mem://abandon', Buffer.from('DROP'));
+  const staged2 = await h.pending.stageDrafts([fileDraft('mem://abandon', 'drop.txt', 4)]);
+  const abandoned = await h.pending.create({
+    sessionId: 's1',
+    mode: 'queue',
+    text: '',
+    attachments: staged2,
+    binding,
+  });
+  await h.pending.apply(abandoned.requestId, { type: 'abandon' });
+  clock += 2 * 60 * 60 * 1000;
+  await h.pending.prune();
+  assert.equal(h.staging.files.has(staged2[0].stagedUri), false);
 });
 
 await check('clearAll 同时清理待发送记录与附件暂存文件', async () => {

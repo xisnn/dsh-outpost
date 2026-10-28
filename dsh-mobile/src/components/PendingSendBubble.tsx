@@ -15,6 +15,7 @@ import { canUserRetry } from '../core/pendingSend/state';
 function statusOf(record: PendingSendRecord): { label: string; tone: 'muted' | 'warning' | 'danger' | 'accent' } {
   switch (record.state) {
     case 'queued':
+      return { label: '待发送（新消息）', tone: 'muted' };
     case 'ready':
       return { label: '待发送', tone: 'muted' };
     case 'preparing':
@@ -27,6 +28,12 @@ function statusOf(record: PendingSendRecord): { label: string; tone: 'muted' | '
       return { label: '结果未知，可能已在电脑执行', tone: 'warning' };
     case 'failed':
       return { label: '未发出', tone: 'danger' };
+    case 'expired':
+      return { label: '已过期，未发送（附件已清理）', tone: 'muted' };
+    case 'abandoned':
+      return { label: '已放弃', tone: 'muted' };
+    case 'confirmed':
+      return { label: '已确认', tone: 'muted' };
     default:
       return { label: record.state, tone: 'muted' };
   }
@@ -83,7 +90,7 @@ export function PendingSendBubble({
             >
               <Text style={styles.retryText}>
                 {record.state === 'unknown' || record.state === 'failed'
-                  ? '重试（安全）'
+                  ? '安全重试（复用原 ID）'
                   : '继续发送'}
               </Text>
             </Pressable>

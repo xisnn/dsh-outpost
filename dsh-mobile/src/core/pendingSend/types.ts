@@ -135,6 +135,8 @@ export const DEFAULT_PENDING_SEND_TTL_MS = 7 * 24 * 60 * 60 * 1000;
 export const DEFAULT_ACCEPTED_TTL_MS = 24 * 60 * 60 * 1000;
 /** 已放弃记录保留 1h，供 UI 撤回提示。 */
 export const DEFAULT_ABANDONED_TTL_MS = 60 * 60 * 1000;
+/** 已过期记录保留 1h，供 UI 显示过期提示；期间附件已清理。 */
+export const DEFAULT_EXPIRED_TTL_MS = 60 * 60 * 1000;
 
 /** 未决状态（需要用户明确处理，绝不自动重发）。 */
 export function isUnresolvedState(state: PendingSendState): boolean {

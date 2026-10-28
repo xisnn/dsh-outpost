@@ -200,13 +200,25 @@ export async function fetchServerGatewayId(
     const timer = setTimeout(() => ctrl.abort(), STATUS_TIMEOUT_MS);
     let res: Response;
     try {
+      // React Native 的 fetch 使用原生 cookie 容器；显式 Cookie 头在部分 RN
+      // 版本会被忽略/拒绝，因此 RN 侧依赖 credentials:'include'，Node 侧
+      // 仍用显式 Cookie 头保证真实 DSH 探针可认证。
+      const isReactNative =
+        typeof navigator !== 'undefined' &&
+        (navigator as { product?: string }).product === 'ReactNative';
       res = await fetch(url, {
         method: 'GET',
         credentials: 'include',
         headers: {
-          ...(cookie ? { Cookie: cookie } : {}),
-          Origin: baseUrl.replace(/\/+$/, ''),
-          Referer: `${baseUrl.replace(/\/+$/, '')}/`,
+          ...(cookie && !isReactNative ? { Cookie: cookie } : {}),
+          // RN 的 fetch 对 Cookie/Origin/Referer 等浏览器受控头支持不一致；
+          // RN 侧依靠原生 cookie 容器（credentials: include），不设置这些头。
+          ...(!isReactNative
+            ? {
+                Origin: baseUrl.replace(/\/+$/, ''),
+                Referer: `${baseUrl.replace(/\/+$/, '')}/`,
+              }
+            : {}),
         },
         signal: ctrl.signal,
       });
