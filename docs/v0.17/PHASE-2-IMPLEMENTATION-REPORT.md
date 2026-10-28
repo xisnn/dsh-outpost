@@ -147,7 +147,7 @@ Android Keychain 仪器测试（`KeychainStorageValidationTest`）复跑：**OK 
 
 ### 3.3 完整 `npm test` + 集成测试
 
-- **`npm test`：PASS（exit 0）**。全量脚本（包括修复后的 `test:mgwPatch`、阶段 1/2 新增测试、`typecheck`）全部通过。
+- **`npm test`：PASS（exit 0）**。最终工作树复跑（含修复后的 `test:mgwPatch`、阶段 1/2 新增测试与 `typecheck`）全部通过。
 - **`npm run test:integration`：61/61 通过**：
   - `integration-transport.mjs`：15/15
   - `integration-gateway.mjs`：14/14
