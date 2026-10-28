@@ -33,6 +33,26 @@ import {
   type RevocationPersistResult,
   type RevocationStatus,
 } from '../core/deviceRevocation';
+import type { PendingSendStore } from './pendingSend/store';
+import {
+  classifyPromptFailure,
+  PendingSendFailurePersistError,
+  PendingSendPostAcceptError,
+} from './pendingSend/errors';
+import type { PendingSendBinding, PendingSendRecord } from './pendingSend/types';
+
+/** 延迟加载待发送模块：避免 Store 的 Node 测试被 RN 原生模块解析链拖死。 */
+function createDefaultPendingSendStore(): PendingSendStore {
+  // eslint-disable-next-line @typescript-eslint/no-var-requires
+  const mod = require('./pendingSend/store') as typeof import('./pendingSend/store');
+  return new mod.PendingSendStore();
+}
+
+function defaultLoadPendingBinding(baseUrl: string): Promise<PendingSendBinding> {
+  // eslint-disable-next-line @typescript-eslint/no-var-requires
+  const mod = require('./pendingSend/serviceBinding') as typeof import('./pendingSend/serviceBinding');
+  return mod.loadPendingSendBinding(baseUrl);
+}
 
 /** 已归档会话 id 的存储 key（DSH 不返回归档状态，只能客户端自己记） */
 const ARCHIVED_KEY = '@dsh/archivedSessions';
@@ -158,6 +178,13 @@ const EMPTY_CHAT: Omit<ChatState, 'sessionId'> = {
   reasoningEffort: null,
 };
 
+export interface StoreOptions {
+  /** 注入测试用待发送存储；生产默认是 App 级单例。 */
+  pendingSendStore?: PendingSendStore;
+  /** 注入测试用服务身份来源；生产使用 Keychain 中已持久化的绑定。 */
+  loadPendingBinding?: (baseUrl: string) => Promise<PendingSendBinding>;
+}
+
 export class Store {
   readonly api: SessionApi;
   readonly models: ModelApi;
@@ -166,6 +193,9 @@ export class Store {
   readonly workspace: WorkspaceApi;
   /** 电脑目录浏览（directoryPicker） */
   readonly dirs: DirectoryPickerApi;
+  /** P0-1：持久化待发送记录（App 级单例，由 App 注入） */
+  readonly pendingSends: PendingSendStore;
+  private readonly loadPendingBinding: (baseUrl: string) => Promise<PendingSendBinding>;
   private conn: DshConnection;
 
   connection: ConnectionState = 'idle';
@@ -212,6 +242,9 @@ export class Store {
   /** cwd → workspaceId 缓存（建会话时用，避免每次都打 workspace/create） */
   private workspaceIdByPath = new Map<string, string>();
 
+  /** P0-1 single-flight：同一未决记录同时只允许一个发送流程。 */
+  private pendingInFlight = new Map<string, Promise<PendingSendRecord>>();
+
   /** 供 UI 层读取文件用（/api/file 需要 baseUrl + cookie） */
   get fileBaseUrl(): string {
     return this.conn.baseUrl;
@@ -220,7 +253,7 @@ export class Store {
     return this.conn.currentCookie;
   }
 
-  constructor(conn: DshConnection) {
+  constructor(conn: DshConnection, opts: StoreOptions = {}) {
     this.conn = conn;
     this.api = new SessionApi(conn);
     this.models = new ModelApi(conn);
@@ -228,6 +261,8 @@ export class Store {
     this.upload = new UploadApi(conn);
     this.workspace = new WorkspaceApi(conn);
     this.dirs = new DirectoryPickerApi(conn);
+    this.pendingSends = opts.pendingSendStore ?? createDefaultPendingSendStore();
+    this.loadPendingBinding = opts.loadPendingBinding ?? defaultLoadPendingBinding;
   }
 
   /** 拉取账户余额与登录态 */
@@ -1372,6 +1407,7 @@ export class Store {
       loading: false,
     });
     this.emit();
+    void this.reconcilePendingNow(sessionId);
   }
 
   // ── 输入 ──────────────────────────────────────────────────────────
@@ -1409,6 +1445,7 @@ export class Store {
     attachments: OutgoingAttachment[] = [],
     mode: 'queue' | 'steer' = 'queue',
     requestId?: string,
+    opts: { optimistic?: boolean } = {},
   ): Promise<void> {
     const cur = this.getChat(sessionId);
     const parts = attachments.map((a) => a.part);
@@ -1421,6 +1458,9 @@ export class Store {
     // 注入消息（管家初始化 / 系统通知 / 模式切换）只在网络侧发送，
     // 不做乐观插入，否则会在聊天里闪一条「用户消息」。
     const injected = text.trim() ? isInjectedMessage(text) : false;
+    // P0-1 文本发送由 PendingSendBubble 承担“待发送”展示，不能让
+    // store.send 再插一条 local-* 乐观消息，否则会和待发送气泡双显。
+    const shouldInsertOptimistic = !injected && opts.optimistic !== false;
 
     // 记录乐观插入那条消息的 key —— 发送失败时要把**它自己**删掉。
     //
@@ -1429,7 +1469,7 @@ export class Store {
     // 一模一样的内容。实测（模拟器断网重试）能稳定复现。
     let optimisticKey: string | undefined;
 
-    if (!injected) {
+    if (shouldInsertOptimistic) {
       // 乐观插入：本地先显示，等真实事件回来再被 fold 覆盖。
       // 注意剥掉尾部的模式标记，否则会闪一下 〔模式:计划〕。
       //
@@ -1486,6 +1526,158 @@ export class Store {
   /** 打断当前轮 */
   async cancel(sessionId: string): Promise<void> {
     await this.api.cancel(sessionId);
+  }
+
+  // ── P0-1 持久化发送（阶段 2：文本） ─────────────────────────────
+  /**
+   * 发送一条文本消息：先创建并持久化 PendingSendRecord，成功回读后才发 prompt。
+   * 正常新发送永远生成新 requestId；绝不按内容指纹复用旧记录。
+   */
+  async sendPending(
+    sessionId: string,
+    text: string,
+    mode: 'queue' | 'steer' = 'queue',
+  ): Promise<PendingSendRecord> {
+    const trimmed = text.trim();
+    if (!trimmed) throw new Error('消息内容为空');
+    await this.pendingSends.ensureHydrated();
+    const binding = await this.loadPendingBinding(this.conn.baseUrl);
+    const record = await this.pendingSends.create({
+      sessionId,
+      mode,
+      text: trimmed,
+      attachments: [],
+      binding,
+    });
+    this.emit();
+    return this.runPendingSend(record);
+  }
+
+  /** 用户明确点击“重试（安全）”：只在这里复用旧 requestId。 */
+  async retryPending(sessionId: string, requestId: string): Promise<PendingSendRecord> {
+    await this.pendingSends.ensureHydrated();
+    const existing = await this.pendingSends.get(requestId);
+    if (!existing || existing.sessionId !== sessionId) {
+      throw new Error('找不到待发送记录');
+    }
+    const binding = await this.loadPendingBinding(this.conn.baseUrl);
+    const record = await this.pendingSends.retry(requestId, binding);
+    this.emit();
+    return this.runPendingSend(record);
+  }
+
+  private runPendingSingleFlight(
+    requestId: string,
+    fn: () => Promise<PendingSendRecord>,
+  ): Promise<PendingSendRecord> {
+    const existing = this.pendingInFlight.get(requestId);
+    if (existing) return existing;
+    const promise = fn().finally(() => {
+      this.pendingInFlight.delete(requestId);
+    });
+    this.pendingInFlight.set(requestId, promise);
+    return promise;
+  }
+
+  private async runPendingSend(initial: PendingSendRecord): Promise<PendingSendRecord> {
+    return this.runPendingSingleFlight(initial.requestId, async () => {
+      const requestId = initial.requestId;
+      let current = await this.pendingSends.get(requestId);
+      if (!current) throw new Error('待发送记录已不存在');
+
+      if (current.state === 'queued') {
+        current = await this.pendingSends.apply(requestId, { type: 'begin-preparing' });
+      }
+      if (current.state === 'preparing') {
+        // 阶段 2 只发文本；附件路径仍走旧 store.send，不在这里声称完成。
+        current = await this.pendingSends.apply(requestId, { type: 'attachments-ready' });
+      }
+      if (current.state === 'sending' || current.state === 'accepted') {
+        // single-flight 下的重复调用直接返回当前记录，不重复发网络请求。
+        return current;
+      }
+      if (current.state !== 'ready') {
+        throw new Error(`待发送记录状态 ${current.state} 不能发送`);
+      }
+
+      // 先写 sending 并回读，再发 prompt。
+      current = await this.pendingSends.apply(requestId, { type: 'begin-send' });
+
+      try {
+        await this.send(current.sessionId, current.text, [], current.mode, requestId, {
+          optimistic: false,
+        });
+      } catch (e) {
+        const failure = classifyPromptFailure(e);
+        try {
+          await this.pendingSends.apply(
+            requestId,
+            failure.classification === 'unknown'
+              ? {
+                  type: 'unknown-failure',
+                  code: failure.code,
+                  message: failure.message,
+                }
+              : {
+                  type: 'definite-failure',
+                  code: failure.code,
+                  message: failure.message,
+                },
+          );
+        } catch (persistError) {
+          // 记录仍停在 sending；重启会保守转 unknown。不能假装没发过。
+          throw new PendingSendFailurePersistError(requestId, persistError);
+        }
+        this.emit();
+        throw e;
+      }
+
+      try {
+        await this.pendingSends.apply(requestId, { type: 'accept' });
+      } catch (e) {
+        // 服务端已 accepted，但本地状态写失败：保留 requestId，记录停在
+        // sending，重启 hydrate 会转 unknown；用户可安全重试同一 ID。
+        throw new PendingSendPostAcceptError(requestId, e);
+      }
+      this.emit();
+      return (await this.pendingSends.get(requestId))!;
+    });
+  }
+
+  /**
+   * 用服务端真实的 user/message.source.rpcId 对账 accepted 记录。
+   * 只做 confirm，不改状态、不重发。
+   */
+  async reconcilePendingNow(sessionId: string): Promise<void> {
+    const entry = this.streams.get(sessionId);
+    if (!entry) return;
+    const rpcIds = new Set<string>();
+    for (const record of entry.records.values()) {
+      const event = record.event as
+        | { type?: string; data?: { source?: { kind?: string; rpcId?: unknown } } }
+        | undefined;
+      if (event?.type !== 'user/message') continue;
+      const source = event.data?.source;
+      if (source?.kind === 'user' && typeof source.rpcId === 'string') {
+        rpcIds.add(source.rpcId);
+      }
+    }
+    if (rpcIds.size === 0) return;
+    await this.pendingSends
+      .list(sessionId)
+      .then(async (records) => {
+        for (const record of records) {
+          if (record.state === 'accepted' && rpcIds.has(record.requestId)) {
+            try {
+              await this.pendingSends.apply(record.requestId, { type: 'confirm' });
+            } catch {
+              // 可能已被其他路径确认；忽略非法迁移
+            }
+          }
+        }
+        this.emit();
+      })
+      .catch(() => undefined);
   }
 
   /** 关闭会话流 */

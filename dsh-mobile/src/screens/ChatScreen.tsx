@@ -40,6 +40,7 @@ import { TeammateNote } from '../components/TeammateNote';
 import { CompletionNotice } from '../components/CompletionNotice';
 import { ButlerThinking } from '../components/ButlerThinking';
 import { ApprovalBanner } from '../components/ApprovalBanner';
+import { PendingSendBubble } from '../components/PendingSendBubble';
 import { ButlerWorkspacePicker } from '../components/ButlerWorkspacePicker';
 import { FileCard } from '../components/FileCard';
 import { isImagePath } from '../core/filerefs';
@@ -50,6 +51,13 @@ import { ModelSwitcher } from '../components/ModelSwitcher';
 import { pickAttachments, formatBytes, type PickMode } from '../core/picker';
 import { guessImageMime, readFileBase64 } from '../core/rpc/upload';
 import type { OutgoingAttachment } from '../core/store';
+import type { PendingSendRecord } from '../core/pendingSend/types';
+import {
+  PendingSendFailurePersistError,
+  PendingSendPostAcceptError,
+} from '../core/pendingSend/errors';
+import { PendingSendIdentityError } from '../core/pendingSend/serviceBinding';
+import { PendingSendStoreError } from '../core/pendingSend/store';
 import { modeSwitchMessage } from '../core/butler';
 import type { Block, ChatItem } from '../core/fold';
 import type { SessionAddress } from '../core/types';
@@ -99,6 +107,9 @@ export function ChatScreen({
   const [sending, setSending] = useState(false);
   const [attaching, setAttaching] = useState(false);
   const [sendError, setSendError] = useState<string | undefined>(undefined);
+  /** P0-1：文本发送的持久化待发送记录（附件路径仍走旧的 store.send）。 */
+  const [pendingSends, setPendingSends] = useState<PendingSendRecord[]>([]);
+  const [retryingPendingId, setRetryingPendingId] = useState<string | undefined>(undefined);
   /**
    * 上一次发送失败、可以安全重试的那条消息。
    *
@@ -140,6 +151,33 @@ export function ChatScreen({
 
   const chat = store.getChat(sessionId);
   const hasTeam = !!chat.agentTeam;
+
+  // P0-1：待发送记录独立于 chat fold，页面卸载/切换会话后仍从 store 恢复。
+  useEffect(() => {
+    let alive = true;
+    const reload = () => {
+      void store.pendingSends
+        .ensureHydrated()
+        .then(() => store.pendingSends.list(sessionId))
+        .then((records) => {
+          if (!alive) return;
+          setPendingSends(
+            records.filter(
+              (r) => r.state !== 'confirmed' && r.state !== 'abandoned' && r.state !== 'expired',
+            ),
+          );
+        })
+        .catch(() => {
+          // 存储不可用时由发送路径给出明确阻断，不在这里静默伪造状态。
+        });
+    };
+    void reload();
+    const unsub = store.pendingSends.subscribe(reload);
+    return () => {
+      alive = false;
+      unsub();
+    };
+  }, [store, sessionId]);
 
   // 恢复上次选的管家模式（全局一个，不按会话记）
   useEffect(() => {
@@ -298,41 +336,71 @@ export function ChatScreen({
   const send = useCallback(async () => {
     const text = draft.trim();
     if ((!text && drafts.length === 0) || sending) return;
-    const pending = drafts;
+    const pendingAttachments = drafts;
+
+    // 阶段 2 只把文本路径接入 PendingSendStore；附件路径保留旧逻辑，
+    // 避免在附件保护（阶段 3）完成前引入回归。
+    if (pendingAttachments.length > 0) {
+      setSending(true);
+      setSendError(undefined);
+      setAttaching(true);
+      setDraft('');
+      setDrafts([]);
+
+      const isRetry = retryReq !== undefined && retryReq.text === text;
+      const requestId =
+        isRetry ? retryReq.id : `req-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
+
+      try {
+        const attachments = await resolveDrafts(pendingAttachments);
+        await store.send(sessionId, text, attachments, 'queue', requestId);
+        setNearBottom(true);
+        setRetryReq(undefined);
+      } catch (e) {
+        setDraft(text);
+        setDrafts(pendingAttachments);
+        setRetryReq({ id: requestId, text });
+        setSendError(describeSendError(e));
+      } finally {
+        setSending(false);
+        setAttaching(false);
+      }
+      return;
+    }
+
+    // 文本路径：先持久化完整发送意图（PendingSendStore.create），成功
+    // 回读后 Store 才调用 session/prompt；正常新发送永远新 requestId。
     setSending(true);
     setSendError(undefined);
-    setAttaching(pending.length > 0);
     setDraft('');
-    setDrafts([]);
-
-    // 重试复用同一个 requestId —— 让服务端能按幂等键去重。
-    //
-    // 判据是「文字没变」：失败后草稿会被放回输入框，用户直接点发送
-    // 就是同一次意图；如果改了内容，那是一条新消息，要换新 id。
-    const isRetry = retryReq !== undefined && retryReq.text === text;
-    const requestId =
-      isRetry ? retryReq.id : `req-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
-
     try {
-      const attachments = await resolveDrafts(pending);
-      // 不再给每条消息拼 〔模式:xxx〕 —— 模式切换时已经单独发过指令了。
-      // 每条都带标记会白烧 token（100 轮 = 100 个标记全进上下文）。
-      await store.send(sessionId, text, attachments, 'queue', requestId);
+      await store.sendPending(sessionId, text);
       setNearBottom(true);
-      // 成功 → 清掉重试记录，下次发送必须是新的 requestId
       setRetryReq(undefined);
     } catch (e) {
-      // 失败把草稿放回去，别让用户白选一遍
       setDraft(text);
-      setDrafts(pending);
-      // 记住这次意图，重试时复用同一个 requestId
-      setRetryReq({ id: requestId, text });
       setSendError(describeSendError(e));
     } finally {
       setSending(false);
-      setAttaching(false);
     }
   }, [draft, drafts, sending, resolveDrafts, sessionId, store, retryReq]);
+
+  const retryPendingSend = useCallback(
+    async (record: PendingSendRecord) => {
+      if (retryingPendingId) return;
+      setRetryingPendingId(record.requestId);
+      setSendError(undefined);
+      try {
+        await store.retryPending(sessionId, record.requestId);
+        setNearBottom(true);
+      } catch (e) {
+        setSendError(describeSendError(e));
+      } finally {
+        setRetryingPendingId(undefined);
+      }
+    },
+    [retryingPendingId, sessionId, store],
+  );
 
   const renderBlocks = (blocks: Block[], keyPrefix: string) =>
     blocks.map((b, i) => {
@@ -602,6 +670,14 @@ export function ChatScreen({
           }
           ListFooterComponent={
             <>
+              {pendingSends.map((record) => (
+                <PendingSendBubble
+                  key={record.requestId}
+                  record={record}
+                  busy={retryingPendingId === record.requestId}
+                  onRetry={retryPendingSend}
+                />
+              ))}
               {chat.running ? (
                 <View style={styles.liveRow}>
                   <ThinkingDots color={tv.colors.accent} size="large" />
@@ -877,28 +953,71 @@ export function ChatScreen({
  * 所以可以明确告诉用户「直接点发送重试即可，不会重复」。
  */
 function describeSendError(e: unknown): string {
+  // 网络不通：消息没发出去；先保留原始分类，供下方返回可操作文案。
   const raw = e instanceof Error ? e.message : String(e);
   const kind = e && typeof e === 'object' && 'kind' in e ? String((e as { kind?: unknown }).kind) : '';
+  const code = e && typeof e === 'object' && 'code' in e ? String((e as { code?: unknown }).code) : '';
   const isTimeout = /请求超时|AbortError|timeout/i.test(raw);
   const isNetworkDown = /Network request failed|ENOTFOUND|ECONNREFUSED|Network is unreachable/i.test(raw);
+
+  if (e instanceof PendingSendPostAcceptError) {
+    return (
+      '服务端已受理这条消息，但本地“已受理”状态保存失败。\n' +
+      '请勿把它当作没发出去：requestId 已保留，App 重启后会按“结果未知”恢复；' +
+      '到时点“重试（安全）”会复用同一 ID，不会重复执行。'
+    );
+  }
+  if (e instanceof PendingSendFailurePersistError) {
+    return (
+      '发送结果未知，且本地状态保存失败。\n' +
+      '请先不要重复发送；App 重启后会按“结果未知”恢复，确认后再安全重试同一 requestId。'
+    );
+  }
+  if (e instanceof PendingSendIdentityError) {
+    if (e.code === 'address-changed') {
+      return (
+        '连接地址已变化，但还没有重新验证服务器身份，已阻止发送。\n' +
+        '请重新配对确认这台服务器后，再发送消息。'
+      );
+    }
+    return `无法确认服务器身份，已阻止发送（${e.code}）。\n请重新配对后再试。`;
+  }
+  if (e instanceof PendingSendStoreError) {
+    if (e.code === 'limit-exceeded' || e.code === 'document-too-large') {
+      return `待发送记录存储已满：${raw}\n请先处理已有待发送消息。`;
+    }
+    if (e.code === 'corrupt-document') {
+      return '待发送缓存已损坏，已阻止发送。\n请到「我的」清除待发送缓存后重试。';
+    }
+    return (
+      '无法安全保存待发送状态，已阻止发送（存储不可用）。\n' +
+      '请检查设备存储/锁屏状态后重试。'
+    );
+  }
+  if (code.startsWith('keychain-')) {
+    return (
+      '无法安全保存待发送状态，已阻止发送（安全存储不可用）。\n' +
+      '请检查设备存储/锁屏状态后重试。'
+    );
+  }
 
   if (isTimeout) {
     // 最需要小心的一类：请求可能已经到达
     return (
       '发送结果未知：请求已发出但没收到回执，电脑上可能已经开始执行了。\n' +
-      '直接点发送重试即可 —— 会复用同一个消息 ID，服务端自动去重，不会重复执行。'
+      '请在待发送卡片上点“重试（安全）”—— 会复用同一个消息 ID，服务端自动去重，不会重复执行。'
     );
   }
   if (isNetworkDown) {
     return (
       '消息没发出去（网络不通）。\n' +
-      '检查网络后点发送重试即可。'
+      '检查网络后在待发送卡片上点“继续发送”即可。'
     );
   }
   if (kind === 'auth') {
     return '登录凭据失效了，请回到「我的」重新连接后再发送。';
   }
-  return `发送失败：${raw}\n可以直接点发送重试（不会重复）。`;
+  return `发送失败：${raw}\n请在待发送卡片上重试；同一请求不会重复执行。`;
 }
 
 function makeStyles(tv: ReturnType<typeof useTheme>) {

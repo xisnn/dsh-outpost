@@ -14,7 +14,7 @@
  * ## 测什么
  *
  * 1. 补丁源本身：幂等、fail-closed（锚点缺失/重复必须抛错）
- * 2. 应用到真实插件文件后的结果：语法有效、注入位置正确、只出现一次
+ * 2. 应用到独立 fixture 副本后的结果：语法有效、注入位置正确、只出现一次
  * 3. 运行时控制流：用模拟 ctx 执行注入块，覆盖 6 种分支
  * 4. 没有旁路：确认 3081 LAN 监听器不含 /mgw 路由
  *
@@ -44,15 +44,14 @@ function check(cond, name, detail) {
 }
 
 const repo = path.resolve(import.meta.dirname, '..', '..');
+// 独立 fixture：不读取/不修改真实 ~/.dsh 网关插件。
+// 本机真实插件可能已经打过补丁，不能作为“pristine”输入。
 const pristinePlugin = path.join(
-  os.homedir(),
-  '.dsh',
-  'profiles',
-  'web',
-  'node_modules',
-  'dsh-plugin-mobile-gateway',
-  'lib',
-  'index.mjs',
+  repo,
+  'dsh-mobile',
+  'tests',
+  'fixtures',
+  'mobile-gateway-index-fixture.mjs',
 );
 const MARKER = 'DSH_OUTPOST_MGW_AUTH_PATCH';
 const ANCHOR =
@@ -104,11 +103,11 @@ console.log('── 1. 补丁源：幂等与 fail-closed ──');
 }
 
 console.log('');
-console.log('── 2. 应用到真实插件副本 ──');
+console.log('── 2. 应用到独立 fixture 副本 ──');
 
 const havePlugin = existsSync(pristinePlugin);
 if (!havePlugin) {
-  console.log('  SKIP  未安装 dsh-plugin-mobile-gateway，跳过真实插件测试');
+  console.log('  SKIP  缺少独立 fixture，跳过补丁测试');
 } else {
   const tmp = mkdtempSync(path.join(os.tmpdir(), 'mgw-patch-'));
   const copy = path.join(tmp, 'index.mjs');

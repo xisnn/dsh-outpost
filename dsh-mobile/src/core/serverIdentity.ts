@@ -239,6 +239,42 @@ function serialize(b: ServerDeviceBinding): string {
 }
 
 /**
+ * 读取当前已持久化的服务端绑定快照。
+ *
+ * 与 `resolveBinding()` 的区别：这里不比较“当前连接地址”，只返回上次
+ * 配对/连接时保存的真实绑定，供 P0-1 的发送身份绑定使用。读失败或格式
+ * 非法时返回 `undefined`，调用方必须按“身份不可用”拒绝，而不是猜。
+ */
+export async function readServerBindingSnapshot(): Promise<ServerDeviceBinding | undefined> {
+  let raw: string | undefined;
+  try {
+    raw = await loadCredential(CredentialKey.gatewayServerBinding);
+  } catch {
+    return undefined;
+  }
+  if (!raw) return undefined;
+  try {
+    const value = JSON.parse(raw) as unknown;
+    if (!value || typeof value !== 'object' || Array.isArray(value)) return undefined;
+    const parsed = value as Partial<ServerDeviceBinding>;
+    const baseUrl = typeof parsed.baseUrl === 'string' ? normalizeBaseUrl(parsed.baseUrl) : '';
+    const deviceId = typeof parsed.deviceId === 'string' ? parsed.deviceId : '';
+    const gatewayId =
+      typeof parsed.gatewayId === 'string' && parsed.gatewayId ? parsed.gatewayId : null;
+    if (parsed.v !== BINDING_VERSION || !baseUrl || !deviceId) return undefined;
+    return {
+      v: BINDING_VERSION,
+      baseUrl,
+      gatewayId,
+      deviceId,
+      at: typeof parsed.at === 'number' ? parsed.at : 0,
+    };
+  } catch {
+    return undefined;
+  }
+}
+
+/**
  * 保存绑定，并**回读校验**。
  *
  * Keystore 在部分设备上会「返回成功但实际没写」，所以写入后必须读一次
