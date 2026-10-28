@@ -6,6 +6,7 @@
 测试 APK：`dsh-mobile/android/app/build/outputs/apk/release/app-release.apk`
 APK SHA-256：`ACC6AFAD0A204F39B27EF17505CD91A0B11BFA52E8B19DAC795180F88CAC9C64`
 APK 元数据：`versionCode=1`、`versionName=1.0`、`minSdk=24`、`targetSdk=36`；release 测试包使用 `DSH_ALLOW_DEBUG_RELEASE_SIGNING=true`，不可发布
+APK 签名：`CN=Android Debug, OU=Android`，证书 SHA-256 `fac61745dc0903786fb9ede62a962b399f7348f0bb6f899b8332667591033b9c`（测试签名）
 模拟器：`dsh_verify`（独立测试 AVD；未触碰正式验收 AVD）
 
 ## 1. 总结
