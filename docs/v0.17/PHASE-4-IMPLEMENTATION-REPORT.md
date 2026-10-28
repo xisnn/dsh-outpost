@@ -49,6 +49,17 @@ REAL_DSH_ATTACHMENTS=PASS
 - 气泡提供「安全重试（复用原 ID）」按钮；
 - 这是实际用户操作产生的失败状态，不是 fixture。
 
+补充诊断（同一 App 真实 Keychain 数据，未使用 fixture）：
+
+```text
+P0HARNESS REAL_COOKIE_PRESENT=true
+P0HARNESS REAL_BINDING_BASE=http://172.27.58.79:3095
+P0HARNESS REAL_BINDING_GATEWAY=99921c7e-74b7-4845-91ec-8d600675b55f
+P0HARNESS REAL_PROBE={"status":200,"gatewayId":"99921c7e-74b7-4845-91ec-8d600675b55f"}
+```
+
+说明：最新构建中，使用 App 运行时真实 Cookie + 已保存绑定访问真实 `/mgw/status` 返回 HTTP 200 且 gatewayId 一致；之前的失败截图来自较早构建/旧状态。当前没有可复现的远端身份不匹配、凭据过期、网络拒绝或网关配置拒绝；真实 ChatScreen accepted/confirmed 仍缺少最终截图（UI 自动化未完成），见第 5 节。
+
 截图：[PHASE-4-ACTUAL-CHATSCREEN-FAILED.png](PHASE-4-ACTUAL-CHATSCREEN-FAILED.png)。
 
 同时保留了 fixture 注入的 `unknown / accepted` 视觉截图
@@ -76,7 +87,8 @@ REAL_DSH_ATTACHMENTS=PASS
 - `PendingSendStore.prune()` 对到期未决记录执行 `expire`：
   - 记录变为 `expired` 并保留 1h 供 UI 显示；
   - 立即清理该记录的暂存附件；
-  - 1h 后真正删除记录。
+  - 1h 后真正删除记录；
+  - `expiredFrom` 保留原状态，UI 区分 `unknown`（发送结果未确认，可能已执行）、`accepted`（服务端曾受理但未确认）和确定未发送。
 - `PendingSendBubble` 显示 `已过期，未发送（附件已清理）`，不可重试。
 - `ChatScreen` 每次刷新会执行 `pendingSends.prune()`，过期任务能在当前 UI 看到提示。
 
@@ -84,6 +96,7 @@ REAL_DSH_ATTACHMENTS=PASS
 
 - `confirmed` 记录在 `prune()` 时立即删除并清理附件。
 - `abandoned` 记录保留 1h（供 UI 撤回提示）后删除并清理附件。
+- `accepted` 超过等待确认窗口（默认 24h）后转为 `expired`（保留 `expiredFrom='accepted'`），显示「服务端曾受理但未确认」，不显示为未发送。
 - 共享同一 `stagedUri` 的仍活跃记录不会被误删附件：清理前计算 keep 集合中的活跃引用。
 
 ### 2.3 暂存目录与孤儿文件
@@ -148,7 +161,7 @@ REAL_DSH_ATTACHMENTS=PASS
 | 测试 | 结果 |
 |---|---|
 | `pending-send-attachment-flow-spec` | **19/19 通过**（新增共享引用、已确认/放弃清理、清理失败、孤儿回收） |
-| `pending-send-store-spec` | **13/13 通过**（含过期提示与最终清理） |
+| `pending-send-store-spec` | **15/15 通过**（含过期提示、unknown/accepted 原状态保留与最终清理） |
 | `pending-send-service-binding-spec` | 10/10 |
 | `pending-send-send-flow-spec` | 9/9 |
 | `pending-send-wiring-spec` | 5/5（新增断开连接/彻底清除区分） |
@@ -177,7 +190,7 @@ REAL_DSH_ATTACHMENTS=PASS
   - `integration-product.mjs`：16/16
   - `integration-gateway-reconnect.mjs`：6/6
 - `npm run typecheck`：PASS。
-- `npm run test:pendingSendAttachments`：19/19；`npm run test:pendingSendStore`：13/13；`npm run test:pendingSendWiring`：5/5。
+- `npm run test:pendingSendAttachments`：19/19；`npm run test:pendingSendStore`：15/15；`npm run test:pendingSendWiring`：5/5。
 
 ---
 

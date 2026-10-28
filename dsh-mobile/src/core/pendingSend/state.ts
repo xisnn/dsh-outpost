@@ -156,7 +156,7 @@ export function transitionPendingSend(
 
     case 'expire':
       if (isTerminalState(from)) return fail();
-      return patched(record, { state: 'expired' }, now);
+      return patched(record, { state: 'expired', expiredFrom: from }, now);
 
     case 'user-retry':
       if (!canUserRetry(record)) return fail();

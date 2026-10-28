@@ -382,7 +382,14 @@ export class PendingSendStore {
       } else if (record.state === 'abandoned') {
         remove = now - record.updatedAt >= this.abandonedTtlMs;
       } else if (record.state === 'accepted') {
-        remove = now - (record.acceptedAt ?? record.updatedAt) >= this.acceptedTtlMs;
+        // accepted 超过等待确认窗口：转为 expired 短暂展示“曾受理但未确认”，
+        // 不再直接静默删除，避免误显示为未发送。
+        if (now - (record.acceptedAt ?? record.updatedAt) >= this.acceptedTtlMs) {
+          const expired = transitionPendingSend(record, { type: 'expire' }, now);
+          expiredNow.push(expired);
+          keep.push(expired);
+          continue;
+        }
       } else if (now >= record.expiresAt) {
         const expired = transitionPendingSend(record, { type: 'expire' }, now);
         expiredNow.push(expired);

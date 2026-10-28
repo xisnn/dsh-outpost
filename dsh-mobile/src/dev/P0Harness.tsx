@@ -15,8 +15,9 @@ import { Store } from '../core/store';
 import { PendingSendStore } from '../core/pendingSend/store';
 import type { PendingSendPersistence } from '../core/pendingSend/persistence';
 import { loadPendingSendBinding } from '../core/pendingSend/serviceBinding';
+import { probeServerGatewayId } from '../core/serverIdentity';
 import { ReactNativePendingSendStaging } from '../core/pendingSend/staging';
-import { CredentialKey, saveCredential } from '../core/secureStore';
+import { CredentialKey, loadCredential, saveCredential } from '../core/secureStore';
 
 const PHASE_KEY = '@dsh/p0HarnessPhase';
 const BASE_URL = 'http://127.0.0.1:1';
@@ -209,7 +210,33 @@ async function runAttachmentSuite(): Promise<void> {
   }
 }
 
+async function probeActualIdentity(): Promise<void> {
+  try {
+    const cookie = await loadCredential(CredentialKey.cookie);
+    const rawBinding = await loadCredential(CredentialKey.gatewayServerBinding);
+    let baseUrl = 'none';
+    let gatewayId = 'none';
+    if (rawBinding) {
+      try {
+        const parsed = JSON.parse(rawBinding) as { baseUrl?: string; gatewayId?: string };
+        baseUrl = parsed.baseUrl ?? 'none';
+        gatewayId = parsed.gatewayId ?? 'none';
+      } catch {
+        baseUrl = 'invalid-json';
+      }
+    }
+    log(`REAL_COOKIE_PRESENT=${!!cookie} REAL_BINDING_BASE=${baseUrl} REAL_BINDING_GATEWAY=${gatewayId}`);
+    if (cookie) {
+      const probe = await probeServerGatewayId('http://172.27.58.79:3095', cookie);
+      log(`REAL_PROBE=${JSON.stringify(probe)}`);
+    }
+  } catch (e) {
+    log(`REAL_PROBE_ERROR=${e instanceof Error ? e.message : String(e)}`);
+  }
+}
+
 async function runFreshSuite(): Promise<void> {
+  await probeActualIdentity();
   await seedHarnessIdentity();
 
   // 0. 真实服务身份路径：gatewayId + 设备上下文，cookie 轮换不影响 hash。
