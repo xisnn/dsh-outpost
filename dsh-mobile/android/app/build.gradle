@@ -88,6 +88,7 @@ android {
         // 直接 `as Integer` 在 DSL 里会让整段表达式求值成 null。
         versionCode((project.findProperty('DSH_VERSION_CODE') ?: '1').toString().toInteger())
         versionName((project.findProperty('DSH_VERSION_NAME') ?: '1.0').toString())
+        testInstrumentationRunner "androidx.test.runner.AndroidJUnitRunner"
 
         // 明文 HTTP 由 AndroidManifest 里的 networkSecurityConfig 显式允许。
         // 之前用 manifestPlaceholders 控制，release 构建会被覆盖成 false，
@@ -206,6 +207,11 @@ gradle.taskGraph.whenReady { graph ->
 dependencies {
     // The version of react-native is set by the React Native Gradle Plugin
     implementation("com.facebook.react:react-android")
+
+    // Android 安全存储验证（只进 androidTest APK，不进入正式包）
+    androidTestImplementation("androidx.test:runner:1.6.2")
+    androidTestImplementation("androidx.test.ext:junit:1.2.1")
+    androidTestImplementation("androidx.test:rules:1.6.1")
 
     if (hermesEnabled.toBoolean()) {
         implementation("com.facebook.react:hermes-android")
