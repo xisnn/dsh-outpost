@@ -53,8 +53,8 @@ APK 签名：`CN=Android Debug, OU=Android`，证书 SHA-256 `fac61745dc0903786f
 |---|---|---|
 | 最新 APK 真实 DSH 配对 | **PASS** | 127.0.0.1:3097 直连成功；代理 403 仅是 Host 未 trusted 的测试环境问题 |
 | 真实 ChatScreen 正常文本 → queued/sending/accepted/confirmed | **PASS** | 实际 UI 发送 `P0-1finaltext`；服务端 user rpcId `req-mvs8lr4r-1-1en7ldl1lf720s`，仅 1 条；截图见第 4 节 |
-| 真实 ChatScreen unknown → 用户点击安全重试 | **NOT TESTED / BLOCKED** | force-stop 发送未成功落地，尚未获得 unknown UI |
-| 真实 ChatScreen force-stop 后恢复 | **NOT TESTED / BLOCKED** | 同上 |
+| 真实 ChatScreen unknown → 用户点击安全重试 | **FAIL / BLOCKED** | Debug 注入实际执行到 `[p0-state] sending requestId=req-mvsb90p7-1-1mt0nc00enraf9` → `[p0-state] unknown requestId=req-mvsb90p7-1-1mt0nc00enraf9`，服务端 user 事件随后经 WebSocket/reconcile 自动确认，unknown 未稳定停留，无法完成 UI 重试 |
+| 真实 ChatScreen force-stop 后恢复 | **NOT TESTED / BLOCKED** | 尚未完成可控 `[P0_PAUSE]` 持久化屏障 + force-stop 用例 |
 | App 附件选择器图片/文件/混合发送 | **NOT TESTED / BLOCKED** | 尚未完成 App 附件选择器链路 |
 | 真实磁盘满 / 256MiB 上限 | **NOT TESTED** | 未尝试填满用户磁盘；仅做故障注入/异常映射 |
 
