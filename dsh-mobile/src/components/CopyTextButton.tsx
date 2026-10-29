@@ -1,5 +1,11 @@
 /**
- * 轻量「复制」按钮：代码块右上角 / 消息下方的同一个控件。
+ * 轻量「复制」按钮 —— **只给 Markdown 代码块用**。
+ *
+ * ## 只有这一处常驻复制
+ *
+ * 消息级复制已经改成「长按消息 → 复制全文」面板（见 MessageActionSheet），
+ * 所以这个组件不再提供「贴在消息正文下方」的变体。它只出现在代码块标题栏右侧，
+ * 与消息正文、思考卡、工具卡都没有关系。
  *
  * ## 视觉取舍
  *
@@ -7,11 +13,6 @@
  *   · 常态：极小号字 + 最弱的文字色（textFaint），不描边不填充；
  *   · 点击后：文案换成「已复制」+ 强调色，1.5 秒后回到常态。
  * 不放图标库（本项目不引图标依赖），用纯文本 + 字形，和 Pill / 折叠头一致。
- *
- * ## 两个变体
- *
- * - `inline`：贴在代码块标题栏右侧，10px，几乎隐形；
- * - `bar`：贴在消息正文下方，右对齐，给消息级「复制全文」用。
  */
 import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { Pressable, StyleSheet, Text } from 'react-native';
@@ -25,13 +26,11 @@ const COPIED_FEEDBACK_MS = 1500;
 export function CopyTextButton({
   text,
   label = '复制',
-  variant = 'inline',
   accessibilityLabel,
 }: {
   text: string;
   label?: string;
-  variant?: 'inline' | 'bar';
-  /** 读屏用的语义（例如「复制代码」「复制消息全文」） */
+  /** 读屏用的语义（例如「复制代码」） */
   accessibilityLabel?: string;
 }) {
   const tv = useTheme();
@@ -65,7 +64,7 @@ export function CopyTextButton({
       // 可见字形很小，热区补到 44 左右
       hitSlop={12}
       style={({ pressed }: { pressed: boolean }) => [
-        variant === 'bar' ? styles.bar : styles.inline,
+        styles.inline,
         pressed ? { opacity: tv.motion.pressOpacity } : null,
         disabled ? { opacity: 0.35 } : null,
       ]}
@@ -73,12 +72,7 @@ export function CopyTextButton({
       accessibilityLabel={accessibilityLabel ?? label}
       accessibilityState={{ disabled }}
     >
-      <Text
-        style={[
-          variant === 'bar' ? styles.barText : styles.inlineText,
-          copied ? styles.copiedText : null,
-        ]}
-      >
+      <Text style={[styles.inlineText, copied ? styles.copiedText : null]}>
         {copied ? '✓ 已复制' : label}
       </Text>
     </Pressable>
@@ -97,18 +91,6 @@ function makeStyles(tv: ReturnType<typeof useTheme>) {
       color: C.textFaint,
       fontSize: tv.type.micro,
       lineHeight: tv.type.micro * 1.6,
-    },
-    bar: {
-      alignSelf: 'flex-end',
-      paddingHorizontal: 8,
-      paddingVertical: 3,
-      marginTop: 2,
-      borderRadius: tv.radius.sm,
-    },
-    barText: {
-      color: C.textFaint,
-      fontSize: tv.type.xs,
-      lineHeight: tv.type.xs * 1.5,
     },
     copiedText: {
       color: C.accentBright,

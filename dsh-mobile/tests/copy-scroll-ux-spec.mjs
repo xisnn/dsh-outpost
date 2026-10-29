@@ -6,7 +6,9 @@
  * 再用少量静态检查守住「UI 真的接上了」这一层。
  */
 
-import { readFileSync } from 'node:fs';
+import fs from 'node:fs';
+
+const { readFileSync } = fs;
 
 let pass = 0;
 let fail = 0;
@@ -265,6 +267,39 @@ check('聊天页用纯函数判定离底与显隐（没有内联魔数）', () =
 check('助手消息不再有常驻「复制」行（AssistantCopyRow 已移除）', () => {
   const hasRow = /AssistantCopyRow/.test(chatSrc) || /AssistantCopyRow/.test(msgSrc);
   return hasRow ? false : true;
+});
+
+check('全仓库没有旧的消息级复制组件残留', () => {
+  // AssistantCopyRow / 消息下方的 bar 变体都应该彻底消失
+  const compDir = 'src/components';
+  const offenders = [];
+  for (const name of fs.readdirSync(compDir)) {
+    if (!name.endsWith('.tsx') && !name.endsWith('.ts')) continue;
+    const src = fs.readFileSync(`${compDir}/${name}`, 'utf8');
+    if (/AssistantCopyRow/.test(src)) offenders.push(`${name}:AssistantCopyRow`);
+    if (/variant\s*=\s*['"]bar['"]/.test(src)) offenders.push(`${name}:bar-variant`);
+  }
+  return offenders.length === 0 ? true : `残留：${offenders.join(', ')}`;
+});
+
+check('CopyTextButton 只被 MarkdownView（代码块）使用', () => {
+  const importers = [];
+  const walk = (dir) => {
+    for (const name of fs.readdirSync(dir)) {
+      const p = `${dir}/${name}`;
+      if (fs.statSync(p).isDirectory()) {
+        walk(p);
+        continue;
+      }
+      if (!/\.(tsx|ts)$/.test(name)) continue;
+      const src = fs.readFileSync(p, 'utf8');
+      if (/from ['"].*CopyTextButton['"]/.test(src)) importers.push(p);
+    }
+  };
+  walk('src');
+  return importers.length === 1 && importers[0].endsWith('src/components/MarkdownView.tsx')
+    ? true
+    : `CopyTextButton 使用点异常：${importers.join(', ')}`;
 });
 
 check('长按消息打开 MessageActionSheet，且传入正文', () => {
