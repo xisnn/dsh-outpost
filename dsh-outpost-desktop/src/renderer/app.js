@@ -41,6 +41,11 @@ async function refresh() {
 
   // 隧道
   const tunnelUrl = st.tunnelInfo?.url || st.tunnel?.url || '';
+  const tunnelPairUrl =
+    st.tunnelInfo?.pairUrl ||
+    (tunnelUrl && st.pairing?.token
+      ? `${tunnelUrl.replace(/\/+$/, '')}/?token=${st.pairing.token}`
+      : tunnelUrl);
   const tunnelRunning = Boolean(st.tunnelRunning ?? tunnelUrl);
   setRow(
     'rowTunnel',
@@ -58,7 +63,7 @@ async function refresh() {
 
   // 二维码
   await renderQr('lan', st.lanUrl);
-  await renderQr('tunnel', tunnelUrl);
+  await renderQr('tunnel', tunnelPairUrl);
 
   // 设备
   void loadDevices();
@@ -279,7 +284,13 @@ $('btnRepair').addEventListener('click', async () => {
 document.querySelectorAll('[data-copy]').forEach((btn) => {
   btn.addEventListener('click', async () => {
     const which = btn.dataset.copy;
-    const url = which === 'lan' ? last?.lanUrl : last?.tunnelInfo?.url || last?.tunnel?.url;
+    const rawTunnelUrl = last?.tunnelInfo?.url || last?.tunnel?.url || '';
+    const tunnelCopyUrl =
+      last?.tunnelInfo?.pairUrl ||
+      (rawTunnelUrl && last?.pairing?.token
+        ? `${rawTunnelUrl.replace(/\/+$/, '')}/?token=${last.pairing.token}`
+        : rawTunnelUrl);
+    const url = which === 'lan' ? last?.lanUrl : tunnelCopyUrl;
     if (!url) {
       setHint('还没有可复制的链接', true);
       return;
