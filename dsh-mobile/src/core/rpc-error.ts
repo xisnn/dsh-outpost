@@ -73,13 +73,32 @@ export function isEndpointMissing(err: unknown): boolean {
   return false;
 }
 
-/** 判断是不是鉴权失效 —— 需要重新配对 */
+/**
+ * 判断是不是**明确的凭据失效（401）** —— 需要重新配对（P0-3）。
+ *
+ * ⚠️ 注意区分 401 与 403：
+ * DSH 服务端（`dsh-client-connection`）只在 Cookie/Token 无效或缺失时返回 401；
+ * 而 403 来自 `isTrustedApiRequest()`（Host 不在 trustedHosts、跨源 Origin）或
+ * 非 owner 权限限制，**此时 Cookie 本身是有效的**，绝不能把 403 当作 Cookie 失效
+ * 或自动清除凭据。
+ */
 export function isAuthFailure(err: unknown): boolean {
   if (err instanceof RpcError) {
-    if (err.kind === 'http') return /40[13]/.test(err.raw);
-    return /unauthor|forbidden|invalid.*(token|cookie)/i.test(err.raw);
+    if (err.kind === 'http') return /(^|[^0-9])401([^0-9]|$)/.test(err.raw);
+    return /unauthor|invalid.*(token|cookie)/i.test(err.raw);
   }
-  return false;
+  const text = err instanceof Error ? err.message : String(err ?? '');
+  return /(^|[^0-9])401([^0-9]|$)|unauthorized|not authenticated/i.test(text);
+}
+
+/** 判断是不是 403 访问被拒绝（如 Host 未受信任 / Origin 不匹配，凭据本身仍有效） */
+export function isForbiddenRejection(err: unknown): boolean {
+  if (err instanceof RpcError) {
+    if (err.kind === 'http') return /(^|[^0-9])403([^0-9]|$)/.test(err.raw);
+    return /forbidden/i.test(err.raw);
+  }
+  const text = err instanceof Error ? err.message : String(err ?? '');
+  return /(^|[^0-9])403([^0-9]|$)|forbidden/i.test(text);
 }
 
 /** 是否值得自动重试 */

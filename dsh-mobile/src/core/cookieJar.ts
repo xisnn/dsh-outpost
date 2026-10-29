@@ -95,6 +95,12 @@ export type CookieCleanupResult =
 interface CookieManagerLike {
   getAll?: (url?: string) => Promise<Record<string, unknown>>;
   get?: (url?: string, useWebKit?: boolean) => Promise<Record<string, unknown>>;
+  setFromResponse?: (url: string, value: string) => Promise<boolean | void>;
+  set?: (
+    url: string,
+    cookie: { name: string; value: string; path?: string; httpOnly?: boolean; secure?: boolean },
+    useWebKit?: boolean,
+  ) => Promise<boolean | void>;
   clearAll?: (withKernel?: boolean) => Promise<boolean | void>;
   clearByName?: (
     url: string,
@@ -302,4 +308,63 @@ function withFailures(reason: string, failures: string[]): string {
 export async function clearNativeCookieJar(baseUrl?: string): Promise<boolean> {
   const result = await clearNativeCookieJarDetailed(baseUrl);
   return result.kind === 'cleared' || result.kind === 'unavailable';
+}
+
+/**
+ * 把 Keychain 里保存的 `dsh-auth*=...` 会话 Cookie 同步写回原生 CookieManager（P0-3）。
+ *
+ * 用途：
+ *   · 先清理当前 baseUrl 下的旧 `dsh-auth*`，防止旧 Cookie 与新 Cookie 并存；
+ *   · 再写入当前生效的 Cookie，确保任何依赖 `credentials: 'include'` 的请求与
+ *     Keychain/DshConnection.cookie 严格一致。
+ */
+export async function syncNativeCookieJar(
+  baseUrl: string,
+  cookieHeader: string | undefined,
+): Promise<boolean> {
+  const trimmedBase = String(baseUrl ?? '').trim().replace(/\/+$/, '');
+  if (!trimmedBase) return false;
+  const cm = await loadCookieManager();
+  if (!cm) return true; // 纯 Node 环境无原生容器
+
+  await clearNativeCookieJarDetailed(trimmedBase).catch(() => undefined);
+  if (!cookieHeader) return true;
+
+  const pairs = cookieHeader
+    .split(';')
+    .map((s) => s.trim())
+    .filter(Boolean);
+  const secure = trimmedBase.startsWith('https://');
+
+  for (const pair of pairs) {
+    const eq = pair.indexOf('=');
+    if (eq <= 0) continue;
+    const name = pair.slice(0, eq).trim();
+    const value = pair.slice(eq + 1).trim();
+    if (!name.startsWith(DSH_COOKIE_PREFIX) || !value) continue;
+
+    if (typeof cm.set === 'function') {
+      try {
+        await cm.set(
+          trimmedBase,
+          { name, value, path: '/', httpOnly: true, secure },
+          true,
+        );
+        continue;
+      } catch {
+        // 回退到 setFromResponse
+      }
+    }
+    if (typeof cm.setFromResponse === 'function') {
+      try {
+        await cm.setFromResponse(
+          trimmedBase,
+          `${name}=${value}; Path=/; HttpOnly${secure ? '; Secure' : ''}`,
+        );
+      } catch {
+        return false;
+      }
+    }
+  }
+  return true;
 }
