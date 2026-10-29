@@ -40,12 +40,16 @@ export class SessionApi {
    */
   async page(params: {
     sessionId: string;
+    address?: SessionAddress;
     throughSeq: number;
     beforeSeq?: number;
     maxMessages?: number;
   }): Promise<SessionPageResult> {
     const request: Record<string, unknown> = {
-      address: { kind: 'session', sessionId: params.sessionId } satisfies SessionAddress,
+      address: (params.address ?? {
+        kind: 'session',
+        sessionId: params.sessionId,
+      }) satisfies SessionAddress,
       throughSeq: params.throughSeq,
     };
     if (params.beforeSeq !== undefined) request.beforeSeq = params.beforeSeq;

@@ -134,6 +134,8 @@ export class DshConnection {
   private readonly fetchImpl: typeof fetch;
   private readonly WS: typeof WebSocket;
   private ws?: WebSocket;
+  private connectingWs?: Promise<WebSocket>;
+  private socketGeneration = 0;
   private streamId = 0;
   private readonly streams = new Map<string, (frame: StreamFrame) => void>();
   /** 由宿主注入的原生 cookie 读取器（RN 必需） */
@@ -411,100 +413,153 @@ export class DshConnection {
     return result.value as T;
   }
 
-  /** 建立 WebSocket（惰性，复用） */
+  /** 建立 WebSocket（惰性，复用，带并发 single-flight 与代次隔离） */
   private async ensureSocket(): Promise<WebSocket> {
     if (this.ws && this.ws.readyState === 1) return this.ws;
+    if (this.connectingWs) return this.connectingWs;
     if (!this.cookie) throw new Error('not authenticated');
+
+    const generation = ++this.socketGeneration;
     const wsUrl = this.baseUrl.replace(/^http/, 'ws') + '/api/remote.mux';
-
-    // RN 的 WebSocket 构造函数只接受 (url, protocols)，没法设自定义 header。
-    //
-    // 之前这里只传了 url —— cookie 参数收下就丢了，等于裸连。
-    // 服务端 `authorizedClient()` 会检查 Sec-WebSocket-Protocol 里有没有
-    // clientToken，没有就 401，于是 WebSocket 永远连不上、会话永远是空的
-    // （这就是「点进已有会话显示空调话」的真凶）。
-    //
-    // 解法：把 cookie 值当成子协议传进去。RN 会把数组里的每一段写进
-    // Sec-WebSocket-Protocol，正好被服务端认出来。
-    // 子协议名只允许 token 字符，cookie 的值恰好是 base64url + '.'，符合规范。
     const ws = this.openWebSocket(wsUrl, this.cookie);
+    const isCurrent = () => this.socketGeneration === generation && this.ws === ws;
 
-    await new Promise<void>((resolve, reject) => {
-      const timer = setTimeout(
-        () => reject(new Error('连接超时：15 秒内没能和服务建立 WebSocket')),
-        15000,
-      );
-      ws.addEventListener('open', () => { clearTimeout(timer); resolve(); });
-      // error 事件本身没有可用信息（String(event) === '[object Object]'），
-      // 真正有用的是 close 事件的 code/reason，所以这里给出可操作的提示。
-      ws.addEventListener('error', () => {
-        clearTimeout(timer);
-        reject(new Error('WebSocket 连接失败：检查服务地址是否可达、服务是否还在运行'));
+    const connectPromise = (async () => {
+      let handshakeErrorText = '';
+      await new Promise<void>((resolve, reject) => {
+        const timer = setTimeout(
+          () => reject(makeRpcError('remote.mux', 'network', '连接超时：15 秒内没能和服务建立 WebSocket')),
+          15000,
+        );
+        let settled = false;
+        const finishReject = (err: Error) => {
+          if (settled) return;
+          settled = true;
+          clearTimeout(timer);
+          reject(err);
+        };
+        ws.addEventListener('open', () => {
+          if (settled) return;
+          settled = true;
+          clearTimeout(timer);
+          resolve();
+        });
+        ws.addEventListener('error', (ev: Event) => {
+          const msg = (ev as { message?: unknown })?.message;
+          if (typeof msg === 'string' && msg) {
+            handshakeErrorText = redactUrl(msg);
+          }
+          const isAuth =
+            /(^|[^0-9])(401|403)([^0-9]|$)|unauthorized|forbidden/i.test(handshakeErrorText);
+          finishReject(
+            makeRpcError(
+              'remote.mux',
+              isAuth ? 'http' : 'network',
+              isAuth
+                ? `HTTP 401 (${handshakeErrorText})`
+                : handshakeErrorText || 'WebSocket 连接失败：检查服务地址是否可达、服务是否还在运行',
+            ),
+          );
+        });
+        ws.addEventListener('close', (ev: { code?: number; reason?: string }) => {
+          const code = Number(ev?.code ?? 0);
+          const why = String(ev?.reason ?? '');
+          const combined = `${why} ${handshakeErrorText}`.trim();
+          const isAuth =
+            /(^|[^0-9])(401|403)([^0-9]|$)|unauthorized|forbidden/i.test(combined);
+          finishReject(
+            makeRpcError(
+              'remote.mux',
+              isAuth ? 'http' : 'network',
+              isAuth
+                ? `HTTP 401 (${combined})`
+                : `WebSocket 握手关闭（code ${code}${why ? `：${why}` : ''}）`,
+            ),
+          );
+        });
+        // Node ws 兼容：握手返回 401/403 时触发 unexpected-response
+        const wsWithUnexpected = ws as unknown as {
+          on?: (
+            event: string,
+            cb: (req: unknown, res: { statusCode?: number; statusMessage?: string }) => void,
+          ) => void;
+        };
+        wsWithUnexpected.on?.('unexpected-response', (_req, res) => {
+          const status = Number(res?.statusCode ?? 0);
+          const text = String(res?.statusMessage ?? '');
+          const isAuth = status === 401 || status === 403;
+          finishReject(
+            makeRpcError(
+              'remote.mux',
+              isAuth ? 'http' : 'network',
+              `HTTP ${status || 500}${text ? ` ${text}` : ''}`,
+            ),
+          );
+        });
       });
-    });
 
-    ws.addEventListener('message', (ev: MessageEvent) => {
-      let frame: StreamFrame;
-      try { frame = JSON.parse(typeof ev.data === 'string' ? ev.data : String(ev.data)); } catch { return; }
-      const handler = frame.streamId ? this.streams.get(frame.streamId) : undefined;
-      handler?.(frame);
-    });
+      if (this.socketGeneration !== generation) {
+        try { ws.close(); } catch { /* ignore */ }
+        throw makeRpcError('remote.mux', 'network', '连接已被更新或关闭');
+      }
 
-    // ── 连接关闭 / 出错：必须让所有活跃流立刻失败 ────────────────
-    //
-    // ## 为什么这是必须的（P0-1）
-    //
-    // 之前这里**没有** close 监听。socket 断开后：
-    //   · 没有任何帧会再到达
-    //   · 流的 async iterator 永远卡在 `await new Promise(r => notify = r)`
-    //   · store.pump() 的 `await next()` 永不返回
-    //   · 聊天页既不报错也不结束，转圈动画一直转（用户只能杀 App）
-    //
-    // 这是「假死」类 bug 里最难排查的一种：界面上没有任何错误。
-    //
-    // 修法：close/error 时把**所有**活跃流以网络错误失败掉，
-    // 让 iterator 从 await 里出来并抛出，最终走到 store 的错误分支。
-    const failAllStreams = (reason: string) => {
-      const entries = [...this.streams.entries()];
-      this.streams.clear();
-      this.ws = undefined;
-      for (const [, handler] of entries) {
-        try {
-          handler({
-            type: 'error',
-            streamId: '',
-            error: { code: 'network', message: reason },
-          });
-        } catch {
-          /* 单个流处理失败不影响其它 */
+      ws.addEventListener('message', (ev: MessageEvent) => {
+        if (!isCurrent()) return;
+        let frame: StreamFrame;
+        try { frame = JSON.parse(typeof ev.data === 'string' ? ev.data : String(ev.data)); } catch { return; }
+        const handler = frame.streamId ? this.streams.get(frame.streamId) : undefined;
+        handler?.(frame);
+      });
+
+      // ── 连接关闭 / 出错：必须让当前代次的所有活跃流立刻失败 ────────────────
+      const failAllStreams = (reason: string) => {
+        if (!isCurrent()) return;
+        const entries = [...this.streams.entries()];
+        this.streams.clear();
+        this.ws = undefined;
+        for (const [, handler] of entries) {
+          try {
+            handler({
+              type: 'error',
+              streamId: '',
+              error: { code: 'network', message: reason },
+            });
+          } catch {
+            /* 单个流处理失败不影响其它 */
+          }
         }
+      };
+
+      ws.addEventListener('close', (ev: { code?: number; reason?: string }) => {
+        if (!isCurrent()) return;
+        const code = Number(ev?.code ?? 0);
+        const why = String(ev?.reason ?? '');
+        const detail = code === 1000
+          ? '连接已关闭'
+          : `连接已断开（code ${code}${why ? `：${why}` : ''}）`;
+        if (typeof __DEV__ !== 'undefined' && __DEV__) {
+          console.log('[transport] ws closed', code, why);
+        }
+        failAllStreams(detail);
+      });
+
+      ws.addEventListener('error', () => {
+        if (!isCurrent()) return;
+        failAllStreams('WebSocket 连接出错');
+      });
+
+      this.ws = ws;
+      return ws;
+    })();
+
+    this.connectingWs = connectPromise;
+    try {
+      return await connectPromise;
+    } finally {
+      if (this.connectingWs === connectPromise) {
+        this.connectingWs = undefined;
       }
-    };
-
-    ws.addEventListener('close', (ev: { code?: number; reason?: string }) => {
-      const code = Number(ev?.code ?? 0);
-      const why = String(ev?.reason ?? '');
-      // 1000 = 正常关闭（我们自己调的 close()）；其余都当异常
-      const detail = code === 1000
-        ? '连接已关闭'
-        : `连接已断开（code ${code}${why ? `：${why}` : ''}）`;
-      // ⚠️ `__DEV__` 是 RN 注入的全局；Node 测试环境里不存在。
-      // 直接写 if (__DEV__) 会在测试里抛 ReferenceError —— 而这个 handler
-      // 一旦抛错，下面的 failAllStreams 就永远执行不到，等于修复失效。
-      // 所以用 typeof 守护。
-      if (typeof __DEV__ !== 'undefined' && __DEV__) {
-        console.log('[transport] ws closed', code, why);
-      }
-      failAllStreams(detail);
-    });
-
-    ws.addEventListener('error', () => {
-      // error 之后通常还会来 close；这里先失败一次，close 再来是幂等的
-      failAllStreams('WebSocket 连接出错');
-    });
-
-    this.ws = ws;
-    return ws;
+    }
   }
 
   /**
@@ -590,7 +645,31 @@ export class DshConnection {
     return handle;
   }
 
+  /** 立即重置底层 WebSocket 并终止所有活跃流（供前后台恢复或测试断连使用） */
+  resetSocket(reason = '连接已重置'): void {
+    this.socketGeneration += 1;
+    this.connectingWs = undefined;
+    const entries = [...this.streams.entries()];
+    this.streams.clear();
+    const ws = this.ws;
+    this.ws = undefined;
+    for (const [, handler] of entries) {
+      try {
+        handler({
+          type: 'error',
+          streamId: '',
+          error: { code: 'network', message: reason },
+        });
+      } catch {
+        /* ignore */
+      }
+    }
+    try { ws?.close(); } catch { /* ignore */ }
+  }
+
   close(): void {
+    this.socketGeneration += 1;
+    this.connectingWs = undefined;
     this.streams.clear();
     try { this.ws?.close(); } catch { /* ignore */ }
     this.ws = undefined;

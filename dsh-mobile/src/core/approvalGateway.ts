@@ -880,10 +880,14 @@ export class ApprovalGateway {
   private scheduleRetry(overrideMs?: number): void {
     if (this.closed) return;
     this.retry += 1;
-    const delay =
-      typeof overrideMs === 'number'
-        ? overrideMs
-        : Math.min(30_000, 1000 * 2 ** Math.min(this.retry, 5));
+    let delay: number;
+    if (typeof overrideMs === 'number') {
+      delay = overrideMs;
+    } else {
+      const base = Math.min(30_000, 1000 * 2 ** Math.min(this.retry, 5));
+      const jitter = Math.round(base * (0.85 + Math.random() * 0.3));
+      delay = Math.min(30_000, jitter);
+    }
     if (this.retryTimer) clearTimeout(this.retryTimer);
     this.retryTimer = setTimeout(() => {
       this.retryTimer = undefined;
