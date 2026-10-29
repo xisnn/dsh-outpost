@@ -218,7 +218,7 @@ export async function probeServerGatewayId(
         method: 'GET',
         credentials: 'include',
         headers: {
-          ...(cookie && !isReactNative ? { Cookie: cookie } : {}),
+          ...(cookie ? { Cookie: cookie } : {}),
           ...(!isReactNative
             ? {
                 Origin: baseUrl.replace(/\/+$/, ''),

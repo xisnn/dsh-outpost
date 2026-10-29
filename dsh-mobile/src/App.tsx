@@ -35,7 +35,7 @@ import {
   LegacyCredentialKey,
   type CredentialMigrationReport,
 } from './core/credentialMigration';
-import { clearNativeCookieJarDetailed } from './core/cookieJar';
+import { clearNativeCookieJarDetailed, syncNativeCookieJar } from './core/cookieJar';
 import {
   clearApprovalRevoked,
   loadRevocationState,
@@ -446,33 +446,23 @@ export default function App() {
   );
 
   const store = useMemo(() => {
-    // ⚠️ baseUrl 在「未配对 / 刚清过数据」时是空字符串。
-    //
-    // DshConnection 的构造函数会对地址做安全校验，而 `new URL('')`
-    // 直接抛异常 —— 于是构造就失败了。这个异常发生在 useMemo 里，
-    // 属于渲染期错误，整个组件树会被 React 卸载，用户看到的是
-    // 满屏红色 Render Error，**连配对页都到不了**。
-    //
-    // 实测：模拟器上清空应用数据后首次启动必然复现（Android 15 /
-    // Pixel 6 AVD）。真机上「换手机 / 重装 App」也是同样的路径。
-    //
-    // 修法：地址还没配好时给一个占位值构造连接对象。这个 store 只用于
-    // 撑住 context 的初始状态，用户填完地址后 baseUrl 变化会重建它，
-    // 真正的请求都要经过 assertSecureUrl，占位地址发不出去。
-    //
-    // 占位用 localhost 而不是随便一个字符串：它是合法的私有地址，
-    // 万一日后有人漏了判空，请求也只会打在手机自己身上，
-    // 不会把凭据发到外部。
     const safeBaseUrl = baseUrl || PLACEHOLDER_BASE_URL;
     const conn = new DshConnection({ baseUrl: safeBaseUrl, cookie });
     return new Store(conn, { pendingSendStore: pendingSends });
   }, [baseUrl, cookie, pendingSends]);
 
+  // P0-3：store 因 baseUrl / cookie 变化重建时，必须显式关闭旧 store，
+  // 停止旧连接上的轮询定时器、审批网关与会话流重连定时器，防止旧连接或迟到回调覆盖新配对状态。
+  useEffect(() => {
+    return () => {
+      store.close();
+    };
+  }, [store]);
+
   // P0-1：启动时读取待发送缓存并恢复（不自动重发，只恢复可视状态）。
   useEffect(() => {
     let alive = true;
-    void pendingSends
-      .hydrate()
+    void pendingSends.hydrate()
       .then((res) => {
         if (__DEV__) {
           for (const rec of res.recovered) {
@@ -662,6 +652,7 @@ export default function App() {
         // 用校验过的地址决定要不要自动登录 —— 地址不安全时绝不自动连。
         const usableBase = savedBaseInsecure ? null : savedBase;
         if (usableBase && savedCookie && autoResume) {
+          await syncNativeCookieJar(usableBase, savedCookie).catch(() => false);
           setCookie(savedCookie);
           setAuthed(true);
         } else if (savedCookie && usableBase && !autoResume) {
@@ -753,6 +744,9 @@ export default function App() {
   const saveCookie = useCallback(async (c: string) => {
     // 凭据进 Keystore，不再写 AsyncStorage
     await saveCredential(CredentialKey.cookie, c);
+    if (baseUrl) {
+      await syncNativeCookieJar(baseUrl, c).catch(() => false);
+    }
     // 用户主动完成了一次配对 —— 这同时是「明确授权」的动作，
     // 之前被撤销的审批权限应该在这里解禁（见 core/deviceRevocation.ts）。
     await clearApprovalRevoked();
@@ -768,7 +762,7 @@ export default function App() {
     setCookie(c);
     setAuthed(true);
     setHasLastPairing(true);
-  }, []);
+  }, [baseUrl]);
 
   /**
    * 断开连接（**不清除凭据**）。
@@ -796,13 +790,14 @@ export default function App() {
     // 崩在中间的话意图已经是 signed-out（方向安全）；
     // 反过来先改内存再落盘，崩了就会「界面已退出但下次启动自动登录」。
     const persisted = await setLoginIntent('signed-out');
+    store.close();
     setCookie(undefined);
     setAuthed(false);
     // Cookie 留在 Keystore 里，所以「上次配对」依然可用
     const still = await loadCredential(CredentialKey.cookie);
     setHasLastPairing(!!still);
     return persisted;
-  }, []);
+  }, [store]);
 
   /**
    * 退出并清除所有授权（**不可恢复**）。
@@ -1141,6 +1136,8 @@ export default function App() {
       const ok = await probe.ping();
       probe.close();
       if (!ok) return false;
+      // P0-3：把 Keystore 中的 Cookie 同步回原生 CookieManager，保证 credentials:'include' 请求一致
+      await syncNativeCookieJar(baseUrl, last).catch(() => false);
       // 用户点了「直接继续」= 明确表达「要恢复登录」。
       // 意图置回 active，之后每次启动都会正常自动登录
       // （而不是每次都弹一次「直接继续」）。

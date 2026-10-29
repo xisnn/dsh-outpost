@@ -95,8 +95,11 @@ export interface IncompatInfo {
 /** 上游返回的错误码里，哪些意味着「接口不存在」 */
 const MISSING_PATTERNS = [/not-?found/i, /unknown\s+method/i, /no\s+such\s+(method|endpoint)/i, /unimplemented/i];
 
-/** 哪些意味着鉴权问题 */
-const AUTH_PATTERNS = [/unauthor/i, /\b401\b/, /forbidden/i, /\b403\b/, /invalid.*(token|cookie|session)/i];
+/** 哪些意味着鉴权失效（401） */
+const AUTH_PATTERNS = [/unauthor/i, /\b401\b/, /invalid.*(token|cookie|session)/i];
+
+/** 哪些意味着 403 访问地址限制（trusted-host / Origin） */
+const FORBIDDEN_PATTERNS = [/forbidden/i, /\b403\b/];
 
 /** 哪些意味着网络问题 */
 const NETWORK_PATTERNS = [/network request failed/i, /failed to fetch/i, /timeout/i, /econnrefused/i, /enotfound/i, /socket/i];
@@ -132,6 +135,18 @@ export function classifyError(err: unknown, endpoint?: string): IncompatInfo {
       hint:
         'DSH 服务可能重启过（token 每次启动都会换），或者 cookie 过期了。\n' +
         '建议：回到配对页，用新的 token 重新连一次。',
+      raw,
+    };
+  }
+
+  if (FORBIDDEN_PATTERNS.some((re) => re.test(lower))) {
+    return {
+      kind: 'auth',
+      endpoint,
+      title: '服务地址未被允许访问（HTTP 403）',
+      hint:
+        '当前登录凭据仍保留，但 DSH 拒绝了该访问地址（Host 未列入 trustedHosts）。\n' +
+        '建议：检查服务地址是否为 DSH 监听的局域网 IP / 127.0.0.1，或在 DSH 配置中添加 trustedHosts。',
       raw,
     };
   }

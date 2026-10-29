@@ -113,12 +113,14 @@ class FakeWebSocket {
   }
 }
 
+const TEST_COOKIE = ['dsh-auth', 'test-session-cookie'].join('=');
+
 await check('1. DshConnection.ensureSocket：并发 openStream 共享同一连接（single-flight），且旧连接迟到 close 不误杀新连接', async () => {
   FakeWebSocket.instances = [];
   FakeWebSocket.autoOpen = true;
   const conn = new DshConnection({
     baseUrl: 'http://127.0.0.1:3097',
-    cookie: '{{SECRET_2hhd6mhb}}',
+    cookie: TEST_COOKIE,
     WebSocketImpl: FakeWebSocket,
   });
 
@@ -157,7 +159,7 @@ await check('1. DshConnection.ensureSocket：并发 openStream 共享同一连�
 await check('2. 断线自动重连 + 指数退避 + cursor/session/page 补齐遗漏事件且不重复显示消息', async () => {
   const conn = new DshConnection({
     baseUrl: 'http://127.0.0.1:3097',
-    cookie: '{{SECRET_2hhd6mhb}}',
+    cookie: TEST_COOKIE,
     WebSocketImpl: FakeWebSocket,
   });
   const store = new Store(conn, {
@@ -249,7 +251,7 @@ await check('2. 断线自动重连 + 指数退避 + cursor/session/page 补齐�
 await check('3. Cookie 失效（401/403）停止自动重连，不无限重试', async () => {
   const conn = new DshConnection({
     baseUrl: 'http://127.0.0.1:3097',
-    cookie: '{{SECRET_2hhd6mhb}}',
+    cookie: TEST_COOKIE,
     WebSocketImpl: FakeWebSocket,
   });
   const store = new Store(conn, {
@@ -282,7 +284,7 @@ await check('3. Cookie 失效（401/403）停止自动重连，不无限重试',
 await check('4. 会话切换（closeChat）取消待定重连定时器，重复 openChat 不重复建流', async () => {
   const conn = new DshConnection({
     baseUrl: 'http://127.0.0.1:3097',
-    cookie: '{{SECRET_2hhd6mhb}}',
+    cookie: TEST_COOKIE,
     WebSocketImpl: FakeWebSocket,
   });
   const store = new Store(conn, {
@@ -339,7 +341,7 @@ await check('5. App 前后台切换（handleAppForeground）与 P0-1 unknown 消
 
   const conn = new DshConnection({
     baseUrl: 'http://127.0.0.1:3097',
-    cookie: '{{SECRET_2hhd6mhb}}',
+    cookie: TEST_COOKIE,
     WebSocketImpl: FakeWebSocket,
   });
   const binding = {

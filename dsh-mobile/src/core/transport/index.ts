@@ -26,8 +26,9 @@ function makeRpcError(
 
   // 接口不存在 = 版本不匹配，这是最重要的一类
   const missing = /not-?found|unknown\s+method|no\s+such|unimplemented/i.test(lower);
-  const auth = kind === 'http' && /40[13]/.test(raw);
-  const authText = /unauthor|forbidden|invalid.*(token|cookie)/i.test(lower);
+  const auth = kind === 'http' && /(^|[^0-9])401([^0-9]|$)/.test(raw);
+  const authText = /unauthor|invalid.*(token|cookie)/i.test(lower);
+  const forbidden = (kind === 'http' && /(^|[^0-9])403([^0-9]|$)/.test(raw)) || /forbidden/i.test(lower);
   const serverErr = kind === 'http' && /5\d\d/.test(raw);
 
   let userTitle: string;
@@ -45,6 +46,12 @@ function makeRpcError(
     userHint =
       'DSH 服务可能重启过（token 每次启动都会变）。\n' +
       '回配对页用新的 token 重新连一次就好。';
+    retryable = false;
+  } else if (forbidden) {
+    userTitle = '服务地址未被允许访问（HTTP 403）';
+    userHint =
+      '当前登录凭据仍保留，但 DSH 拒绝了该访问地址（Host 未列入 trustedHosts 或代理地址不匹配）。\n' +
+      '请改用 DSH 实际监听的局域网 IP / 127.0.0.1，或在 DSH 配置中添加 trustedHosts。';
     retryable = false;
   } else if (kind === 'network') {
     userTitle = '连不上电脑上的 DSH';
@@ -162,6 +169,28 @@ export class DshConnection {
 
   get currentCookie(): string | undefined {
     return this.cookie;
+  }
+
+  /**
+   * 同步更新当前实例的会话 Cookie（如重新配对、服务端 Set-Cookie 轮换或退出清理）（P0-3）。
+   *
+   * 关键规则：
+   *   · 若 Cookie 发生变化，立即重置底层 WebSocket（`resetSocket`），避免旧连接继续使用旧身份；
+   *   · 同时异步同步到原生 CookieManager，保证 `credentials: 'include'` 与显式 `Cookie` 头完全一致。
+   */
+  setCookie(nextCookie: string | undefined): void {
+    const normalized = nextCookie?.trim() || undefined;
+    if (this.cookie === normalized) return;
+    const prev = this.cookie;
+    this.cookie = normalized;
+    if (prev !== undefined && prev !== normalized) {
+      this.resetSocket(normalized ? '凭据已更新，重置实时连接' : '登录状态已清除');
+    }
+    if (this.baseUrl && this.baseUrl !== 'http://127.0.0.1:1') {
+      void import('../cookieJar')
+        .then(({ syncNativeCookieJar }) => syncNativeCookieJar(this.baseUrl, normalized))
+        .catch(() => undefined);
+    }
   }
 
   /**
@@ -386,8 +415,23 @@ export class DshConnection {
       throw makeRpcError(endpoint, 'network', `${err?.name ?? ''}: ${err?.message ?? ''}`.trim(), e);
     }
     if (!res.ok) {
-      // HTTP 状态码本身也带信息：401 = 鉴权失效，5xx = 服务端内部错
+      // HTTP 状态码本身也带信息：401 = 鉴权失效，403 = 访问地址限制，5xx = 服务端内部错
       throw makeRpcError(endpoint, 'http', `HTTP ${res.status}`);
+    }
+    // P0-3：如果服务端在成功响应头中下发了轮换后的 dsh-auth Set-Cookie，同步更新内存 Cookie
+    try {
+      const setCookie = res.headers?.get?.('set-cookie');
+      if (setCookie && setCookie.includes('dsh-auth')) {
+        const rotated = extractCookie([setCookie]);
+        if (rotated && rotated.startsWith('dsh-auth') && rotated !== this.cookie) {
+          this.cookie = rotated;
+          void import('../cookieJar')
+            .then(({ syncNativeCookieJar }) => syncNativeCookieJar(this.baseUrl, rotated))
+            .catch(() => undefined);
+        }
+      }
+    } catch {
+      /* ignore header read differences across environments */
     }
     // 解析失败不能把原始异常抛给上层 —— 用户会看到
     // "Unexpected token < in JSON" 这种完全看不懂的东西。
@@ -449,31 +493,27 @@ export class DshConnection {
           if (typeof msg === 'string' && msg) {
             handshakeErrorText = redactUrl(msg);
           }
-          const isAuth =
-            /(^|[^0-9])(401|403)([^0-9]|$)|unauthorized|forbidden/i.test(handshakeErrorText);
-          finishReject(
-            makeRpcError(
-              'remote.mux',
-              isAuth ? 'http' : 'network',
-              isAuth
-                ? `HTTP 401 (${handshakeErrorText})`
-                : handshakeErrorText || 'WebSocket 连接失败：检查服务地址是否可达、服务是否还在运行',
-            ),
-          );
+          // ⚠️ 不要在 error 事件里立即 finishReject：
+          // Android OkHttp WebSocket 握手返回 401/403 时，RN 可能会先触发不带详细文本的
+          // error 事件，紧接着才触发携带 `Expected HTTP 101 response but was '401 Unauthorized'`
+          // 的 close 事件。若在 error 里提前 reject，就会把 401 丢成泛化的 network 错误！
         });
         ws.addEventListener('close', (ev: { code?: number; reason?: string }) => {
           const code = Number(ev?.code ?? 0);
           const why = String(ev?.reason ?? '');
           const combined = `${why} ${handshakeErrorText}`.trim();
-          const isAuth =
-            /(^|[^0-9])(401|403)([^0-9]|$)|unauthorized|forbidden/i.test(combined);
+          const is401 = /(^|[^0-9])401([^0-9]|$)|unauthorized/i.test(combined);
+          const is403 = /(^|[^0-9])403([^0-9]|$)|forbidden/i.test(combined);
+          const isHttp = is401 || is403;
           finishReject(
             makeRpcError(
               'remote.mux',
-              isAuth ? 'http' : 'network',
-              isAuth
+              isHttp ? 'http' : 'network',
+              is401
                 ? `HTTP 401 (${combined})`
-                : `WebSocket 握手关闭（code ${code}${why ? `：${why}` : ''}）`,
+                : is403
+                  ? `HTTP 403 (${combined})`
+                  : `WebSocket 连接失败（code ${code}${combined ? `：${combined}` : ''}）：检查服务地址是否可达、服务是否还在运行`,
             ),
           );
         });

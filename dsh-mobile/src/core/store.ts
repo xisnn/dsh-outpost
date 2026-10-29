@@ -20,7 +20,7 @@ import type { WorkspaceCustom } from '../core/workspace-custom';
 import { foldEvents, toChatItems, isInjectedMessage, stripModeTag, type ChatItem, type Turn } from '../core/fold';
 import { notifyDone } from '../core/notify';
 import { buildCompatReport, classifyError } from '../core/protocol';
-import { isAuthFailure, isRetryable, RpcError } from '../core/rpc-error';
+import { isAuthFailure, isForbiddenRejection, isRetryable, RpcError } from '../core/rpc-error';
 import type { NoticeItem, NoticeKind } from '../components/NoticeHost';
 import {
   ApprovalGateway,
@@ -126,11 +126,19 @@ function describeLoadError(e: unknown): string {
     );
   }
 
-  // 凭据失效：要去重新配对
-  if (/401|403|unauthorized|forbidden|not authenticated/i.test(raw)) {
+  // 凭据失效（401）：要去重新配对
+  if (/(^|[^0-9])401([^0-9]|$)|unauthorized|not authenticated/i.test(raw)) {
     return (
       '登录凭据已失效。\n\n' +
       '请在电脑上重新获取带 token 的链接，回到配对页重新连接。'
+    );
+  }
+
+  // 403 访问地址限制（trusted-host / Origin）：凭据仍保留，不能当成凭据失效
+  if (/(^|[^0-9])403([^0-9]|$)|forbidden/i.test(raw)) {
+    return (
+      '服务地址未被允许访问（HTTP 403）。\n\n' +
+      '当前登录凭据仍有效，但 DSH 拒绝了该访问地址（Host 未列入 trustedHosts）。请检查服务地址是否为 DSH 监听的局域网 IP / 127.0.0.1。'
     );
   }
 
@@ -241,6 +249,8 @@ export class Store {
   connectionError?: string;
   /** 给用户看的友好提示（分类后的，含下一步建议） */
   connectionHint?: string;
+  /** P0-3：当前会话是否已遇到不可自动恢复的终止态（401 凭据失效或 403 地址受限），停止后台高频轮询 */
+  authInvalidated = false;
 
   /** 账户余额（null = 未加载） */
   balance: BalanceResult | null = null;
@@ -654,8 +664,66 @@ export class Store {
       for (const key of [...this.lastScan.keys()]) {
         if (!alive.has(key)) this.lastScan.delete(key);
       }
-    } catch {
+    } catch (e) {
+      if (isAuthFailure(e) || isForbiddenRejection(e)) {
+        this.markAuthTerminal(e);
+      }
       // 扫描失败静默，不影响主流程
+    }
+  }
+
+  /**
+   * 标记当前连接进入不可自动恢复的认证/访问终止态（P0-3）：
+   *   · 401（凭据失效）或 403（trusted-host 限制）时停止后台轮询与自动重连，避免无效请求风暴；
+   *   · 不清除 Keychain 中的凭据（保留给用户判断或待 trustedHosts 修正后恢复）；
+   *   · 将 connection 置为 'error' 并更新明确提示。
+   */
+  private markAuthTerminal(e: unknown): void {
+    this.authInvalidated = true;
+    this.connection = 'error';
+    this.connectionError = e instanceof Error ? e.message : String(e);
+    if (e instanceof RpcError) {
+      this.connectionHint = `${e.userTitle}\n${e.userHint}`;
+    } else {
+      const info = classifyError(e);
+      this.connectionHint = `${info.title}\n${info.hint}`;
+    }
+    this.stopNoticeScan();
+    for (const [sid, sEntry] of this.streams.entries()) {
+      if (sEntry.retryTimer) {
+        clearTimeout(sEntry.retryTimer);
+        sEntry.retryTimer = undefined;
+      }
+      sEntry.connecting = false;
+      const cur = this.getChat(sid);
+      this.chats.set(sid, {
+        ...cur,
+        loading: false,
+        running: false,
+        error: isAuthFailure(e)
+          ? '登录状态已失效，请回配对页重新连接'
+          : '服务地址未被允许访问（HTTP 403：Host 未受信任），当前凭据已保留',
+      });
+    }
+    this.emit();
+  }
+
+  /** 同步更新当前 Store 持有的会话 Cookie，并在变化时重置旧连接、恢复正常连接态（P0-3） */
+  syncCookie(cookie: string | undefined): void {
+    const prev = this.conn.currentCookie;
+    this.conn.setCookie(cookie);
+    if (cookie && cookie !== prev) {
+      this.authInvalidated = false;
+      this.connection = 'connected';
+      this.connectionError = undefined;
+      this.connectionHint = undefined;
+      this.emit();
+    } else if (!cookie) {
+      this.authInvalidated = true;
+      this.connection = 'idle';
+      this.stopNoticeScan();
+      for (const id of [...this.streams.keys()]) this.closeChat(id);
+      this.emit();
     }
   }
 
@@ -1038,7 +1106,10 @@ export class Store {
     this.emit();
     try {
       const cookie = await this.conn.loginWithToken(token);
+      this.authInvalidated = false;
       this.connection = 'connected';
+      this.connectionError = undefined;
+      this.connectionHint = undefined;
       this.emit();
       return cookie;
     } catch (e) {
@@ -1059,6 +1130,7 @@ export class Store {
       //
       // 8 秒没响应就当连不上：给用户明确结论，别让他干等。
       await withTimeout(this.api.list(), PROBE_TIMEOUT_MS);
+      this.authInvalidated = false;
       this.connection = 'connected';
       this.connectionError = undefined;
       this.connectionHint = undefined;
@@ -1189,10 +1261,17 @@ export class Store {
       // 加载前先同步一次，避免新设备/清缓存后状态错乱
       await this.ensureArchivedLoaded();
       const items = await this.api.list();
+      this.authInvalidated = false;
+      this.connection = 'connected';
+      this.connectionError = undefined;
+      this.connectionHint = undefined;
       this.sessions = items;
       this.workspaces = groupByWorkspace(this.visibleSessions(items));
       this.sessionsError = undefined;
     } catch (e) {
+      if (isAuthFailure(e) || isForbiddenRejection(e)) {
+        this.markAuthTerminal(e);
+      }
       // 用户看到的是这句话，所以要用人话。
       //
       // RpcError 有两个字段：
@@ -1431,6 +1510,10 @@ export class Store {
       }
 
       const status = readStatus(snapshot.projections);
+      this.authInvalidated = false;
+      this.connection = 'connected';
+      this.connectionError = undefined;
+      this.connectionHint = undefined;
       this.updateChatFromRecords(sessionId, {
         title: status.title,
         contextUsed: status.contextUsed,
@@ -1523,27 +1606,48 @@ export class Store {
     entry.connecting = false;
 
     const raw = error instanceof Error ? error.message : String(error);
-    const authRejected =
-      isAuthFailure(error) ||
-      /(^|[^0-9])(401|403)([^0-9]|$)|unauthorized|forbidden|not authenticated/i.test(raw);
+    const authRejected = isAuthFailure(error) || (this.authInvalidated && /401|unauthor/i.test(this.connectionError ?? ''));
+    const forbiddenRejected =
+      (!authRejected && isForbiddenRejection(error)) ||
+      (!authRejected && this.authInvalidated && /403|forbidden/i.test(this.connectionError ?? ''));
 
-    if (authRejected) {
+    if (authRejected || forbiddenRejected) {
       if (entry.retryTimer) {
         clearTimeout(entry.retryTimer);
         entry.retryTimer = undefined;
+      }
+      if (!this.authInvalidated) {
+        this.markAuthTerminal(error);
       }
       const cur = this.getChat(sessionId);
       this.chats.set(sessionId, {
         ...cur,
         loading: false,
         running: false,
-        error: '登录状态已失效，请回配对页重新连接',
+        error: authRejected
+          ? '登录状态已失效，请回配对页重新连接'
+          : '服务地址未被允许访问（HTTP 403：Host 未受信任），当前凭据已保留',
       });
       if (IS_DEV) {
-        console.log(`[p0-2-verify] auth-stopped sessionId=${sessionId} reason=${raw}`);
+        console.log(
+          `[p0-2-verify] auth-stopped sessionId=${sessionId} kind=${authRejected ? '401' : '403'} reason=${raw}`,
+        );
       }
       this.emit();
       return;
+    }
+
+    // P0-3：后台主动用轻量 HTTP 探针复核一次是否为 401/403（RN Android OkHttp WS 握手失败可能不透传 HTTP 状态码）
+    const isReactNative =
+      typeof navigator !== 'undefined' &&
+      (navigator as { product?: string }).product === 'ReactNative';
+    if (isReactNative && entry.retryAttempt >= 1 && !this.authInvalidated) {
+      void withTimeout(this.api.list(), 2500).catch((probeErr) => {
+        if (this.streams.get(sessionId) !== entry || entry.generation !== generation) return;
+        if (isAuthFailure(probeErr) || isForbiddenRejection(probeErr)) {
+          this.handleStreamDisconnect(sessionId, entry, generation, probeErr);
+        }
+      });
     }
 
     const attempt = entry.retryAttempt;
@@ -1572,7 +1676,7 @@ export class Store {
     if (entry.retryTimer) clearTimeout(entry.retryTimer);
     entry.retryTimer = setTimeout(() => {
       entry.retryTimer = undefined;
-      if (this.streams.get(sessionId) !== entry || entry.generation !== generation) return;
+      if (this.streams.get(sessionId) !== entry || entry.generation !== generation || this.authInvalidated) return;
       void this.connectChatStream(sessionId, true);
     }, delayMs);
   }
@@ -2167,7 +2271,7 @@ export class Store {
    * - 刷新会话列表。
    */
   handleAppForeground(baseUrl?: string): void {
-    if (!this.conn.hasCookie) return;
+    if (!this.conn.hasCookie || this.authInvalidated) return;
     if (IS_DEV) {
       console.log(`[p0-2-verify] app-foreground activeStreams=${this.streams.size}`);
     }

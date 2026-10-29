@@ -75,15 +75,19 @@ export function PairScreen() {
     setClip(null);
   };
 
+  const connectSeq = React.useRef(0);
   const doResume = async () => {
+    const seq = ++connectSeq.current;
     setResuming(true);
     setError(null);
     const ok = await resumePairing();
+    if (connectSeq.current !== seq) return;
     setResuming(false);
     if (!ok) setError('上次的配对已失效，请用电脑上的 token 重新配对');
   };
 
   const connect = async (override?: { url?: string; token?: string }) => {
+    const seq = ++connectSeq.current;
     setBusy(true);
     setError(null);
     try {
@@ -121,6 +125,7 @@ export function PairScreen() {
       let cookie: string | undefined;
       let lastErr: unknown;
       for (const candidate of candidates) {
+        if (connectSeq.current !== seq) return;
         const conn = new DshConnection({ baseUrl: trimmedUrl });
         const store = new Store(conn);
 
@@ -138,17 +143,32 @@ export function PairScreen() {
         }
 
         const ok = await store.ping();
+        const pingHint = store.connectionHint;
+        const pingErr = store.connectionError;
         store.close();
-        if (!ok) throw new Error('cookie 已拿到但验证失败，请检查服务是否正常');
+        if (connectSeq.current !== seq) return;
+        if (!ok) {
+          if (pingErr && /(^|[^0-9])403([^0-9]|$)|forbidden/i.test(pingErr)) {
+            throw new Error(
+              pingHint ||
+                'cookie 已拿到，但服务地址未被允许访问（HTTP 403：Host 未列入 trustedHosts）',
+            );
+          }
+          throw new Error('cookie 已拿到但验证失败，请检查服务是否正常');
+        }
         break;
       }
+      if (connectSeq.current !== seq) return;
       if (!cookie) throw lastErr instanceof Error ? lastErr : new Error(String(lastErr));
 
       await saveCookie(cookie);
     } catch (e) {
+      if (connectSeq.current !== seq) return;
       setError(e instanceof Error ? e.message : String(e));
     } finally {
-      setBusy(false);
+      if (connectSeq.current === seq) {
+        setBusy(false);
+      }
     }
   };
 

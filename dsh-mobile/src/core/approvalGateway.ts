@@ -836,6 +836,7 @@ export class ApprovalGateway {
     try {
       // 管理接口在 web server 端口上（不是网关的 3081）
       const base = this.baseUrl.replace(/\/+$/, '');
+      const cookie = await loadCredential(CredentialKey.cookie).catch(() => undefined);
       const ctrl = new AbortController();
       const timer = setTimeout(() => ctrl.abort(), 8000);
       let res: Response;
@@ -843,7 +844,12 @@ export class ApprovalGateway {
         res = await fetch(`${base}/mgw/pair`, {
           method: 'POST',
           credentials: 'include',
-          headers: { 'Content-Type': 'application/json' },
+          headers: {
+            'Content-Type': 'application/json',
+            ...(cookie ? { Cookie: cookie } : {}),
+            Origin: base,
+            Referer: `${base}/`,
+          },
           body: '{}',
           signal: ctrl.signal,
         });

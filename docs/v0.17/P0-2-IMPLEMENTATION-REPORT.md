@@ -3,6 +3,7 @@
 日期：2026-10-29
 分支：`feat/v0.17`
 前置基线：`c897257`（P0-1 COMPLETE）
+P0-2 代码提交：`f62813b`
 测试 APK：`dsh-mobile/android/app/build/outputs/apk/debug/app-debug.apk`
 APK SHA-256：`0E3C2C3062A09CD710EF04C6FD2AEC80211AEFE47FED04F9A440432658B04EA0`
 模拟器：`dsh_verify`（`emulator-5584`）+ 隔离 DSH 实例（`127.0.0.1:3097`）
@@ -57,6 +58,18 @@ APK SHA-256：`0E3C2C3062A09CD710EF04C6FD2AEC80211AEFE47FED04F9A440432658B04EA0`
 3. Cookie 失效（`401/403`）停止自动重连，不无限重试 — **OK**
 4. 会话切换（`closeChat`）取消待定重连定时器，重复 `openChat` 不重复建流 — **OK**
 5. App 前后台切换（`handleAppForeground`）与 P0-1 `unknown` 消息重连后自动对账为 `confirmed`（`requestId` 不变） — **OK**
+
+相关回归测试汇总（全部 PASS）：
+- `npm run typecheck`：PASS
+- `npm run test:wsReconnect`：5/5 PASS
+- `npm run test:disconnect`：10/10 PASS
+- `npm run test:recovery`：15/15 PASS
+- `npm run test:pendingSendStore`：15/15 PASS
+- `npm run test:pendingSendFlow`：9/9 PASS
+- `npm run test:pendingSendAttachments`：23/23 PASS
+- `npx tsx tests/p0-verify-spec.mjs`：3/3 PASS
+- `npx tsx tests/p0-verify-behavior-spec.mjs`：5/5 PASS
+- `npm run test:integration`：61/61 PASS
 
 ---
 

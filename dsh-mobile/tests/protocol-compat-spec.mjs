@@ -30,6 +30,7 @@ import {
   RpcError,
   isEndpointMissing,
   isAuthFailure,
+  isForbiddenRejection,
   isRetryable,
 } from '../src/core/rpc-error.ts';
 
@@ -244,7 +245,7 @@ check('isEndpointMissing 能识别版本不匹配', () => {
   return isEndpointMissing(e) ? true : '识别不出接口缺失';
 });
 
-check('isAuthFailure 能识别 401/403', () => {
+check('isAuthFailure 只将 401 识别为凭据失效，403 由 isForbiddenRejection 单独识别（trusted-host 区分）', () => {
   const e401 = new RpcError({
     endpoint: 'x/y',
     kind: 'http',
@@ -261,7 +262,9 @@ check('isAuthFailure 能识别 401/403', () => {
     userHint: '',
     retryable: false,
   });
-  return isAuthFailure(e401) && isAuthFailure(e403) ? true : '识别不出鉴权失败';
+  return isAuthFailure(e401) && !isAuthFailure(e403) && isForbiddenRejection(e403)
+    ? true
+    : '未能正确区分 401 凭据失效与 403 访问地址限制';
 });
 
 check('网络错误标记为可重试，接口缺失标记为不可重试', () => {
