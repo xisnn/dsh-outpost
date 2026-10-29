@@ -43,6 +43,8 @@ import {
   type ListTail,
 } from '../core/scrollFollow';
 import { buildAssistantCopyText } from '../core/copyText';
+import { buildWorkGroupMap } from '../core/workGroup';
+import { WorkGroupCard } from '../components/WorkGroupCard';
 import { AssistantRichText } from '../components/AssistantRichText';
 import { TeamBar } from '../components/TeamBar';
 import { TeamStrip } from '../components/TeamStrip';
@@ -527,6 +529,19 @@ export function ChatScreen({
     setActionText(text);
   }, []);
 
+  /**
+   * F-02 执行过程组：每轮一个组，只在该轮第一个 assistant item 上渲染；
+   * 同轮后续 step 的 item 直接跳过（内容已经在组里）。
+   */
+  const workGroups = useMemo(() => buildWorkGroupMap(chat.turns), [chat.turns]);
+  const firstAssistantKey = useMemo(() => {
+    const map = new Map<number, string>();
+    for (const i of chat.items) {
+      if (i.kind === 'assistant' && !map.has(i.turn)) map.set(i.turn, i.key);
+    }
+    return map;
+  }, [chat.items]);
+
   // 审批网关的连/断已经上移到 App 级（见 App.tsx 的 GlobalNotices）。
   //
   // 原来在这里 connect + 卸载时 disconnect，问题有两个：
@@ -783,6 +798,27 @@ export function ChatScreen({
             }
             if (item.kind === 'teammate') {
               return <TeammateNote from={item.from} text={item.text} notice={item.notice} />;
+            }
+            // F-02：执行过程组（思考 + 工具）默认折叠；最终回答单独渲染在组外。
+            // 管家模式（butler）不启用：它本来就把工具藏在队员事件流里。
+            const group = !butler && !item.delegated ? workGroups.get(item.turn) : undefined;
+            if (group) {
+              if (firstAssistantKey.get(item.turn) !== item.key) return null;
+              const finalText = buildAssistantCopyText(group.finalBlocks);
+              return (
+                <View>
+                  <WorkGroupCard group={group} sessionId={sessionId} />
+                  {group.finalBlocks.length > 0 ? (
+                    <View>
+                      {renderBlocks(group.finalBlocks, `${item.key}-final`, {
+                        onLongPressText: finalText
+                          ? () => openMessageActions(finalText)
+                          : undefined,
+                      })}
+                    </View>
+                  ) : null}
+                </View>
+              );
             }
             // 派过活的那一轮：管家的汇总默认折叠，点开才看
             // （闲聊回复 delegated 为 false，直接显示，不打扰用户）
