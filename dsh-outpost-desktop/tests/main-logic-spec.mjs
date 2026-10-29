@@ -302,6 +302,18 @@ check('渲染层优先用 portListening 判断（不用隧道服务的旧值）'
   return body.includes('portListening') ? true : '还在依赖隧道服务的 dshRunning（会误报）';
 });
 
+check('渲染层隧道二维码与复制链接包含配对 token（pairUrl）', () => {
+  const hasTunnelPairUrl =
+    rendererApp.includes('st.tunnelInfo?.pairUrl') &&
+    rendererApp.includes("renderQr('tunnel', tunnelPairUrl)");
+  const hasCopyTunnelPairUrl =
+    rendererApp.includes('last?.tunnelInfo?.pairUrl') &&
+    rendererApp.includes('tunnelCopyUrl');
+  return hasTunnelPairUrl && hasCopyTunnelPairUrl
+    ? true
+    : '隧道二维码或复制链接只用了不带 token 的域名，手机扫码会无法自动连接';
+});
+
 // ── 隧道服务的端口检测改法 ──────────────────────────────────────
 
 check('隧道服务用 net 探端口（不再 execFile PowerShell）', () => {
