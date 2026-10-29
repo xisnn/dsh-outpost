@@ -27,6 +27,7 @@ import { StyleSheet, Text, View } from 'react-native';
 import { useTheme } from '../design/theme';
 
 import { parseMarkdown, parseInline, type Block, type Inline } from '../core/markdown';
+import { CopyTextButton } from './CopyTextButton';
 
 export { parseMarkdown, parseInline };
 
@@ -73,7 +74,14 @@ function BlockView({ block }: { block: Block }) {
     case 'code':
       return (
         <View style={styles.codeBox}>
-          {block.lang ? <Text style={styles.codeLang}>{block.lang}</Text> : null}
+          {/* 标题栏：左边语言名，右边一键复制。
+              复制按钮是「次要动作」，字号压到最小、常态几乎隐形（见 CopyTextButton） */}
+          <View style={styles.codeHead}>
+            <Text style={styles.codeLang} numberOfLines={1}>
+              {block.lang ?? 'code'}
+            </Text>
+            <CopyTextButton text={block.text} accessibilityLabel="复制代码" />
+          </View>
           <Text style={styles.codeText} selectable>
             {block.text}
           </Text>
@@ -197,10 +205,17 @@ function makeStyles(tv: ReturnType<typeof useTheme>) {
       padding: tv.space.sm,
       marginVertical: tv.space.sm,
     },
+    codeHead: {
+      flexDirection: 'row',
+      alignItems: 'center',
+      justifyContent: 'space-between',
+      marginBottom: 4,
+    },
     codeLang: {
       color: C.textFaint,
       fontSize: tv.type.micro,
-      marginBottom: 4,
+      flexShrink: 1,
+      marginRight: 8,
     },
     codeText: {
       fontFamily: 'monospace',

@@ -30,7 +30,18 @@ import { useNav } from '../nav/NavHost';
 import { Header } from '../components/Header';
 import { useTheme } from '../design/theme';
 import { layout, radius, space, type, weight } from '../design/tokens';
-import { AssistantText, UserBubble } from '../components/Message';
+import { AssistantCopyRow, AssistantText, UserBubble } from '../components/Message';
+import { JumpToBottomFab } from '../components/JumpToBottomFab';
+import {
+  NEAR_BOTTOM_PX,
+  classifyListChange,
+  distanceFromBottom,
+  shouldMarkNewContent,
+  shouldShowJumpToBottom,
+  tailOf,
+  type ListTail,
+} from '../core/scrollFollow';
+import { buildAssistantCopyText } from '../core/copyText';
 import { AssistantRichText } from '../components/AssistantRichText';
 import { TeamBar } from '../components/TeamBar';
 import { TeamStrip } from '../components/TeamStrip';
@@ -115,6 +126,29 @@ export function ChatScreen({
   const [switchWs, setSwitchWs] = useState(false);
   const scrollRef = useRef<FlatList<ChatItem>>(null);
   const [nearBottom, setNearBottom] = useState(true);
+  /**
+   * 滚动跟随状态（判据在 core/scrollFollow.ts，可单测）：
+   *   · awayFromBottom —— 离底够远，浮出「回到底部」按钮（带迟滞，防闪）
+   *   · hasNewContent  —— 离开底部期间末尾真的长了，按钮上亮圆点
+   * 距离用 ref 存：每帧滚动都 setState 会让整个聊天页重渲染。
+   */
+  const distanceRef = useRef(0);
+  const awayRef = useRef(false);
+  const [awayFromBottom, setAwayFromBottom] = useState(false);
+  const hasNewContentRef = useRef(false);
+  const [hasNewContent, setHasNewContent] = useState(false);
+  /** 上一次的列表尾部签名，用来区分「末尾新增」和「加载更早」 */
+  const tailRef = useRef<ListTail | null>(null);
+  /** 输入区高度：回到底部按钮浮在它上方（跟着草稿栏/打断按钮变化） */
+  const [composerHeight, setComposerHeight] = useState(0);
+  /**
+   * 首次落底之前不要开 `maintainVisibleContentPosition`。
+   *
+   * 它会「把当前可见项钉住」——初次布局时列表还停在顶部，钉住顶部就会
+   * 和 scrollToEnd 抢，表现为进会话偶尔停在历史中间。等首次滚到底
+   * （给一帧余量）再启用，之后「加载更早」才有稳定的锚点。
+   */
+  const [anchorReady, setAnchorReady] = useState(false);
 
   // 地址是对象，不能直接进依赖：用字符串 key 固定住
   const addressKey = address
@@ -245,6 +279,64 @@ export function ChatScreen({
     }
   }, [chat.items.length, nearBottom]);
 
+  // 首次落底后再开「保持可见位置」（见 anchorReady 的注释）
+  useEffect(() => {
+    if (anchorReady) return;
+    const timer = setTimeout(() => setAnchorReady(true), 800);
+    return () => clearTimeout(timer);
+  }, [anchorReady]);
+
+  /**
+   * 滚动度量 → 三个派生状态。
+   *
+   * 只有跨过阈值时才 setState：滚动事件 10Hz，无条件 set 会把整页重渲染
+   * 十几次/秒（长会话上肉眼可见地掉帧）。
+   */
+  const applyScrollMetrics = useCallback((distance: number) => {
+    distanceRef.current = distance;
+    setNearBottom(distance < NEAR_BOTTOM_PX);
+
+    const nextAway = shouldShowJumpToBottom(distance, awayRef.current);
+    if (nextAway !== awayRef.current) {
+      awayRef.current = nextAway;
+      setAwayFromBottom(nextAway);
+    }
+
+    // 已经回到底部：新内容提示自动熄灭（用户已经看到了）
+    if (distance < NEAR_BOTTOM_PX && hasNewContentRef.current) {
+      hasNewContentRef.current = false;
+      setHasNewContent(false);
+    }
+  }, []);
+
+  /**
+   * 列表尾部变化 → 是否要亮「有新内容」圆点。
+   *
+   * ⚠️ 判据是「末尾真的长了」，不是「items 变了」：
+   * 点「加载更早」会让 items 变长，但那是往回翻，亮圆点就是骗人。
+   * 具体的四类判定在 classifyListChange（core/scrollFollow.ts）。
+   */
+  useEffect(() => {
+    const next = tailOf(chat.items);
+    const change = classifyListChange(tailRef.current, next);
+    tailRef.current = next;
+    if (shouldMarkNewContent(change, distanceRef.current) && !hasNewContentRef.current) {
+      hasNewContentRef.current = true;
+      setHasNewContent(true);
+    }
+  }, [chat.items]);
+
+  /** 点「回到底部」：滚到底 + 立刻清掉提示（不等滚动事件回来） */
+  const jumpToBottom = useCallback(() => {
+    hasNewContentRef.current = false;
+    setHasNewContent(false);
+    awayRef.current = false;
+    setAwayFromBottom(false);
+    distanceRef.current = 0;
+    setNearBottom(true);
+    scrollRef.current?.scrollToEnd({ animated: true });
+  }, []);
+
   /**
    * 键盘弹出后把列表滚到底。
    *
@@ -334,8 +426,8 @@ export function ChatScreen({
     [retryingPendingId, sessionId, store],
   );
 
-  const renderBlocks = (blocks: Block[], keyPrefix: string) =>
-    blocks.map((b, i) => {
+  const renderBlocks = (blocks: Block[], keyPrefix: string, opts?: { copyText?: string }) => {
+    const nodes = blocks.map((b, i) => {
       // 管家页只显示「人话」：工具调用留给队员事件流。
       // 但思考过程要留 —— 它在生成时可见，能明显减轻「干等着」的焦虑；
       // 跑完就自动收起成一行，不占地方。
@@ -384,6 +476,32 @@ export function ChatScreen({
       return <ToolCard key={`${keyPrefix}-c${i}`} block={b} />;
     });
 
+    /*
+      「复制这条消息」挂在最后一段正文之后，而不是整块末尾：
+      一轮里工具卡常常排在正文后面，挂末尾会让按钮落在工具卡下方，离正文很远。
+      没有正文（只有工具调用）时不显示 —— 没有可复制的人话。
+    */
+    if (opts?.copyText) {
+      let lastTextIndex = -1;
+      for (let i = blocks.length - 1; i >= 0; i -= 1) {
+        const blk = blocks[i];
+        if (blk.kind === 'text' && (blk.text ?? '').trim()) {
+          lastTextIndex = i;
+          break;
+        }
+      }
+      if (lastTextIndex >= 0) {
+        nodes.splice(
+          lastTextIndex + 1,
+          0,
+          <AssistantCopyRow key={`${keyPrefix}-copy`} text={opts.copyText} />,
+        );
+      }
+    }
+
+    return nodes;
+  };
+
   // 空会话 = 还没有任何轮次、也没有内容；这种会话连不上属于正常（follow 流可能还没就绪）
   const isBlankChat = chat.turns.length === 0 && chat.items.length === 0;
 
@@ -399,6 +517,20 @@ export function ChatScreen({
     const last = chat.turns.at(-1);
     return last?.approvals ?? [];
   }, [chat.turns]);
+
+  /**
+   * 每轮里「最后一条助手步骤」的 key。
+   *
+   * 只有它才配「复制全文」：中间步骤（工具调用前后的说明）各挂一个按钮
+   * 会满屏都是按钮，而用户想复制的几乎总是最终答案。
+   */
+  const finalAssistantKeys = useMemo(() => {
+    const lastByTurn = new Map<number, string>();
+    for (const it of chat.items) {
+      if (it.kind === 'assistant') lastByTurn.set(it.turn, it.key);
+    }
+    return new Set(lastByTurn.values());
+  }, [chat.items]);
 
   // 审批网关的连/断已经上移到 App 级（见 App.tsx 的 GlobalNotices）。
   //
@@ -549,6 +681,12 @@ export function ChatScreen({
           maxToRenderPerBatch={12}
           windowSize={9}
           removeClippedSubviews={false}
+          /*
+            「加载更早」把旧消息插到头部时，让 RN 自己维持当前可见位置，
+            否则用户正在读的那一行会被顶下去（一次翻页能跳半屏）。
+            只在头部插入时生效；正常追加（新消息）不受影响。
+          */
+          maintainVisibleContentPosition={anchorReady ? { minIndexForVisible: 0 } : undefined}
           onScroll={(e: {
             nativeEvent: {
               layoutMeasurement: { height: number };
@@ -557,8 +695,13 @@ export function ChatScreen({
             };
           }) => {
             const { layoutMeasurement, contentOffset, contentSize } = e.nativeEvent;
-            const distance = contentSize.height - contentOffset.y - layoutMeasurement.height;
-            setNearBottom(distance < 80);
+            applyScrollMetrics(
+              distanceFromBottom({
+                contentHeight: contentSize.height,
+                offsetY: contentOffset.y,
+                viewportHeight: layoutMeasurement.height,
+              }),
+            );
           }}
           scrollEventThrottle={100}
           onContentSizeChange={() => {
@@ -647,17 +790,20 @@ export function ChatScreen({
             }
             // 派过活的那一轮：管家的汇总默认折叠，点开才看
             // （闲聊回复 delegated 为 false，直接显示，不打扰用户）
+            const copyText = finalAssistantKeys.has(item.key)
+              ? buildAssistantCopyText(item.blocks)
+              : '';
             if (item.delegated) {
               const doneCount = (chat.agentTeam?.tasks ?? []).filter(
                 (t) => t.status === 'completed',
               ).length;
               return (
                 <CompletionNotice taskCount={doneCount}>
-                  {renderBlocks(item.blocks, item.key)}
+                  {renderBlocks(item.blocks, item.key, { copyText })}
                 </CompletionNotice>
               );
             }
-            return <View>{renderBlocks(item.blocks, item.key)}</View>;
+            return <View>{renderBlocks(item.blocks, item.key, { copyText })}</View>;
           }}
         />
 
@@ -672,6 +818,11 @@ export function ChatScreen({
                 kbHeight > 0 ? space.sm : embedded ? space.sm : Math.max(insets.bottom, space.sm),
             },
           ]}
+          onLayout={(e: { nativeEvent: { layout: { height: number } } }) => {
+            const h = Math.round(e.nativeEvent.layout.height);
+            // 输入区高度变化（草稿栏 / 打断按钮 / 报错行）→ 回到底部按钮跟着让位
+            setComposerHeight((prev) => (prev === h ? prev : h));
+          }}
         >
           {/* 普通聊天用底部团队条；管家模式用顶部头像条，别重复 */}
           {butler ? null : <TeamBar team={chat.agentTeam} />}
@@ -831,6 +982,14 @@ export function ChatScreen({
         </Modal>
         </>
         )}
+
+        {/* 回到底部：只在「用户往上翻了」时出现，浮在输入区正上方 */}
+        <JumpToBottomFab
+          visible={awayFromBottom}
+          hasNewContent={hasNewContent}
+          onPress={jumpToBottom}
+          bottomOffset={readOnly ? 0 : composerHeight}
+        />
       </KeyboardAvoidingView>
 
       {/* 团队浮层：头像条点开，再点某个队员才进他的事件流 */}
