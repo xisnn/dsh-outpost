@@ -204,6 +204,36 @@ check('正文内部空行保留、块间用空行分隔', () => {
   return text === 'a\n\nb\n\nc' ? true : JSON.stringify(text);
 });
 
+// ── 流式 / 思考 / 工具场景（对应本轮交互规范的 6/7/8） ────────────────
+check('流式中的半句也能复制（不要求整轮结束）', () => {
+  const partial = buildAssistantCopyText([{ kind: 'text', text: '正在生成的半句' }]);
+  return partial === '正在生成的半句' ? true : '流式正文被吞掉';
+});
+
+check('只有思考时复制结果为空（不弹/不复制思考）', () => {
+  const text = buildAssistantCopyText([
+    { kind: 'reasoning', text: '想了很久' },
+    { kind: 'reasoning', text: '继续想' },
+  ]);
+  return text === '' ? true : JSON.stringify(text);
+});
+
+check('工具执行中（多有 tool 块）不混入日志', () => {
+  const text = buildAssistantCopyText([
+    { kind: 'reasoning', text: '先看看文件' },
+    { kind: 'text', text: '我先读一下配置。' },
+    { kind: 'tool', text: '{"path":"a.ts","stdout":"SECRET LOG"}' },
+    { kind: 'tool', text: 'exit 0' },
+  ]);
+  return text === '我先读一下配置。' ? true : JSON.stringify(text);
+});
+
+check('多轮对话各自只取自己的正文', () => {
+  const t1 = buildAssistantCopyText([{ kind: 'text', text: '第一轮答案' }]);
+  const t2 = buildAssistantCopyText([{ kind: 'text', text: '第二轮答案' }]);
+  return t1 === '第一轮答案' && t2 === '第二轮答案' ? true : '两轮正文串了';
+});
+
 // ── 静态检查：UI 是否真的接上了（少量、只守结构不变式） ─────────────
 console.log('\n── UI 接线静态检查 ─────────────────────────────────────');
 
@@ -211,6 +241,8 @@ const chatSrc = readFileSync('src/screens/ChatScreen.tsx', 'utf8');
 const mdSrc = readFileSync('src/components/MarkdownView.tsx', 'utf8');
 const fabSrc = readFileSync('src/components/JumpToBottomFab.tsx', 'utf8');
 const clipSrc = readFileSync('src/components/clipboard.ts', 'utf8');
+const msgSrc = readFileSync('src/components/Message.tsx', 'utf8');
+const sheetSrc = readFileSync('src/components/MessageActionSheet.tsx', 'utf8');
 
 check('聊天页渲染回到底部按钮并传入新内容状态', () => {
   const hasFab = /<JumpToBottomFab[\s\S]{0,200}hasNewContent=\{hasNewContent\}/.test(chatSrc);
@@ -229,16 +261,57 @@ check('聊天页用纯函数判定离底与显隐（没有内联魔数）', () =
   return usesHelper ? true : 'ChatScreen 没走 core/scrollFollow 的判定函数';
 });
 
-check('聊天页复制入口只挂在每轮最后一条助手步骤', () =>
-  /finalAssistantKeys/.test(chatSrc) && /buildAssistantCopyText\(item\.blocks\)/.test(chatSrc)
-    ? true
-    : '复制入口没有按「每轮最后一步」收敛',
-);
+// ── 复制交互：长按面板，不再有常驻按钮 ──────────────────────────────
+check('助手消息不再有常驻「复制」行（AssistantCopyRow 已移除）', () => {
+  const hasRow = /AssistantCopyRow/.test(chatSrc) || /AssistantCopyRow/.test(msgSrc);
+  return hasRow ? false : true;
+});
+
+check('长按消息打开 MessageActionSheet，且传入正文', () => {
+  const usesSheet = /<MessageActionSheet[\s\S]{0,200}text=\{actionText/.test(chatSrc);
+  const opensOnLongPress = /onLongPress=\{openMessageActions\}/.test(chatSrc);
+  return usesSheet && opensOnLongPress ? true : '没有把长按连接到 MessageActionSheet';
+});
+
+check('助手正文把长按回调透传到 Markdown 文本', () => {
+  const chatPasses = /<AssistantText[\s\S]{0,200}onLongPress=\{opts\?\.onLongPressText\}/.test(chatSrc);
+  const msgPasses = /<AssistantRichText[\s\S]{0,200}onLongPress=\{onLongPress\}/.test(msgSrc);
+  // 长按由 MarkdownView 外层 Pressable 承担（Text 级 onLongPress 在 Fabric 下不可靠）
+  const mdUses = /<Pressable onLongPress=\{onLongPress\}/.test(mdSrc);
+  return chatPasses && msgPasses && mdUses ? true : '长按回调没有透传到正文';
+});
+
+check('正文长按与原生选择分开承载（正文保持 selectable）', () => {
+  const sheetHasCopy = /复制全文/.test(sheetSrc) && /copyTextToClipboard\(text\)/.test(sheetSrc);
+  // 正文必须是 selectable：双击选词 / 拖动选择手柄都靠它
+  const bodySelectable = /bodyTextProps[\s\S]{0,120}selectable: true/.test(mdSrc);
+  return sheetHasCopy && bodySelectable ? true : '正文不可选，或面板缺少复制入口';
+});
+
+check('Thinking / 工具输出没有独立复制按钮', () => {
+  // thinking 用 ThinkingAccordion、工具用 ToolCard；两者都不接受 copy 相关属性
+  const thinkingSrc = readFileSync('src/components/Thinking.tsx', 'utf8');
+  const toolSrc = readFileSync('src/components/ToolCard.tsx', 'utf8');
+  const bad = /CopyTextButton|AssistantCopyRow|复制全文/.test(thinkingSrc) ||
+    /CopyTextButton|AssistantCopyRow|复制全文/.test(toolSrc);
+  return bad ? '思考/工具组件里出现了复制入口' : true;
+});
+
+check('面板有「复制全文」写入剪贴板（带成功反馈）', () => {
+  const hasCopy = /copyTextToClipboard\(text\)/.test(sheetSrc);
+  const hasLabel = /复制全文/.test(sheetSrc);
+  const hasFeedback = /已复制/.test(sheetSrc);
+  return hasCopy && hasLabel && hasFeedback ? true : '面板缺少复制/反馈';
+});
 
 check('Markdown 代码块渲染复制按钮', () =>
   /case 'code':[\s\S]{0,600}<CopyTextButton[\s\S]{0,200}accessibilityLabel="复制代码"/.test(mdSrc)
     ? true
     : '代码块没有复制按钮',
+);
+
+check('代码块正文仍可选择（selectable）', () =>
+  /<Text style=\{styles\.codeText\} selectable>/.test(mdSrc) ? true : '代码块正文不可选择',
 );
 
 check('复制统一经过 normalizeCopyText 再写剪贴板', () =>

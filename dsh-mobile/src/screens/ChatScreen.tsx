@@ -30,7 +30,8 @@ import { useNav } from '../nav/NavHost';
 import { Header } from '../components/Header';
 import { useTheme } from '../design/theme';
 import { layout, radius, space, type, weight } from '../design/tokens';
-import { AssistantCopyRow, AssistantText, UserBubble } from '../components/Message';
+import { AssistantText, UserBubble } from '../components/Message';
+import { MessageActionSheet } from '../components/MessageActionSheet';
 import { JumpToBottomFab } from '../components/JumpToBottomFab';
 import {
   NEAR_BOTTOM_PX,
@@ -426,14 +427,25 @@ export function ChatScreen({
     [retryingPendingId, sessionId, store],
   );
 
-  const renderBlocks = (blocks: Block[], keyPrefix: string, opts?: { copyText?: string }) => {
+  const renderBlocks = (
+    blocks: Block[],
+    keyPrefix: string,
+    opts?: { onLongPressText?: () => void },
+  ) => {
     const nodes = blocks.map((b, i) => {
       // 管家页只显示「人话」：工具调用留给队员事件流。
       // 但思考过程要留 —— 它在生成时可见，能明显减轻「干等着」的焦虑；
       // 跑完就自动收起成一行，不占地方。
       if (butler) {
         if (b.kind === 'text') {
-          return <AssistantText key={`${keyPrefix}-t${i}`} text={b.text} sessionId={sessionId} />;
+          return (
+            <AssistantText
+              key={`${keyPrefix}-t${i}`}
+              text={b.text}
+              sessionId={sessionId}
+              onLongPress={opts?.onLongPressText}
+            />
+          );
         }
         if (b.kind === 'reasoning') {
           const isLive = i === blocks.length - 1 && chat.running;
@@ -456,7 +468,16 @@ export function ChatScreen({
         }
         return null;
       }
-      if (b.kind === 'text') return <AssistantText key={`${keyPrefix}-t${i}`} text={b.text} sessionId={sessionId} />;
+      if (b.kind === 'text') {
+        return (
+          <AssistantText
+            key={`${keyPrefix}-t${i}`}
+            text={b.text}
+            sessionId={sessionId}
+            onLongPress={opts?.onLongPressText}
+          />
+        );
+      }
       if (b.kind === 'reasoning') {
         const isLive = i === blocks.length - 1 && chat.running;
         return <ThinkingAccordion key={`${keyPrefix}-r${i}`} text={b.text} done={!isLive} />;
@@ -475,29 +496,6 @@ export function ChatScreen({
       }
       return <ToolCard key={`${keyPrefix}-c${i}`} block={b} />;
     });
-
-    /*
-      「复制这条消息」挂在最后一段正文之后，而不是整块末尾：
-      一轮里工具卡常常排在正文后面，挂末尾会让按钮落在工具卡下方，离正文很远。
-      没有正文（只有工具调用）时不显示 —— 没有可复制的人话。
-    */
-    if (opts?.copyText) {
-      let lastTextIndex = -1;
-      for (let i = blocks.length - 1; i >= 0; i -= 1) {
-        const blk = blocks[i];
-        if (blk.kind === 'text' && (blk.text ?? '').trim()) {
-          lastTextIndex = i;
-          break;
-        }
-      }
-      if (lastTextIndex >= 0) {
-        nodes.splice(
-          lastTextIndex + 1,
-          0,
-          <AssistantCopyRow key={`${keyPrefix}-copy`} text={opts.copyText} />,
-        );
-      }
-    }
 
     return nodes;
   };
@@ -519,18 +517,15 @@ export function ChatScreen({
   }, [chat.turns]);
 
   /**
-   * 每轮里「最后一条助手步骤」的 key。
+   * 长按消息打开的操作面板（复制全文 / 选择文本）。
    *
-   * 只有它才配「复制全文」：中间步骤（工具调用前后的说明）各挂一个按钮
-   * 会满屏都是按钮，而用户想复制的几乎总是最终答案。
+   * 正文在聊天流里不做 selectable（长按要留给面板）；需要按词/按段选择时，
+   * 进面板里的「选择文本」模式（同一个 Modal 内切换，避免两个 Modal 打架）。
    */
-  const finalAssistantKeys = useMemo(() => {
-    const lastByTurn = new Map<number, string>();
-    for (const it of chat.items) {
-      if (it.kind === 'assistant') lastByTurn.set(it.turn, it.key);
-    }
-    return new Set(lastByTurn.values());
-  }, [chat.items]);
+  const [actionText, setActionText] = useState<string | null>(null);
+  const openMessageActions = useCallback((text: string) => {
+    setActionText(text);
+  }, []);
 
   // 审批网关的连/断已经上移到 App 级（见 App.tsx 的 GlobalNotices）。
   //
@@ -771,6 +766,7 @@ export function ChatScreen({
                   parts={item.parts}
                   sessionId={sessionId}
                   api={store.upload}
+                  onLongPress={openMessageActions}
                 />
               );
             }
@@ -790,20 +786,26 @@ export function ChatScreen({
             }
             // 派过活的那一轮：管家的汇总默认折叠，点开才看
             // （闲聊回复 delegated 为 false，直接显示，不打扰用户）
-            const copyText = finalAssistantKeys.has(item.key)
-              ? buildAssistantCopyText(item.blocks)
-              : '';
+            const bodyText = buildAssistantCopyText(item.blocks);
             if (item.delegated) {
               const doneCount = (chat.agentTeam?.tasks ?? []).filter(
                 (t) => t.status === 'completed',
               ).length;
               return (
                 <CompletionNotice taskCount={doneCount}>
-                  {renderBlocks(item.blocks, item.key, { copyText })}
+                  {renderBlocks(item.blocks, item.key, {
+                    onLongPressText: bodyText ? () => openMessageActions(bodyText) : undefined,
+                  })}
                 </CompletionNotice>
               );
             }
-            return <View>{renderBlocks(item.blocks, item.key, { copyText })}</View>;
+            return (
+              <View>
+                {renderBlocks(item.blocks, item.key, {
+                  onLongPressText: bodyText ? () => openMessageActions(bodyText) : undefined,
+                })}
+              </View>
+            );
           }}
         />
 
@@ -1021,6 +1023,13 @@ export function ChatScreen({
           setSwitchWs(false);
           pickButlerWorkspace(path);
         }}
+      />
+
+      {/* 长按消息 → 复制全文 / 选择文本（不常驻按钮） */}
+      <MessageActionSheet
+        visible={actionText !== null}
+        text={actionText ?? ''}
+        onClose={() => setActionText(null)}
       />
     </View>
   );

@@ -22,7 +22,7 @@
  */
 
 import React, { useMemo } from 'react';
-import { StyleSheet, Text, View } from 'react-native';
+import { Pressable, StyleSheet, Text, View } from 'react-native';
 
 import { useTheme } from '../design/theme';
 
@@ -37,26 +37,56 @@ export function MarkdownView({
   text,
   /** 嵌在卡片里时传 false，避免双重内边距 */
   inset = true,
+  onLongPress,
 }: {
   text: string;
   inset?: boolean;
+  /** 长按正文（标题/段落/列表/引用/表格）→ 聊天页弹「复制全文」面板 */
+  onLongPress?: () => void;
 }) {
   const tv = useTheme();
   const styles = useMemo(() => makeStyles(tv), [tv]);
   const blocks = useMemo(() => parseMarkdown(text), [text]);
 
-  return (
+  const content = (
     <View style={inset ? styles.wrap : null}>
       {blocks.map((b, i) => (
         <BlockView key={i} block={b} />
       ))}
     </View>
   );
+
+  /*
+    长按菜单挂在**外层 Pressable** 上，而不是每个 Text 的 onLongPress：
+      · Text 自己的 onLongPress 在 Fabric 下和嵌套行内 Text 一起用时不可靠
+        （实测长按没有任何回调）；
+      · 外层 Pressable 只处理长按，不拦点击，滚动时会被手势系统取消，
+        选区和代码块复制按钮都在内层、点按不受影响。
+  */
+  if (!onLongPress) return content;
+  return (
+    <Pressable onLongPress={onLongPress} delayLongPress={400}>
+      {content}
+    </Pressable>
+  );
+}
+
+/**
+ * 正文文本的公共属性（目前为空：长按由外层 Pressable 承担）。
+ *
+ * ⚠️ 不要在这里加 `selectable`：Android 的原生文本选择由长按触发，
+ * 和外层「长按弹复制菜单」会互相抢事件（实测两者都不触发）。
+ * 正文的部分选择走聊天页的「选择文本」浮层（纯 Text + selectable，无手势竞争）。
+ * 代码块不受影响：它没有长按菜单，仍然是 selectable。
+ */
+function bodyTextProps(_onLongPress?: () => void) {
+  return { selectable: true as const };
 }
 
 function BlockView({ block }: { block: Block }) {
   const tv = useTheme();
   const styles = useMemo(() => makeStyles(tv), [tv]);
+  const textProps = bodyTextProps();
 
   switch (block.kind) {
     case 'heading': {
@@ -64,13 +94,20 @@ function BlockView({ block }: { block: Block }) {
       const size =
         block.level === 1 ? tv.type.xl : block.level === 2 ? tv.type.lg : tv.type.base;
       return (
-        <Text style={[styles.heading, { fontSize: size, lineHeight: size * 1.4 }]}>
+        <Text
+          style={[styles.heading, { fontSize: size, lineHeight: size * 1.4 }]}
+          {...textProps}
+        >
           {inlineText(parseInline(block.text), styles)}
         </Text>
       );
     }
     case 'paragraph':
-      return <Text style={styles.body}>{inlineText(parseInline(block.text), styles)}</Text>;
+      return (
+        <Text style={styles.body} {...textProps}>
+          {inlineText(parseInline(block.text), styles)}
+        </Text>
+      );
     case 'code':
       return (
         <View style={styles.codeBox}>
@@ -93,7 +130,9 @@ function BlockView({ block }: { block: Block }) {
           {block.items.map((it, i) => (
             <View key={i} style={styles.listRow}>
               <Text style={styles.bullet}>{block.ordered ? `${i + 1}.` : '•'}</Text>
-              <Text style={styles.listText}>{inlineText(parseInline(it), styles)}</Text>
+              <Text style={styles.listText} {...textProps}>
+                {inlineText(parseInline(it), styles)}
+              </Text>
             </View>
           ))}
         </View>
@@ -101,7 +140,9 @@ function BlockView({ block }: { block: Block }) {
     case 'quote':
       return (
         <View style={styles.quote}>
-          <Text style={styles.quoteText}>{inlineText(parseInline(block.text), styles)}</Text>
+          <Text style={styles.quoteText} {...textProps}>
+            {inlineText(parseInline(block.text), styles)}
+          </Text>
         </View>
       );
     case 'hr':
@@ -111,7 +152,7 @@ function BlockView({ block }: { block: Block }) {
         <View style={styles.table}>
           <View style={[styles.tr, styles.thead]}>
             {block.header.map((c, i) => (
-              <Text key={i} style={[styles.th, styles.td]} numberOfLines={3}>
+              <Text key={i} style={[styles.th, styles.td]} numberOfLines={3} {...textProps}>
                 {c}
               </Text>
             ))}
@@ -119,7 +160,7 @@ function BlockView({ block }: { block: Block }) {
           {block.rows.map((r, ri) => (
             <View key={ri} style={styles.tr}>
               {block.header.map((_, ci) => (
-                <Text key={ci} style={styles.td} numberOfLines={4}>
+                <Text key={ci} style={styles.td} numberOfLines={4} {...textProps}>
                   {r[ci] ?? ''}
                 </Text>
               ))}

@@ -17,12 +17,15 @@ export function AssistantRichText({
   text,
   inset = true,
   sessionId,
+  onLongPress,
 }: {
   text: string;
   /** 是否自带左右内边距。嵌在卡片里时应传 false，避免双重缩进 */
   inset?: boolean;
   /** 会话 id：透给 FileCard 走网关下载（相对路径/中文名更可靠） */
   sessionId?: string;
+  /** 长按正文（Markdown 文本块）→ 聊天页弹「复制全文」面板 */
+  onLongPress?: () => void;
 }) {
   const tv = useTheme();
   const styles = useMemo(() => makeStyles(tv), [tv]);
@@ -33,7 +36,7 @@ export function AssistantRichText({
   // 之前这里是纯 <Text>，导致 AI 输出里的 `**加粗**`、`#` 标题、
   // `| 表格 |` 全部原样显示星号和竖线。现在统一交给 MarkdownView。
   if (!segs.some((s) => s.kind === 'file')) {
-    return <MarkdownView text={text.trim()} inset={inset} />;
+    return <MarkdownView text={text.trim()} inset={inset} onLongPress={onLongPress} />;
   }
 
   return (
@@ -48,7 +51,12 @@ export function AssistantRichText({
             sessionId={sessionId}
           />
         ) : (
-          <MarkdownView key={`t${i}`} text={s.text.trim()} inset={false} />
+          <MarkdownView
+            key={`t${i}`}
+            text={s.text.trim()}
+            inset={false}
+            onLongPress={onLongPress}
+          />
         ),
       )}
     </View>
