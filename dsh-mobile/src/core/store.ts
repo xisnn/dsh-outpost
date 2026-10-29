@@ -20,7 +20,7 @@ import type { WorkspaceCustom } from '../core/workspace-custom';
 import { foldEvents, toChatItems, isInjectedMessage, stripModeTag, type ChatItem, type Turn } from '../core/fold';
 import { notifyDone } from '../core/notify';
 import { buildCompatReport, classifyError } from '../core/protocol';
-import { isRetryable, RpcError } from '../core/rpc-error';
+import { isAuthFailure, isRetryable, RpcError } from '../core/rpc-error';
 import type { NoticeItem, NoticeKind } from '../components/NoticeHost';
 import {
   ApprovalGateway,
@@ -211,6 +211,12 @@ export interface StoreOptions {
     baseUrl: string,
     cookie: string | undefined,
   ) => Promise<void>;
+  /** P0-2：会话流自动重连初始退避（默认 500ms） */
+  reconnectBaseMs?: number;
+  /** P0-2：会话流自动重连最大退避（默认 15_000ms） */
+  reconnectMaxMs?: number;
+  /** P0-2：抖动随机数源（测试可注入确定性函数） */
+  random?: () => number;
 }
 
 export class Store {
@@ -257,7 +263,24 @@ export class Store {
   sessionsError?: string;
 
   private chats = new Map<string, ChatState>();
-  private streams = new Map<string, { handle: StreamHandle; cursor: number; records: Map<number, EventRecord>; snapshot: unknown }>();
+  private streams = new Map<
+    string,
+    {
+      handle?: StreamHandle;
+      cursor: number;
+      records: Map<number, EventRecord>;
+      snapshot: unknown;
+      address?: SessionAddress;
+      generation: number;
+      retryAttempt: number;
+      retryTimer?: ReturnType<typeof setTimeout>;
+      connecting: boolean;
+    }
+  >();
+  private streamGenerationCounter = 0;
+  private readonly reconnectBaseMs: number;
+  private readonly reconnectMaxMs: number;
+  private readonly random: () => number;
   private listeners = new Set<() => void>();
   /** 节流窗口的定时器（null 表示当前不在窗口内） */
   private emitTimer: ReturnType<typeof setTimeout> | null = null;
@@ -297,6 +320,9 @@ export class Store {
     this.pendingSends = opts.pendingSendStore ?? createDefaultPendingSendStore();
     this.loadPendingBinding = opts.loadPendingBinding ?? defaultLoadPendingBinding;
     this.verifyPendingBinding = opts.verifyPendingBinding ?? defaultVerifyPendingBinding;
+    this.reconnectBaseMs = Math.max(20, opts.reconnectBaseMs ?? 500);
+    this.reconnectMaxMs = Math.max(this.reconnectBaseMs, opts.reconnectMaxMs ?? 15_000);
+    this.random = opts.random ?? Math.random;
   }
 
   /** 拉取账户余额与登录态 */
@@ -1303,20 +1329,106 @@ export class Store {
   }
 
   async openChat(sessionId: string, address?: SessionAddress): Promise<void> {
-    if (this.streams.has(sessionId)) return;
+    const existing = this.streams.get(sessionId);
+    if (existing) {
+      if (existing.handle || existing.connecting) return;
+      if (existing.retryTimer) {
+        clearTimeout(existing.retryTimer);
+        existing.retryTimer = undefined;
+      }
+      await this.connectChatStream(sessionId, true);
+      return;
+    }
 
+    const generation = ++this.streamGenerationCounter;
+    this.streams.set(sessionId, {
+      cursor: -1,
+      records: new Map<number, EventRecord>(),
+      snapshot: undefined,
+      address,
+      generation,
+      retryAttempt: 0,
+      connecting: false,
+    });
     this.chats.set(sessionId, { sessionId, ...EMPTY_CHAT });
     this.emit();
 
+    await this.connectChatStream(sessionId, false);
+  }
+
+  /**
+   * 建立或恢复会话流（P0-2）。
+   *
+   * - 首次打开与断线重连共用同一条路径；
+   * - 重连成功后合并现有 `records` 与新快照 `snapshot.records`（按 `seq` 去重）；
+   * - 若断线期间产生了超过单页快照窗口的事件缺口（`prevMaxSeq + 1 < minNewSnapSeq`），
+   *   自动调用 `session/page` 向前补齐，保证不漏事件、不重复显示消息。
+   */
+  private async connectChatStream(sessionId: string, isReconnect: boolean): Promise<void> {
+    const entry = this.streams.get(sessionId);
+    if (!entry || entry.connecting) return;
+    if (entry.retryTimer) {
+      clearTimeout(entry.retryTimer);
+      entry.retryTimer = undefined;
+    }
+
+    const generation = ++this.streamGenerationCounter;
+    entry.generation = generation;
+    entry.connecting = true;
+    const isCurrent = () => {
+      const cur = this.streams.get(sessionId);
+      return cur === entry && cur.generation === generation;
+    };
+
     try {
-      const followed = await this.followWithFallback(sessionId, address);
-      const { handle, snapshot, next } = followed;
-      const records = new Map<number, EventRecord>();
-      for (const r of snapshot.records ?? []) {
-        if (r?.event?.seq !== undefined) records.set(r.event.seq, r);
+      const prevSeqs = [...entry.records.keys()];
+      const prevMaxSeq = prevSeqs.length ? Math.max(...prevSeqs) : -1;
+
+      const followed = await this.followWithFallback(sessionId, entry.address);
+      if (!isCurrent()) {
+        followed.handle.close();
+        return;
       }
 
-      this.streams.set(sessionId, { handle, cursor: snapshot.cursor, records, snapshot });
+      const { handle, snapshot, next } = followed;
+      entry.handle = handle;
+      entry.snapshot = snapshot;
+      entry.cursor = Math.max(entry.cursor, snapshot.cursor ?? -1);
+      entry.retryAttempt = 0;
+      entry.connecting = false;
+
+      let minNewSnapSeq = Infinity;
+      for (const r of snapshot.records ?? []) {
+        const seq = r?.event?.seq;
+        if (typeof seq === 'number') {
+          entry.records.set(seq, r);
+          if (seq < minNewSnapSeq) minNewSnapSeq = seq;
+        }
+      }
+
+      // P0-2：如果断线重连期间产生了大于 snapshot 窗口的事件缺口，通过 session/page 补齐
+      if (
+        isReconnect &&
+        prevMaxSeq >= 0 &&
+        Number.isFinite(minNewSnapSeq) &&
+        minNewSnapSeq > prevMaxSeq + 1
+      ) {
+        await this.backfillReconnectGap(
+          sessionId,
+          entry,
+          generation,
+          prevMaxSeq,
+          minNewSnapSeq,
+          snapshot.cursor,
+        );
+        if (!isCurrent()) return;
+      }
+
+      if (IS_DEV && isReconnect) {
+        console.log(
+          `[p0-2-verify] reconnected sessionId=${sessionId} cursor=${snapshot.cursor} records=${entry.records.size}`,
+        );
+      }
 
       const status = readStatus(snapshot.projections);
       this.updateChatFromRecords(sessionId, {
@@ -1331,49 +1443,164 @@ export class Store {
         agentTeam: status.agentTeam,
         hasOlder: snapshot.hasMore,
         loading: false,
+        error: undefined,
       });
       // 首帧 records 也要 fold 一次，否则界面是空的
-      this.rebuild(sessionId);
+      this.rebuild(sessionId, { error: undefined });
 
-      // 异步补更早的历史
-      if (snapshot.hasMore) {
+      // 异步补更早的历史（仅首次且 hasMore 时触发，避免重连反复拉全量旧历史）
+      if (!isReconnect && snapshot.hasMore) {
         void this.loadOlder(sessionId);
       }
 
       // 后续增量
-      void this.pump(sessionId, () => next());
+      void this.pump(sessionId, generation, () => next());
     } catch (e) {
+      if (!isCurrent()) return;
+      entry.connecting = false;
+      entry.handle = undefined;
+      this.handleStreamDisconnect(sessionId, entry, generation, e);
+    }
+  }
+
+  /**
+   * 补齐断线重连期间跨越单页窗口的遗漏事件（`prevMaxSeq < seq < minNewSnapSeq`）。
+   */
+  private async backfillReconnectGap(
+    sessionId: string,
+    entry: NonNullable<ReturnType<typeof this.streams.get>>,
+    generation: number,
+    prevMaxSeq: number,
+    minNewSnapSeq: number,
+    throughSeq: number,
+  ): Promise<void> {
+    let beforeSeq = minNewSnapSeq;
+    let safety = 0;
+    while (beforeSeq > prevMaxSeq + 1 && safety < 10) {
+      safety += 1;
+      if (this.streams.get(sessionId) !== entry || entry.generation !== generation) return;
+      try {
+        const page = await this.api.page({
+          sessionId,
+          address: entry.address,
+          throughSeq,
+          beforeSeq,
+          maxMessages: 200,
+        });
+        if (this.streams.get(sessionId) !== entry || entry.generation !== generation) return;
+        const recs = page.records ?? [];
+        if (recs.length === 0) break;
+        let earliest = beforeSeq;
+        for (const r of recs) {
+          const seq = r?.event?.seq;
+          if (typeof seq === 'number') {
+            entry.records.set(seq, r);
+            if (seq < earliest) earliest = seq;
+          }
+        }
+        if (!page.hasMore || earliest >= beforeSeq) break;
+        beforeSeq = earliest;
+      } catch {
+        // 补齐失败不阻断当前新流，后续用户上滑或下次重连仍可补齐
+        break;
+      }
+    }
+  }
+
+  /**
+   * 处理会话流断开或建流失败：
+   *   · 明确鉴权失败（401/403/未登录）→ 立即停止重连并提示重新配对；
+   *   · 其余网络/服务重启异常 → 指数退避 + 随机抖动自动重连。
+   */
+  private handleStreamDisconnect(
+    sessionId: string,
+    entry: NonNullable<ReturnType<typeof this.streams.get>>,
+    generation: number,
+    error: unknown,
+  ): void {
+    if (this.streams.get(sessionId) !== entry || entry.generation !== generation) return;
+    entry.handle = undefined;
+    entry.connecting = false;
+
+    const raw = error instanceof Error ? error.message : String(error);
+    const authRejected =
+      isAuthFailure(error) ||
+      /(^|[^0-9])(401|403)([^0-9]|$)|unauthorized|forbidden|not authenticated/i.test(raw);
+
+    if (authRejected) {
+      if (entry.retryTimer) {
+        clearTimeout(entry.retryTimer);
+        entry.retryTimer = undefined;
+      }
       const cur = this.getChat(sessionId);
       this.chats.set(sessionId, {
         ...cur,
         loading: false,
-        error: e instanceof Error ? e.message : String(e),
+        running: false,
+        error: '登录状态已失效，请回配对页重新连接',
       });
+      if (IS_DEV) {
+        console.log(`[p0-2-verify] auth-stopped sessionId=${sessionId} reason=${raw}`);
+      }
       this.emit();
+      return;
     }
+
+    const attempt = entry.retryAttempt;
+    entry.retryAttempt += 1;
+    const expDelay = Math.min(
+      this.reconnectMaxMs,
+      this.reconnectBaseMs * 2 ** Math.min(attempt, 6),
+    );
+    const jitterFactor = 0.85 + Math.min(1, Math.max(0, this.random())) * 0.3;
+    const delayMs = Math.min(this.reconnectMaxMs, Math.max(20, Math.round(expDelay * jitterFactor)));
+
+    const cur = this.getChat(sessionId);
+    this.chats.set(sessionId, {
+      ...cur,
+      loading: false,
+      running: false,
+      error: `连接已断开，正在自动重连（第 ${entry.retryAttempt} 次）…`,
+    });
+    if (IS_DEV) {
+      console.log(
+        `[p0-2-verify] schedule-reconnect sessionId=${sessionId} attempt=${entry.retryAttempt} delayMs=${delayMs}`,
+      );
+    }
+    this.emit();
+
+    if (entry.retryTimer) clearTimeout(entry.retryTimer);
+    entry.retryTimer = setTimeout(() => {
+      entry.retryTimer = undefined;
+      if (this.streams.get(sessionId) !== entry || entry.generation !== generation) return;
+      void this.connectChatStream(sessionId, true);
+    }, delayMs);
   }
 
   /** 持续消费增量事件 */
-  private async pump(sessionId: string, next: () => Promise<EventRecord | undefined>): Promise<void> {
+  private async pump(
+    sessionId: string,
+    generation: number,
+    next: () => Promise<EventRecord | undefined>,
+  ): Promise<void> {
     const entry = this.streams.get(sessionId);
-    if (!entry) return;
+    if (!entry || entry.generation !== generation) return;
     try {
       while (true) {
         const rec = await next();
-        if (!rec) break;
+        if (this.streams.get(sessionId) !== entry || entry.generation !== generation) return;
+        if (!rec) {
+          throw new Error('会话事件流已结束');
+        }
         const seq = rec.event?.seq;
         if (typeof seq !== 'number') continue;
         entry.records.set(seq, rec);
+        if (seq > entry.cursor) entry.cursor = seq;
         this.rebuild(sessionId);
       }
     } catch (e) {
-      const cur = this.getChat(sessionId);
-      this.chats.set(sessionId, {
-        ...cur,
-        error: e instanceof Error ? e.message : String(e),
-        running: false,
-      });
-      this.emit();
+      if (this.streams.get(sessionId) !== entry || entry.generation !== generation) return;
+      this.handleStreamDisconnect(sessionId, entry, generation, e);
     }
   }
 
@@ -1922,11 +2149,56 @@ export class Store {
   /** 关闭会话流 */
   closeChat(sessionId: string): void {
     const entry = this.streams.get(sessionId);
-    entry?.handle.close();
+    if (!entry) return;
+    entry.generation = ++this.streamGenerationCounter;
+    if (entry.retryTimer) {
+      clearTimeout(entry.retryTimer);
+      entry.retryTimer = undefined;
+    }
+    entry.handle?.close();
     this.streams.delete(sessionId);
   }
 
+  /**
+   * App 回到前台时恢复连接与活跃会话流（P0-2）。
+   *
+   * - 重置可能处于半开假死态的底层 WebSocket；
+   * - 对所有当前打开的会话流重置退避计数并立即重连，自动补齐后台期间遗漏的事件；
+   * - 刷新会话列表。
+   */
+  handleAppForeground(baseUrl?: string): void {
+    if (!this.conn.hasCookie) return;
+    if (IS_DEV) {
+      console.log(`[p0-2-verify] app-foreground activeStreams=${this.streams.size}`);
+    }
+    const targetBase = baseUrl || this.conn.baseUrl;
+    if (targetBase && targetBase !== 'http://127.0.0.1:1') {
+      this.connectApprovals(targetBase);
+    }
+    if (this.streams.size > 0) {
+      this.conn.resetSocket('App 回到前台，刷新实时连接');
+      for (const [sessionId, entry] of this.streams.entries()) {
+        if (entry.retryTimer) {
+          clearTimeout(entry.retryTimer);
+          entry.retryTimer = undefined;
+        }
+        entry.retryAttempt = 0;
+        entry.connecting = false;
+        entry.handle = undefined;
+        void this.connectChatStream(sessionId, true);
+      }
+    }
+    void this.loadSessions();
+  }
+
   close(): void {
+    if (this.emitTimer !== null) {
+      clearTimeout(this.emitTimer);
+      this.emitTimer = null;
+      this.emitPending = false;
+    }
+    this.stopNoticeScan();
+    this.disconnectApprovals();
     for (const id of [...this.streams.keys()]) this.closeChat(id);
     this.conn.close();
   }

@@ -12,7 +12,7 @@
  *         Chat
  */
 import React, { useCallback, useEffect, useMemo, useState } from 'react';
-import { ActivityIndicator, Alert, StatusBar, StyleSheet, View } from 'react-native';
+import { ActivityIndicator, Alert, AppState, type AppStateStatus, StatusBar, StyleSheet, View } from 'react-native';
 import { SafeAreaProvider } from 'react-native-safe-area-context';
 import AsyncStorage from '@react-native-async-storage/async-storage';
 
@@ -1393,6 +1393,21 @@ function GlobalNotices() {
   React.useEffect(() => {
     if (approvalRevoked) store.disconnectApprovals();
   }, [approvalRevoked, store]);
+
+  // P0-2：App 从后台切回前台时，立即重置可能假死的半开 WebSocket 并恢复当前打开的会话流与审批网关。
+  React.useEffect(() => {
+    let lastState: AppStateStatus = AppState.currentState ?? 'active';
+    const sub = AppState.addEventListener('change', (nextState: AppStateStatus) => {
+      const wasBackground = lastState === 'background' || lastState === 'inactive';
+      lastState = nextState;
+      if (wasBackground && nextState === 'active') {
+        store.handleAppForeground(baseUrl);
+      }
+    });
+    return () => {
+      sub.remove();
+    };
+  }, [store, baseUrl]);
 
   // 通知初始化 + 点通知跳转。
   // initNotifications 会申请权限、建通道；原生模块缺失时静默降级。

@@ -2,7 +2,7 @@
 
 日期：2026-10-29
 分支：`feat/v0.17`
-代码提交：`5d38cdf`（PairScreen 修复）、`9c0adce` & `f0feb80`（任务 A）、`bae61c9`（任务 B）、本轮任务 C 修复提交
+代码提交：`5d38cdf`（PairScreen 修复）、`9c0adce` & `f0feb80`（任务 A）、`bae61c9`（任务 B）、`c897257`（任务 C）
 测试 APK：`dsh-mobile/android/app/build/outputs/apk/debug/app-debug.apk`
 APK SHA-256：`C5AABF2DC4D65B1FB1080D07576F2A20FB7700E3E4ADB4485B66904DC9476E39`
 APK 元数据：`versionCode=1`、`versionName=1.0`、`minSdk=24`、`targetSdk=36`；debug 测试包
@@ -11,7 +11,7 @@ APK 签名：`CN=Android Debug, OU=Android`，证书 SHA-256 `fac61745dc0903786f
 
 ## 0. 构建追溯
 
-- 实际 Git HEAD：`13a838e`（文档提交）；代码提交 `5d38cdf`，回归测试提交 `9b641da`。
+- P0-1 完成基线 Git HEAD：`c897257`（含 PairScreen 修复 `5d38cdf` / `9b641da`、导航修复 `6832ca3`、任务 A `9c0adce` / `f0feb80`、任务 B `bae61c9`、任务 C `c897257`）。
 - 正常配对/文本证据使用 commit `5d38cdf` 的 debug 测试包。
 - unknown 场景 A 的 `[P0_DROP]` 故障注入是临时 Debug-only 构建的未提交改动，测试后已撤销；未进入正式发布路径。
 - 最终测试 APK SHA-256：`C5AABF2DC4D65B1FB1080D07576F2A20FB7700E3E4ADB4485B66904DC9476E39`；versionCode 1 / versionName 1.0 / `CN=Android Debug`。
@@ -214,4 +214,4 @@ APK 签名：`CN=Android Debug, OU=Android`，证书 SHA-256 `fac61745dc0903786f
 
 ---
 
-*报告维护：2026-10-28 · 具体文档提交见 `feat/v0.17` Git 历史。*
+*报告维护：2026-10-29 · P0-1 基线提交 `c897257`，具体提交见 `feat/v0.17` Git 历史。*
