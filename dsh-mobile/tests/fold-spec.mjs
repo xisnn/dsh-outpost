@@ -185,5 +185,50 @@ check('标记后带空格也能剥',
   stripModeTag('查一下 〔模式:计划〕  ') === '查一下',
   JSON.stringify(stripModeTag('查一下 〔模式:计划〕  ')));
 
+// ── 真实 DSH assistant/message tool-call.id 与 tool/call.callId 去重 ──
+console.log('\n=== 真实 DSH tool-call.id 与 tool/call.callId 合并去重\n');
+{
+  const realRecords = [
+    ev('turn/start', 1, { turn: 1 }, 1000),
+    ev('step/start', 2, { turn: 1, step: 1 }, 1100),
+    ev('assistant/message', 3, {
+      turn: 1,
+      step: 1,
+      message: {
+        role: 'assistant',
+        content: [
+          {
+            type: 'tool-call',
+            id: 'call_574864__tsk16___eK0ASYdfAikZ6ze',
+            name: 'read',
+            arguments: JSON.stringify({ file_path: 'config.ts' }),
+          },
+        ],
+      },
+    }, 1200),
+    ev('tool/call', 4, {
+      turn: 1,
+      step: 1,
+      callId: 'call_574864__tsk16___eK0ASYdfAikZ6ze',
+      name: 'read',
+      arguments: JSON.stringify({ file_path: 'config.ts' }),
+    }, 1205),
+    ev('tool/result', 5, {
+      turn: 1,
+      step: 1,
+      message: {
+        role: 'tool',
+        toolCallId: 'call_574864__tsk16___eK0ASYdfAikZ6ze',
+        content: [{ type: 'text', text: 'export const port = 3095;' }],
+      },
+    }, 1500),
+    ev('turn/end', 6, { turn: 1, reason: { kind: 'completed' } }, 1600),
+  ];
+  const folded = foldEvents(realRecords);
+  const tools = folded[0]?.steps?.[0]?.blocks?.filter((b) => b.kind === 'tool') ?? [];
+  check('assistant/message 的 id 与 tool/call 的 callId 合并为 1 个工具块', tools.length === 1, `tools=${tools.length}`);
+  check('合并后的工具块已填入结果且 pending=false', tools[0]?.pending === false && tools[0]?.output === 'export const port = 3095;');
+}
+
 console.log(`\n结果：${pass} 通过，${fail} 失败`);
 process.exit(fail === 0 ? 0 : 1);

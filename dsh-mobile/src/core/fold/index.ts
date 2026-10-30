@@ -377,15 +377,29 @@ export function foldEvents(records: EventRecord[]): Turn[] {
         if (Array.isArray(content)) {
           for (const blk of content as ContentBlock[]) {
             if (blk?.type !== 'tool-call') continue;
+            // 真实 DSH 的 assistant/message content 里 tool-call 块用 id（部分路径用 callId / toolCallId），
+            // 必须统一提取才能与紧随其后的 tool/call、tool/result 按同一个 callId 合并去重。
+            const rawBlk = blk as Record<string, unknown>;
+            const callId =
+              (typeof rawBlk.callId === 'string' && rawBlk.callId) ||
+              (typeof rawBlk.id === 'string' && rawBlk.id) ||
+              (typeof rawBlk.toolCallId === 'string' && rawBlk.toolCallId) ||
+              '';
+            const existing = callId
+              ? step.blocks.find((x): x is ToolBlock => x.kind === 'tool' && x.callId === callId)
+              : undefined;
+            if (existing) continue;
             const { input, raw } = parseArguments((blk as { arguments?: unknown }).arguments);
+            const toolName = (blk as { name?: string }).name ?? 'tool';
             step.blocks.push({
               kind: 'tool',
-              callId: (blk as { callId?: string }).callId ?? '',
-              name: (blk as { name?: string }).name ?? 'tool',
+              callId,
+              name: toolName,
               input,
               rawArguments: raw,
               pending: true,
             });
+            if (DELEGATING_TOOLS.has(toolName)) b.turn.delegated = true;
           }
         }
         current = b;
@@ -398,14 +412,18 @@ export function foldEvents(records: EventRecord[]): Turn[] {
         const b = ensureTurn(turnNo);
         const stepNo = num(d.step) ?? currentStepNo ?? 1;
         const step = ensureStep(b, stepNo);
-        const callId = typeof d.callId === 'string' ? d.callId : '';
+        const callId =
+          (typeof d.callId === 'string' && d.callId) ||
+          (typeof d.id === 'string' && d.id) ||
+          (typeof d.toolCallId === 'string' && d.toolCallId) ||
+          '';
 
         // tool/call 可能与 assistant/message 里的 tool-call 重复，按 callId 合并
         const existing = callId
           ? step.blocks.find((x): x is ToolBlock => x.kind === 'tool' && x.callId === callId)
           : undefined;
         if (existing) {
-          existing.pending = true;
+          if (existing.output === undefined) existing.pending = true;
         } else {
           const { input, raw } = parseArguments(d.arguments);
           const toolName = typeof d.name === 'string' ? d.name : 'tool';
