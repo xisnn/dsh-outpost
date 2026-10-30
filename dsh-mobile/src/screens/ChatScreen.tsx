@@ -447,8 +447,7 @@ export function ChatScreen({
           (r) =>
             r.createdAt >= startedAt - 2000 &&
             r.text === text &&
-            r.state !== 'abandoned' &&
-            r.state !== 'confirmed',
+            r.state !== 'abandoned',
         );
       } catch {
         queued = false;

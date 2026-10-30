@@ -151,6 +151,8 @@ interface LocalCleanupResult {
   revocation: RevocationPersistResult;
   /** P0-1 待发送记录/附件暂存是否清除并回读确认；partial = 记录已清但目录未确认清空 */
   pendingSends: 'cleared' | 'partial' | 'failed';
+  /** F-04 会话输入草稿是否清除并回读确认 */
+  drafts: 'cleared' | 'failed';
 }
 
 /**
@@ -180,8 +182,9 @@ function isFullyClear(result: ClearAuthorizationResult): boolean {
     (result.local.cookieJar === 'cleared' || result.local.cookieJar === 'unavailable') &&
     // 撤销决定必须真的落盘 —— 只留在内存里的话重启后会被推翻（P0-1）
     result.local.revocation.ok &&
-    // 待发送记录也必须清除；未清除时不能让用户以为全部清干净
-    result.local.pendingSends === 'cleared'
+    // 待发送记录与会话输入草稿也必须清除；未清除时不能让用户以为全部清干净
+    result.local.pendingSends === 'cleared' &&
+    result.local.drafts === 'cleared'
   );
 }
 
@@ -327,6 +330,12 @@ function notifyClearResult(result: ClearAuthorizationResult): void {
     problems.push(
       '待发送消息记录或附件暂存目录没能确认清除。\n' +
         '  这些记录/文件可能仍留在本机安全存储或私有目录里，建议重启后再次执行清除。',
+    );
+  }
+  if (result.local.drafts === 'failed') {
+    problems.push(
+      '会话输入草稿没能确认从本机存储清除。\n' +
+        '  未发送的草稿文本可能仍留在本机存储里，建议重启后再次执行清除。',
     );
   }
 
@@ -975,9 +984,14 @@ export default function App() {
       ].map((k) => AsyncStorage.removeItem(k).catch(() => undefined)),
     );
 
-    // F-04：草稿是用户输入（可能含敏感内容），彻底清除授权时一并删除。
+    // F-04：草稿是用户输入（可能含敏感内容），彻底清除授权时一并删除并回读确认。
     // 断开连接（signOut）不调用这里，草稿保留。
-    await draftStore.clearAll().catch(() => undefined);
+    let drafts: 'cleared' | 'failed' = 'cleared';
+    try {
+      await draftStore.clearAll();
+    } catch {
+      drafts = 'failed';
+    }
 
     // ── 登录意图也要处理 ──────────────────────────────────────
     //
@@ -1016,7 +1030,7 @@ export default function App() {
 
     const result: ClearAuthorizationResult = {
       server,
-      local: { secureStorage, legacyPlaintext, cookieJar, revocation, pendingSends },
+      local: { secureStorage, legacyPlaintext, cookieJar, revocation, pendingSends, drafts },
     };
 
     // ── 如实告知用户 ──────────────────────────────────────────

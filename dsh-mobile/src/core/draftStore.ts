@@ -96,10 +96,12 @@ export function pruneDrafts(
 ): DraftRecord[] {
   const max = opts.max ?? MAX_DRAFTS;
   const ttl = opts.ttlMs ?? DRAFT_TTL_MS;
+  // 只有拿到非空的完整会话列表时才按会话 ID 淘汰，防止列表尚未加载完时误删全部草稿
+  const checkKnown = !!opts.knownSessionIds && opts.knownSessionIds.size > 0;
   const kept = records.filter((r) => {
     if (!r.text.trim()) return false;
     if (opts.now - r.updatedAt > ttl) return false;
-    if (opts.knownSessionIds && !opts.knownSessionIds.has(r.sessionId)) return false;
+    if (checkKnown && !opts.knownSessionIds!.has(r.sessionId)) return false;
     return true;
   });
   kept.sort((a, b) => b.updatedAt - a.updatedAt);
@@ -124,6 +126,8 @@ export class ComposerDraftStore {
   private persistChain: Promise<void> = Promise.resolve();
   /** 用户已主动输入过的 session：hydrate 时不能用磁盘旧值覆盖 */
   private touched = new Set<string>();
+  /** clearAll 代际号：使进行中的 ensureHydrated 读取失效，防止清完后被慢读复活 */
+  private clearEpoch = 0;
   private listeners = new Set<() => void>();
 
   constructor(storage?: DraftStorageLike, storageFactory: () => DraftStorageLike = defaultStorage) {
@@ -140,9 +144,11 @@ export class ComposerDraftStore {
   async ensureHydrated(): Promise<void> {
     if (this.hydrated) return;
     if (this.hydrating) return this.hydrating;
+    const epochAtStart = this.clearEpoch;
     this.hydrating = (async () => {
       try {
         const raw = await this.getStorage().getItem(DRAFT_STORAGE_KEY);
+        if (this.clearEpoch !== epochAtStart) return;
         for (const rec of parseDrafts(raw)) {
           // 用户在 hydrate 完成前已经输入过的会话，以内存中的新内容为准
           if (this.touched.has(rec.sessionId)) continue;
@@ -221,23 +227,28 @@ export class ComposerDraftStore {
     return removed;
   }
 
-  /** 彻底清除（退出并清除所有授权时调用） */
+  /**
+   * 彻底清除（退出并清除所有授权时调用）。
+   *
+   * 无论当前内存是否已 hydrate，都必须在写串行链末尾执行 removeItem 并回读确认；
+   * 删除抛错或回读仍有残留时一律抛错，由调用方如实报告失败。
+   */
   async clearAll(): Promise<void> {
     if (this.timer) {
       clearTimeout(this.timer);
       this.timer = null;
     }
-    const had = this.map.size > 0;
+    this.clearEpoch += 1;
+    this.hydrated = true;
     for (const id of this.map.keys()) this.touched.add(id);
     this.map.clear();
     this.emit();
-    try {
-      // 串行化：排在所有已排队的旧写入之后，确保最终状态是「空」
-      await this.enqueuePersist();
-      await this.getStorage().removeItem(DRAFT_STORAGE_KEY);
-    } catch {
-      // 存储不可用时无法确认清干净；下次 prune/覆盖会重试
-      if (had) throw new Error('draft-storage-unavailable');
+    // 串行化：排在所有已排队的旧写入之后，确保最终状态是「空」
+    await this.enqueuePersist();
+    await this.getStorage().removeItem(DRAFT_STORAGE_KEY);
+    const remaining = await this.getStorage().getItem(DRAFT_STORAGE_KEY);
+    if (remaining !== null) {
+      throw new Error('draft-storage-not-cleared');
     }
   }
 

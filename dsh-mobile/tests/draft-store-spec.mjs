@@ -133,6 +133,17 @@ check('已删除会话的草稿被清理', () => {
   return kept.length === 1 && kept[0].sessionId === 'alive' ? true : JSON.stringify(kept);
 });
 
+check('knownSessionIds 为空集合时不误删草稿（防列表未加载完误清）', () => {
+  const kept = pruneDrafts(
+    [
+      { sessionId: 's1', text: '草稿1', updatedAt: 2 },
+      { sessionId: 's2', text: '草稿2', updatedAt: 3 },
+    ],
+    { now: 10, knownSessionIds: new Set() },
+  );
+  return kept.length === 2 ? true : JSON.stringify(kept);
+});
+
 check('超过上限只保留最近 50 条', () => {
   const now = 1_000_000;
   const records = Array.from({ length: 60 }, (_, i) => ({
@@ -315,6 +326,52 @@ async function run() {
       ? true
       : JSON.stringify(hydrationStore.get('hyd-1')),
   );
+
+  // ── 竞态：ensureHydrated 慢读在 clearAll 之后返回，不得复活旧草稿 ──
+  const slowHydrateStorage = {
+    raw: JSON.stringify([{ sessionId: 'ghost-1', text: '本该被清掉的旧草稿', updatedAt: 100 }]),
+    async getItem() {
+      await new Promise((r) => setTimeout(r, 80));
+      return this.raw;
+    },
+    async setItem(_k, v) {
+      this.raw = v;
+    },
+    async removeItem() {
+      this.raw = null;
+    },
+  };
+  const ghostStore = new ComposerDraftStore(slowHydrateStorage);
+  const inflightHydrate = ghostStore.ensureHydrated();
+  await new Promise((r) => setTimeout(r, 10));
+  await ghostStore.clearAll();
+  await inflightHydrate;
+  check('clearAll 与进行中的 ensureHydrated 竞态时不复活旧草稿', () =>
+    ghostStore.size() === 0 && ghostStore.get('ghost-1') === ''
+      ? true
+      : `size=${ghostStore.size()}`,
+  );
+
+  // ── clearAll 失败处理：即使内存尚未 hydrate，存储删除失败也必须抛错 ──
+  const failingClearStorage = {
+    async getItem() {
+      return JSON.stringify([{ sessionId: 'leftover', text: '残留草稿', updatedAt: 1 }]);
+    },
+    async setItem() {},
+    async removeItem() {
+      // 模拟 removeItem 静默未生效或抛错
+    },
+  };
+  const unhydratedClearStore = new ComposerDraftStore(failingClearStorage);
+  let clearThrew = false;
+  try {
+    await unhydratedClearStore.clearAll();
+  } catch {
+    clearThrew = true;
+  }
+  check('clearAll 回读发现仍有残留时必须抛错（即使调用前未 hydrate）', () =>
+    clearThrew ? true : 'clearAll 未抛错，删除失败被静默忽略',
+  );
 }
 
 await run();
@@ -371,8 +428,23 @@ check('工作区列表显示「草稿」标记', () =>
     ? true
     : 'WorkspacesScreen 缺少草稿标记',
 );
-check('退出并清除授权时同步清理草稿', () =>
-  /draftStore\.clearAll\(\)/.test(appSrc) ? true : 'clearAuthorization 没有清草稿',
+check('退出并清除授权时同步清理草稿且不静默吞错', () =>
+  /await draftStore\.clearAll\(\)/.test(appSrc) &&
+  !/draftStore\.clearAll\(\)\.catch/.test(appSrc) &&
+  /result\.local\.drafts === 'cleared'/.test(appSrc) &&
+  /result\.local\.drafts === 'failed'/.test(appSrc)
+    ? true
+    : 'clearAuthorization 仍静默忽略草稿清除失败或未纳入 isFullyClear/notifyClearResult',
+);
+check('列表 prune 仅在完整加载无错时按全量 store.sessions 清理（不用过滤后的 workspaces）', () =>
+  /!store\.sessionsLoading/.test(sessionsSrc) &&
+  /!store\.sessionsError/.test(sessionsSrc) &&
+  /store\.sessions\.length > 0/.test(sessionsSrc) &&
+  !/draftStore\.prune\(store\.workspaces/.test(sessionsSrc) &&
+  !/draftStore\.prune\(store\.workspaces/.test(workspacesSrc) &&
+  /await draftStore\.clear\(targetId\)/.test(sessionsSrc)
+    ? true
+    : 'SessionsScreen / WorkspacesScreen 的 prune 条件不安全',
 );
 check('草稿模块不依赖通信/认证/审批/PendingSend', () => {
   const imports = [...draftSrc.matchAll(/from\s+['"]([^'"]+)['"]/g)].map((m) => m[1]);

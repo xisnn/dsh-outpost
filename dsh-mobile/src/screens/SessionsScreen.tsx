@@ -51,7 +51,7 @@ export function SessionsScreen({
   workspacePath: string;
   workspaceName: string;
 }) {
-  const { store } = useApp();
+  const { store, butlerSessionId } = useApp();
   const nav = useNav();
   const tv = useTheme();
   const styles = useMemo(() => makeStyles(tv), [tv]);
@@ -83,15 +83,27 @@ export function SessionsScreen({
     const unsub = draftStore.subscribe(refresh);
     void draftStore.ensureHydrated().then(() => {
       refresh();
-      // sessions 可能是空数组（尚未加载完），此时不要误删全部草稿
-      if (store.workspaces.length > 0) {
-        void draftStore.prune(store.workspaces.flatMap((w) => w.sessions.map((s) => s.sessionId)));
+      // 只有在列表已完整加载、无错误、且非空时，才用全量 store.sessions（非过滤后的 workspaces）清理已删除会话残稿
+      if (
+        store.connection === 'connected' &&
+        !store.sessionsLoading &&
+        !store.sessionsError &&
+        store.sessions.length > 0
+      ) {
+        const archived = new Set(store.getArchivedIds());
+        const known = store.sessions
+          .map((s) => s.sessionId)
+          .filter((id) => !archived.has(id));
+        if (butlerSessionId) known.push(butlerSessionId);
+        void draftStore.prune(known);
+      } else {
+        void draftStore.prune();
       }
     });
     return () => {
       unsub();
     };
-  }, [store]);
+  }, [store, butlerSessionId]);
 
   const onRefresh = async () => {
     setRefreshing(true);
@@ -120,9 +132,11 @@ export function SessionsScreen({
 
   const confirmDelete = async () => {
     if (!pendingDelete) return;
+    const targetId = pendingDelete.id;
     setDeleting(true);
     try {
-      await store.archiveSession(pendingDelete.id);
+      await store.archiveSession(targetId);
+      await draftStore.clear(targetId);
     } catch {
       // 失败就不删，列表保持原样
     } finally {

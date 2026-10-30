@@ -48,7 +48,7 @@ function formatAgo(ts: number): string {
 const RECENT_WS_KEY = '@dsh/recentWorkspaces';
 
 export function WorkspacesScreen() {
-  const { store } = useApp();
+  const { store, butlerSessionId } = useApp();
   const nav = useNav();
   const insets = useSafeAreaInsets();
   const tv = useTheme();
@@ -106,14 +106,27 @@ export function WorkspacesScreen() {
     const unsub = draftStore.subscribe(refresh);
     void draftStore.ensureHydrated().then(() => {
       refresh();
-      if (store.workspaces.length > 0) {
-        void draftStore.prune(store.workspaces.flatMap((w) => w.sessions.map((s) => s.sessionId)));
+      // 只有在列表已完整加载、无错误、且非空时，才用全量 store.sessions（非过滤后的 workspaces）清理已删除会话残稿
+      if (
+        store.connection === 'connected' &&
+        !store.sessionsLoading &&
+        !store.sessionsError &&
+        store.sessions.length > 0
+      ) {
+        const archived = new Set(store.getArchivedIds());
+        const known = store.sessions
+          .map((s) => s.sessionId)
+          .filter((id) => !archived.has(id));
+        if (butlerSessionId) known.push(butlerSessionId);
+        void draftStore.prune(known);
+      } else {
+        void draftStore.prune();
       }
     });
     return () => {
       unsub();
     };
-  }, [store]);
+  }, [store, butlerSessionId]);
 
   const onRefresh = useCallback(async () => {
     setRefreshing(true);
