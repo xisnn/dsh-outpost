@@ -349,6 +349,20 @@ check('代码块正文仍可选择（selectable）', () =>
   /<Text style=\{styles\.codeText\} selectable>/.test(mdSrc) ? true : '代码块正文不可选择',
 );
 
+check('代码块不被外层长按 Pressable 包裹（避免抢复制按钮点击与代码选区）', () =>
+  /b\.kind === 'code'/.test(mdSrc) ? true : '代码块仍被外层长按 Pressable 包裹',
+);
+
+check('代码块复制按钮具备清晰对比度与触控热区', () => {
+  const btnSrc = readFileSync('src/components/CopyTextButton.tsx', 'utf8');
+  return /color:\s*C\.textSecondary/.test(btnSrc) &&
+    /minHeight:\s*28/.test(btnSrc) &&
+    /minWidth:\s*48/.test(btnSrc) &&
+    /hitSlop=/.test(btnSrc)
+    ? true
+    : 'CopyTextButton 对比度或热区不足';
+});
+
 check('复制统一经过 normalizeCopyText 再写剪贴板', () =>
   /normalizeCopyText/.test(clipSrc) && /Clipboard\.setString\(payload\)/.test(clipSrc)
     ? true

@@ -61,11 +61,11 @@ export function CopyTextButton({
     <Pressable
       onPress={onPress}
       disabled={disabled}
-      // 可见字形很小，热区补到 44 左右
-      hitSlop={12}
+      // 按钮自身已扩到 ≥28px 高，再加外扩热区保证拇指一按即中
+      hitSlop={{ top: 10, bottom: 10, left: 12, right: 12 }}
       style={({ pressed }: { pressed: boolean }) => [
         styles.inline,
-        pressed ? { opacity: tv.motion.pressOpacity } : null,
+        pressed ? { backgroundColor: tv.colors.border, opacity: tv.motion.pressOpacity } : null,
         disabled ? { opacity: 0.35 } : null,
       ]}
       accessibilityRole="button"
@@ -83,14 +83,22 @@ function makeStyles(tv: ReturnType<typeof useTheme>) {
   const C = tv.colors;
   return StyleSheet.create({
     inline: {
-      paddingHorizontal: 6,
-      paddingVertical: 2,
+      paddingHorizontal: 10,
+      paddingVertical: 4,
+      minHeight: 28,
+      minWidth: 48,
+      alignItems: 'center',
+      justifyContent: 'center',
       borderRadius: tv.radius.xs,
+      backgroundColor: C.bgRaised,
+      borderWidth: StyleSheet.hairlineWidth,
+      borderColor: C.border,
     },
     inlineText: {
-      color: C.textFaint,
-      fontSize: tv.type.micro,
-      lineHeight: tv.type.micro * 1.6,
+      color: C.textSecondary,
+      fontSize: tv.type.xs,
+      fontWeight: tv.weight.medium,
+      lineHeight: tv.type.xs * 1.4,
     },
     copiedText: {
       color: C.accentBright,

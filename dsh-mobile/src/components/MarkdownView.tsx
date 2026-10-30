@@ -48,26 +48,26 @@ export function MarkdownView({
   const styles = useMemo(() => makeStyles(tv), [tv]);
   const blocks = useMemo(() => parseMarkdown(text), [text]);
 
-  const content = (
-    <View style={inset ? styles.wrap : null}>
-      {blocks.map((b, i) => (
-        <BlockView key={i} block={b} />
-      ))}
-    </View>
-  );
-
   /*
-    长按菜单挂在**外层 Pressable** 上，而不是每个 Text 的 onLongPress：
-      · Text 自己的 onLongPress 在 Fabric 下和嵌套行内 Text 一起用时不可靠
-        （实测长按没有任何回调）；
-      · 外层 Pressable 只处理长按，不拦点击，滚动时会被手势系统取消，
-        选区和代码块复制按钮都在内层、点按不受影响。
+    长按菜单挂在**非代码块**外层的 Pressable 上，而不是包住整个 MarkdownView：
+      · Text 自己的 onLongPress 在 Fabric 下和嵌套行内 Text 一起用时不可靠；
+      · 代码块（case 'code'）右上角有独立的 CopyTextButton（Pressable），
+        如果被外层 Pressable 包住，Android 上容易出现父子 Pressable 抢点击，
+        且长按代码会误弹「复制全文」面板而不是选中代码。
+      · 因此代码块独立渲染，正文块各自挂 onLongPress。
   */
-  if (!onLongPress) return content;
   return (
-    <Pressable onLongPress={onLongPress} delayLongPress={400}>
-      {content}
-    </Pressable>
+    <View style={inset ? styles.wrap : null}>
+      {blocks.map((b, i) => {
+        const node = <BlockView key={i} block={b} />;
+        if (!onLongPress || b.kind === 'code' || b.kind === 'hr') return node;
+        return (
+          <Pressable onLongPress={onLongPress} delayLongPress={400} key={i}>
+            {node}
+          </Pressable>
+        );
+      })}
+    </View>
   );
 }
 

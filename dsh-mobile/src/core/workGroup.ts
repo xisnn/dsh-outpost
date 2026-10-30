@@ -83,9 +83,9 @@ export function buildWorkGroup(turn: Turn): WorkGroupView | null {
   const reasoningCount = items.filter((x) => x.block.kind === 'reasoning').length;
   const toolCount = toolBlocks.length;
 
-  // 单个简单工具：不折叠（避免多层卡片）
-  if (toolCount === 1 && reasoningCount === 0) return null;
-  // 只有一段思考：交给现有的 ThinkingAccordion，不必再包一层
+  // 单个工具调用：直接展示单张 ToolCard（及其思考面板），不再外包一层「已执行 1 步」的折叠组
+  if (toolCount === 1) return null;
+  // 没有工具、且只有一段思考：交给现有的 ThinkingAccordion，不必再包一层
   if (toolCount === 0 && reasoningCount <= 1) return null;
 
   const hasPendingTool = toolBlocks.some((b) => b.pending);

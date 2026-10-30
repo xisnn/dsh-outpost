@@ -96,8 +96,10 @@ function DiffPreviewRow({ line, styles }: { line: DiffLine; styles: Styles }) {
         line.kind === 'del' ? styles.diffRowDel : null,
       ]}
     >
-      <Text style={styles.diffPrefix}>{prefix}</Text>
-      <Text style={styles.diffText} numberOfLines={2}>
+      <Text style={styles.diffPrefix} selectable={false}>
+        {prefix}
+      </Text>
+      <Text style={styles.diffText} numberOfLines={2} selectable>
         {line.text || ' '}
       </Text>
     </View>
@@ -171,7 +173,7 @@ export function ToolCard({ block }: { block: ToolBlock }) {
             {diff ? (
               <>
                 {diff.path ? (
-                  <Text style={styles.diffPath} numberOfLines={1}>
+                  <Text style={styles.diffPath} numberOfLines={1} selectable>
                     {diff.path}
                   </Text>
                 ) : null}

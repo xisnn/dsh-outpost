@@ -214,6 +214,11 @@ check('查看器完整展示原输出（不受预览上限影响）', () => {
     ? true
     : '查看器可能截断内容';
 });
+check('查看器 Diff 行具备 flex: 1 自动折行（防止长行在 row 容器中溢出截断）', () =>
+  /diffText:\s*\{[\s\S]{0,80}flex:\s*1/.test(viewerSrc)
+    ? true
+    : 'ToolOutputViewer diffText 缺少 flex: 1',
+);
 
 console.log(`\n结果：${pass} 通过 / ${fail} 失败`);
 if (fail > 0) process.exit(1);

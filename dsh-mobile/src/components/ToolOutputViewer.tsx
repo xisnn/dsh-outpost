@@ -256,6 +256,7 @@ function makeStyles(tv: ReturnType<typeof useTheme>) {
       fontFamily: 'monospace',
     },
     diffText: {
+      flex: 1,
       color: C.text,
       fontSize: tv.type.xs,
       lineHeight: tv.type.xs * 1.6,
