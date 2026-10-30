@@ -25,6 +25,7 @@ import {
 import type { ToolBlock } from '../core/fold';
 import { buildOutputPreview, parseToolDiff, toolPath, type DiffLine, type ToolDiff } from '../core/toolDiff';
 import { useTheme } from '../design/theme';
+import { useReduceMotion } from '../design/useReduceMotion';
 import { radius, space, type, weight, toolMeta } from '../design/tokens';
 import { Collapse } from './ui';
 import { ToolOutputViewer } from './ToolOutputViewer';
@@ -48,7 +49,12 @@ function summarize(input: unknown): string {
 /** 执行中的脉冲点 */
 function PulseDot({ color, styles }: { color: string; styles: Styles }) {
   const v = useRef(new Animated.Value(0)).current;
+  const reduceMotion = useReduceMotion();
   useEffect(() => {
+    if (reduceMotion) {
+      v.setValue(0);
+      return;
+    }
     const loop = Animated.loop(
       Animated.sequence([
         Animated.timing(v, {
@@ -67,7 +73,7 @@ function PulseDot({ color, styles }: { color: string; styles: Styles }) {
     );
     loop.start();
     return () => loop.stop();
-  }, [v]);
+  }, [v, reduceMotion]);
   return (
     <View style={styles.dotWrap}>
       <Animated.View
@@ -139,6 +145,8 @@ export function ToolCard({ block }: { block: ToolBlock }) {
         ]}
         accessibilityRole="button"
         accessibilityState={{ expanded: open }}
+        accessibilityLabel={`${meta.label}，${statusText}`}
+        accessibilityHint="展开或收起工具详情"
       >
         <View style={styles.iconCol}>
           {block.pending ? (

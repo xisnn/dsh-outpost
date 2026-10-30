@@ -15,15 +15,20 @@ import {
   View,
 } from 'react-native';
 import { useTheme } from '../design/theme';
+import { useReduceMotion } from '../design/useReduceMotion';
 import { motion, radius, space, type, weight } from '../design/tokens';
 import { Collapse } from './ui';
 
 type Styles = ReturnType<typeof makeStyles>;
 
-function Dot({ delay, color, styles, big }: { delay: number; color: string; styles: Styles; big?: boolean }) {
+function Dot({ delay, color, styles, big, reduceMotion }: { delay: number; color: string; styles: Styles; big?: boolean; reduceMotion: boolean }) {
   const v = useRef(new Animated.Value(0)).current;
 
   useEffect(() => {
+    if (reduceMotion) {
+      v.setValue(0);
+      return;
+    }
     const seg = motion.thinkingCycleMs / 3;
     const loop = Animated.loop(
       Animated.sequence([
@@ -45,7 +50,7 @@ function Dot({ delay, color, styles, big }: { delay: number; color: string; styl
     );
     loop.start();
     return () => loop.stop();
-  }, [delay, v]);
+  }, [delay, v, reduceMotion]);
 
   return (
     <Animated.View
@@ -79,13 +84,14 @@ export function ThinkingDots({
 }) {
   const tv = useTheme();
   const styles = useMemo(() => makeStyles(tv), [tv]);
+  const reduceMotion = useReduceMotion();
   const dotColor = color ?? tv.colors.textSecondary;
   const big = size === 'large';
   return (
     <View style={[styles.dotsRow, big ? styles.dotsRowLarge : null]}>
-      <Dot delay={0} color={dotColor} styles={styles} big={big} />
-      <Dot delay={motion.thinkingDotStaggerMs} color={dotColor} styles={styles} big={big} />
-      <Dot delay={motion.thinkingDotStaggerMs * 2} color={dotColor} styles={styles} big={big} />
+      <Dot delay={0} color={dotColor} styles={styles} big={big} reduceMotion={reduceMotion} />
+      <Dot delay={motion.thinkingDotStaggerMs} color={dotColor} styles={styles} big={big} reduceMotion={reduceMotion} />
+      <Dot delay={motion.thinkingDotStaggerMs * 2} color={dotColor} styles={styles} big={big} reduceMotion={reduceMotion} />
     </View>
   );
 }
@@ -108,6 +114,10 @@ export function ThinkingAccordion({ text, done }: { text: string; done: boolean 
           styles.head,
           pressed && { backgroundColor: tv.colors.bgCard },
         ]}
+        accessibilityRole="button"
+        accessibilityLabel={done ? '已思考' : '思考中'}
+        accessibilityHint="展开或收起思考内容"
+        accessibilityState={{ expanded: open }}
       >
         {/* 左侧竖线 */}
         <View

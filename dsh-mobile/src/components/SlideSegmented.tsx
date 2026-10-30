@@ -36,12 +36,14 @@ export function SlideSegmented<T extends string>({
   onChange,
   itemWidth,
   compact,
+  accessibilityLabel,
 }: {
   options: Array<SegmentOption<T>>;
   value: T;
   onChange: (v: T) => void;
   itemWidth?: number;
   compact?: boolean;
+  accessibilityLabel?: string;
 }) {
   const tv = useTheme();
   const styles = useMemo(() => makeStyles(tv), [tv]);
@@ -120,6 +122,7 @@ export function SlideSegmented<T extends string>({
     inputRange: [0, maxIndex],
     outputRange: [0, tabW * maxIndex],
   });
+  const activeLabel = options[index]?.label ?? '';
 
   return (
     <Pressable
@@ -130,6 +133,22 @@ export function SlideSegmented<T extends string>({
       onStartShouldSetResponder={() => true}
       onMoveShouldSetResponder={() => true}
       onResponderMove={handleMove}
+      accessible
+      accessibilityRole="adjustable"
+      accessibilityLabel={accessibilityLabel ?? '选项'}
+      accessibilityValue={{ text: activeLabel }}
+      accessibilityActions={[
+        { name: 'increment', label: '下一个' },
+        { name: 'decrement', label: '上一个' },
+      ]}
+      onAccessibilityAction={(e) => {
+        const name = e.nativeEvent.actionName;
+        const delta = name === 'increment' ? 1 : name === 'decrement' ? -1 : 0;
+        if (!delta) return;
+        const next = Math.max(0, Math.min(count - 1, index + delta));
+        const opt = options[next];
+        if (opt && opt.value !== value) onChange(opt.value);
+      }}
     >
       {tabW > 0 ? (
         <Animated.View
@@ -145,6 +164,7 @@ export function SlideSegmented<T extends string>({
             key={o.value}
             style={[styles.tab, itemWidth ? { width: itemWidth } : { flex: 1 }]}
             pointerEvents="none"
+            accessible={false}
           >
             <Text
               style={[

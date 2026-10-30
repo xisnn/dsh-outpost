@@ -30,6 +30,7 @@ import { Avatar, Dot, Tile } from '../components/ui';
 import { WorkspaceSheet } from '../components/WorkspaceSheet';
 import { NewWorkspaceSheet } from '../components/NewWorkspaceSheet';
 import { CompatBanner } from '../components/CompatBanner';
+import { ConnectionBanner } from '../components/ConnectionBanner';
 import { draftStore } from '../core/draftStore';
 import { searchSessionsAcrossWorkspaces } from '../core/sessionSearch';
 import { approvalSessionIds, anySessionInSet, retrySessionIds } from '../core/sessionStatus';
@@ -227,7 +228,8 @@ export function WorkspacesScreen() {
           accessibilityLabel="搜索全部会话"
         />
         {query ? (
-          <Pressable onPress={() => setQuery('')} hitSlop={10} style={styles.clearBtn}>
+          <Pressable onPress={() => setQuery('')} hitSlop={10} style={styles.clearBtn}
+            accessibilityRole="button" accessibilityLabel="清空搜索">
             <Text style={styles.clearText}>✕</Text>
           </Pressable>
         ) : null}
@@ -269,22 +271,11 @@ export function WorkspacesScreen() {
   return (
     <View style={styles.root}>
       {header}
-      {/* 连接失败时给出可操作的提示。
-          之前错误只存在 store 里没人显示 —— 用户网络断了只看到空列表，
-          完全不知道为什么。connectionHint 是分类过的中文提示。 */}
-      {store.connection === 'error' && store.connectionHint ? (
-        <View style={styles.netBar}>
-          <Text style={styles.netIcon}>⚠</Text>
-          <View style={styles.netBody}>
-            <Text style={styles.netTitle} numberOfLines={2}>
-              {store.connectionHint.split('\n')[0]}
-            </Text>
-            <Text style={styles.netHint} numberOfLines={3}>
-              {store.connectionHint.split('\n').slice(1).join(' ')}
-            </Text>
-          </View>
-        </View>
-      ) : null}
+      <ConnectionBanner
+        connection={store.connection}
+        hint={store.connectionHint}
+        terminal={store.authInvalidated}
+      />
       <CompatBanner summary={store.compatSummary} missing={store.compatMissing} />
       <FlatList<HomeListItem>
         contentContainerStyle={styles.content}

@@ -268,9 +268,10 @@ export const darkPalette: Palette = {
   fadeBase: '#232936',
 };
 
-export type ThemeMode = 'light' | 'warm' | 'dark';
+export type ThemeMode = 'light' | 'warm' | 'dark' | 'system';
+export type ResolvedThemeMode = 'light' | 'warm' | 'dark';
 
-export const palettes: Record<ThemeMode, Palette> = {
+export const palettes: Record<ResolvedThemeMode, Palette> = {
   light: lightPalette,
   warm: warmPalette,
   dark: darkPalette,
@@ -280,11 +281,24 @@ export const themeLabels: Record<ThemeMode, string> = {
   light: '纯白',
   warm: '暖白',
   dark: '深色',
+  system: '跟随系统',
 };
 
+/** 「跟随系统」在系统深色下用深色，否则用纯白 */
+export function resolveThemeMode(
+  mode: ThemeMode,
+  systemScheme: 'light' | 'dark' | null | undefined,
+): ResolvedThemeMode {
+  if (mode === 'system') return systemScheme === 'dark' ? 'dark' : 'light';
+  return mode;
+}
+
 /** 按模式取色板（非 React 环境用） */
-export function paletteOf(mode: ThemeMode): Palette {
-  return palettes[mode] ?? lightPalette;
+export function paletteOf(
+  mode: ThemeMode,
+  systemScheme: 'light' | 'dark' | null | undefined = 'light',
+): Palette {
+  return palettes[resolveThemeMode(mode, systemScheme)] ?? lightPalette;
 }
 
 // ── 工具标签 ────────────────────────────────────────────────────────

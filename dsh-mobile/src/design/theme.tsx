@@ -5,11 +5,14 @@
  * 这样切换主题时整棵树重渲染，无需重启。
  */
 import React, { createContext, useCallback, useContext, useMemo, useState } from 'react';
+import { useColorScheme } from 'react-native';
 import {
   paletteOf,
-  palettes,
+  themeLabels,
+  resolveThemeMode,
   type Palette,
   type ThemeMode,
+  type ResolvedThemeMode,
   radius,
   space,
   type,
@@ -20,6 +23,7 @@ import {
 
 export interface Theme {
   mode: ThemeMode;
+  resolvedMode: ResolvedThemeMode;
   colors: Palette;
   radius: typeof radius;
   space: typeof space;
@@ -47,6 +51,8 @@ export function ThemeProvider({
   children: React.ReactNode;
 }) {
   const [mode, setModeState] = useState<ThemeMode>(initial);
+  const systemScheme = useColorScheme();
+  const resolvedMode = resolveThemeMode(mode, systemScheme);
 
   const setMode = useCallback(
     (m: ThemeMode) => {
@@ -59,18 +65,19 @@ export function ThemeProvider({
   const value = useMemo<ThemeContextValue>(
     () => ({
       mode,
-      colors: paletteOf(mode),
+      resolvedMode,
+      colors: paletteOf(mode, systemScheme),
       radius,
       space,
       type,
       weight,
       layout,
       motion,
-      isDark: mode === 'dark',
+      isDark: resolvedMode === 'dark',
       setMode,
-      modes: Object.keys(palettes) as ThemeMode[],
+      modes: Object.keys(themeLabels) as ThemeMode[],
     }),
-    [mode, setMode],
+    [mode, resolvedMode, systemScheme, setMode],
   );
 
   return <ThemeContext.Provider value={value}>{children}</ThemeContext.Provider>;

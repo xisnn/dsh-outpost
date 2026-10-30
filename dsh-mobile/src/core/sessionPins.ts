@@ -133,19 +133,29 @@ export class SessionPinStore {
     }
   }
 
-  /** 删除会话时同步移除其置顶记录（若存在）。 */
+  /** 删除会话时同步移除其置顶记录（若存在）。写盘失败回滚并抛错，交由 UI 提示。 */
   async remove(sessionId: string): Promise<void> {
     if (!sessionId) return;
     await this.ensureHydrated();
+    if (!this.ids.has(sessionId)) return;
     const rev = (this.sessionRev.get(sessionId) ?? 0) + 1;
     this.sessionRev.set(sessionId, rev);
-    if (!this.ids.delete(sessionId)) return;
+    this.ids.delete(sessionId);
     this.emit();
-    await this.enqueuePersist();
+    try {
+      await this.enqueuePersist();
+    } catch (e) {
+      if (this.sessionRev.get(sessionId) === rev) {
+        this.ids.add(sessionId);
+        this.emit();
+      }
+      throw e;
+    }
   }
 
-  /** 退出并清除所有授权时清空置顶记录。 */
+  /** 退出并清除所有授权时清空置顶记录；失败回滚内存并抛错，由调用方如实报告。 */
   async clearAll(): Promise<void> {
+    const before = new Set(this.ids);
     this.clearEpoch += 1;
     this.hydrated = true;
     for (const id of this.ids) {
@@ -163,7 +173,16 @@ export class SessionPinStore {
     };
     const next = this.persistChain.then(run, run);
     this.persistChain = next.catch(() => undefined);
-    await next;
+    try {
+      await next;
+    } catch (e) {
+      this.ids = before;
+      for (const id of before) {
+        this.sessionRev.set(id, (this.sessionRev.get(id) ?? 0) + 1);
+      }
+      this.emit();
+      throw e;
+    }
   }
 
   subscribe(listener: () => void): () => void {

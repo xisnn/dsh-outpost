@@ -1021,6 +1021,12 @@ export function ChatScreen({
               ]}
               onPress={() => void send()}
               disabled={(!draft.trim() && drafts.length === 0) || sending}
+              accessibilityRole="button"
+              accessibilityLabel="发送消息"
+              accessibilityState={{
+                disabled: (!draft.trim() && drafts.length === 0) || sending,
+                busy: sending,
+              }}
             >
               {sending ? (
                 <ActivityIndicator color={tv.colors.bg} size="small" />

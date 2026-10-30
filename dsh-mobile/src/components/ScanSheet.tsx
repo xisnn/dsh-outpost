@@ -26,6 +26,7 @@ import { Camera } from 'react-native-camera-kit';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 
 import { useTheme } from '../design/theme';
+import { useReduceMotion } from '../design/useReduceMotion';
 
 const ACCENT = '#5AC8FA';
 
@@ -46,6 +47,7 @@ export function ScanSheet({
   const [state, setState] = useState<'asking' | 'ready' | 'denied'>('asking');
   const handled = useRef(false);
   const sweep = useRef(new Animated.Value(0)).current;
+  const reduceMotion = useReduceMotion();
 
   // 取景框：屏宽的 68%，最多 300
   const frame = Math.min(width * 0.68, 300);
@@ -80,6 +82,10 @@ export function ScanSheet({
   // 扫描线：来回扫
   useEffect(() => {
     if (state !== 'ready') return;
+    if (reduceMotion) {
+      sweep.setValue(0.5);
+      return;
+    }
     sweep.setValue(0);
     const loop = Animated.loop(
       Animated.sequence([
@@ -99,7 +105,7 @@ export function ScanSheet({
     );
     loop.start();
     return () => loop.stop();
-  }, [state, sweep]);
+  }, [state, sweep, reduceMotion]);
 
   const translateY = sweep.interpolate({
     inputRange: [0, 1],

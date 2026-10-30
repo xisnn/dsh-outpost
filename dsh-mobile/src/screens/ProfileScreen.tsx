@@ -358,8 +358,9 @@ export function ProfileScreen({ active = true }: { active?: boolean }) {
             options={tv.modes.map((m: ThemeMode) => ({ value: m, label: themeLabels[m] }))}
             value={tv.mode}
             onChange={(m) => tv.setMode(m)}
+            accessibilityLabel="主题模式"
           />
-          <Text style={styles.hint}>纯白 / 暖白随时切换，深色适合夜里看</Text>
+          <Text style={styles.hint}>纯白 / 暖白 / 深色，或跟随系统自动切换</Text>
         </View>
 
         {/* ── 管家模式 ─────────────────────────────────── */}

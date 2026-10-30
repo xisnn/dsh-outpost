@@ -51,7 +51,7 @@ import { WORKSPACE_CUSTOM_KEY, type WorkspaceCustom } from './core/workspace-cus
 import { draftStore } from './core/draftStore';
 import { sessionPinStore } from './core/sessionPins';
 import { ThemeProvider, useTheme } from './design/theme';
-import { palettes, type ThemeMode } from './design/tokens';
+import { themeLabels, type ThemeMode } from './design/tokens';
 import { buildButlerPrime, BUTLER_PRIME_VERSION } from './core/butler';
 import { NavHost, type Screen } from './nav/NavHost';
 import { NoticeHost } from './components/NoticeHost';
@@ -154,6 +154,8 @@ interface LocalCleanupResult {
   pendingSends: 'cleared' | 'partial' | 'failed';
   /** F-04 会话输入草稿是否清除并回读确认 */
   drafts: 'cleared' | 'failed';
+  /** F-07 会话置顶记录是否清除 */
+  pins: 'cleared' | 'failed';
 }
 
 /**
@@ -185,7 +187,8 @@ function isFullyClear(result: ClearAuthorizationResult): boolean {
     result.local.revocation.ok &&
     // 待发送记录与会话输入草稿也必须清除；未清除时不能让用户以为全部清干净
     result.local.pendingSends === 'cleared' &&
-    result.local.drafts === 'cleared'
+    result.local.drafts === 'cleared' &&
+    result.local.pins === 'cleared'
   );
 }
 
@@ -339,6 +342,12 @@ function notifyClearResult(result: ClearAuthorizationResult): void {
         '  未发送的草稿文本可能仍留在本机存储里，建议重启后再次执行清除。',
     );
   }
+  if (result.local.pins === 'failed') {
+    problems.push(
+      '会话置顶记录没能确认从本机存储清除。\n' +
+        '  置顶偏好可能仍有残留，建议重启后再次执行清除。',
+    );
+  }
 
   // 不该发生：调用方只在 !isFullyClear 时进来
   if (problems.length === 0) return;
@@ -360,7 +369,7 @@ export function useApp(): AppContextValue {
 
 /** 从持久化值解析主题，非法值回落到纯白 */
 function readThemeMode(raw: string | null): ThemeMode {
-  return raw && raw in palettes ? (raw as ThemeMode) : 'light';
+  return raw && raw in themeLabels ? (raw as ThemeMode) : 'light';
 }
 
 /**
@@ -984,7 +993,14 @@ export default function App() {
         OWNED_KEY,
       ].map((k) => AsyncStorage.removeItem(k).catch(() => undefined)),
     );
-    await sessionPinStore.clearAll().catch(() => undefined);
+
+    // F-07：置顶记录同样清理；失败不能静默，纳入 LocalCleanupResult 告知用户。
+    let pins: 'cleared' | 'failed' = 'cleared';
+    try {
+      await sessionPinStore.clearAll();
+    } catch {
+      pins = 'failed';
+    }
 
     // F-04：草稿是用户输入（可能含敏感内容），彻底清除授权时一并删除并回读确认。
     // 断开连接（signOut）不调用这里，草稿保留。
@@ -1032,7 +1048,7 @@ export default function App() {
 
     const result: ClearAuthorizationResult = {
       server,
-      local: { secureStorage, legacyPlaintext, cookieJar, revocation, pendingSends, drafts },
+      local: { secureStorage, legacyPlaintext, cookieJar, revocation, pendingSends, drafts, pins },
     };
 
     // ── 如实告知用户 ──────────────────────────────────────────

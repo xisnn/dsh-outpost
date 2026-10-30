@@ -26,6 +26,7 @@ import { Dot, Pill } from '../components/ui';
 import { ConfirmSheet } from '../components/ConfirmSheet';
 import { RenameSheet } from '../components/RenameSheet';
 import { CompatBanner } from '../components/CompatBanner';
+import { ConnectionBanner } from '../components/ConnectionBanner';
 import { filterSessions } from '../core/sessionSearch';
 import { draftStore } from '../core/draftStore';
 import { sessionPinStore, sortSessionsWithPins } from '../core/sessionPins';
@@ -66,6 +67,7 @@ export function SessionsScreen({
   // 删除确认
   const [pendingDelete, setPendingDelete] = useState<{ id: string; title: string } | null>(null);
   const [deleting, setDeleting] = useState(false);
+  const [deleteWarning, setDeleteWarning] = useState<string | null>(null);
   // 搜索
   const [query, setQuery] = useState('');
   // 重命名
@@ -165,10 +167,16 @@ export function SessionsScreen({
     if (!pendingDelete) return;
     const targetId = pendingDelete.id;
     setDeleting(true);
+    setDeleteWarning(null);
     try {
       await store.archiveSession(targetId);
       await draftStore.clear(targetId);
-      await sessionPinStore.remove(targetId).catch(() => undefined);
+      try {
+        await sessionPinStore.remove(targetId);
+      } catch {
+        // 会话已删除，但置顶记录没清掉：显式提示，下一次清理会重试。
+        setDeleteWarning('会话已删除，但置顶记录清理失败，请稍后再试');
+      }
     } catch {
       // 失败就不删，列表保持原样
     } finally {
@@ -248,10 +256,22 @@ export function SessionsScreen({
         }
       />
 
+      <ConnectionBanner
+        connection={store.connection}
+        hint={store.connectionHint}
+        terminal={store.authInvalidated}
+      />
       {createError ? (
         <View style={styles.errorBar}>
           <Text style={styles.errorText} numberOfLines={3}>
             {createError}
+          </Text>
+        </View>
+      ) : null}
+      {deleteWarning ? (
+        <View style={styles.errorBar}>
+          <Text style={styles.errorText} numberOfLines={3}>
+            {deleteWarning}
           </Text>
         </View>
       ) : null}
@@ -271,7 +291,8 @@ export function SessionsScreen({
           clearButtonMode="while-editing"
         />
         {query ? (
-          <Pressable onPress={() => setQuery('')} hitSlop={10} style={styles.clearBtn}>
+          <Pressable onPress={() => setQuery('')} hitSlop={10} style={styles.clearBtn}
+            accessibilityRole="button" accessibilityLabel="清空搜索">
             <Text style={styles.clearText}>✕</Text>
           </Pressable>
         ) : null}

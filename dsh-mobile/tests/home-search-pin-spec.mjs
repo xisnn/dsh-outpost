@@ -264,6 +264,45 @@ check('clearAll 清空内存与磁盘置顶记录（退出并清除授权）', (
     : `left=${afterClearAllReload.list().join(',')}`,
 );
 
+// remove / clearAll 失败注入：必须抛错、回滚内存，不能静默忽略
+let failPinWrites = false;
+const failCleanupStorage = {
+  data: new Map(),
+  async getItem(k) {
+    return this.data.has(k) ? this.data.get(k) : null;
+  },
+  async setItem(k, v) {
+    if (failPinWrites) throw new Error('disk failure');
+    this.data.set(k, v);
+  },
+  async removeItem(k) {
+    if (failPinWrites) throw new Error('disk failure');
+    this.data.delete(k);
+  },
+};
+const failCleanupStore = new SessionPinStore(failCleanupStorage);
+await failCleanupStore.ensureHydrated();
+await failCleanupStore.toggle('to-delete');
+failPinWrites = true;
+let removeThrew = false;
+try {
+  await failCleanupStore.remove('to-delete');
+} catch {
+  removeThrew = true;
+}
+check('删除会话 remove 写盘失败会抛错并回滚，不静默吞掉', () =>
+  removeThrew && failCleanupStore.isPinned('to-delete') ? true : 'remove 失败未被识别或内存被清',
+);
+let clearAllThrew = false;
+try {
+  await failCleanupStore.clearAll();
+} catch {
+  clearAllThrew = true;
+}
+check('退出清除授权 clearAll 失败会抛错并回滚，不静默吞掉', () =>
+  clearAllThrew && failCleanupStore.isPinned('to-delete') ? true : 'clearAll 失败未被识别或置顶丢失',
+);
+
 console.log('\n── 状态徽标只来自真实数据 ─────────────────────────');
 check('待审批只来自 PendingApproval.sessionId', () => {
   const ids = approvalSessionIds([
@@ -336,16 +375,24 @@ check('置顶排序通过稳定纯函数，不改变服务端顺序', () =>
     ? true
     : '未使用稳定置顶排序',
 );
-check('删除确认与归档逻辑仍保留，且删除会话时同步清理置顶记录', () =>
+check('删除确认与归档逻辑仍保留，且删除会话时同步清理置顶并提示失败', () =>
   /<ConfirmSheet/.test(sessions) &&
   /store\.archiveSession\(targetId\)/.test(sessions) &&
   /sessionPinStore\.remove\(targetId\)/.test(sessions) &&
+  /setDeleteWarning\(/.test(sessions) &&
+  !/sessionPinStore\.remove\(targetId\)\.catch/.test(sessions) &&
   /title="删除这个对话？"/.test(sessions)
     ? true
-    : '删除确认或置顶清理缺失',
+    : '删除确认或置顶清理失败提示缺失',
 );
-check('退出并清除所有授权时同步清理置顶记录', () =>
-  /sessionPinStore\.clearAll\(\)/.test(appSrc) ? true : 'App.clearAuthorization 未清理置顶记录',
+check('退出并清除所有授权时同步清理置顶记录且失败不静默', () =>
+  /await sessionPinStore\.clearAll\(\)/.test(appSrc) &&
+  !/sessionPinStore\.clearAll\(\)\.catch/.test(appSrc) &&
+  /result\.local\.pins === 'cleared'/.test(appSrc) &&
+  /result\.local\.pins === 'failed'/.test(appSrc) &&
+  /pins: 'cleared' \| 'failed'/.test(appSrc)
+    ? true
+    : 'App.clearAuthorization 未正确识别置顶清理失败',
 );
 check('会话卡待审批/待重试来自真实 store 数据', () =>
   /approvalSessionIds\(store\.pendingApprovals\)/.test(sessions) &&

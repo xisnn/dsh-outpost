@@ -40,8 +40,8 @@ import React, {
 import {
   Animated,
   BackHandler,
-  Dimensions,
   PanResponder,
+  useWindowDimensions,
   View,
   StyleSheet,
 } from 'react-native';
@@ -72,7 +72,6 @@ interface NavHostProps {
   render: (screen: Screen) => React.ReactNode;
 }
 
-const SCREEN_WIDTH = Dimensions.get('window').width;
 /** 转场时长：太快看不出、太慢显得卡 */
 const DURATION = 240;
 
@@ -129,12 +128,15 @@ function ScreenPane({
   active,
   /** 是否被新页面压在下面（需要轻微让位） */
   covered,
+  /** 当前窗口宽度（旋转 / 分屏时动态变化） */
+  width,
   /** 手势拖动位移（只对顶层页面生效） */
   dragX,
   children,
 }: {
   active: boolean;
   covered: boolean;
+  width: number;
   dragX?: Animated.Value;
   children: React.ReactNode;
 }) {
@@ -158,7 +160,7 @@ function ScreenPane({
 
   const translateX = enter.interpolate({
     inputRange: [0, 1],
-    outputRange: [SCREEN_WIDTH * 0.28, 0],
+    outputRange: [width * 0.28, 0],
   });
   const opacity = enter.interpolate({
     inputRange: [0, 1],
@@ -166,7 +168,7 @@ function ScreenPane({
   });
 
   // 被覆盖时露出一点边缘，暗示下面还有页面
-  const coverShift = covered ? -SCREEN_WIDTH * 0.08 : 0;
+  const coverShift = covered ? -width * 0.08 : 0;
 
   // 拖动位移叠加入场位移。dragX 只有顶层才有，底层页面是纯让位。
   const finalX = dragX
@@ -193,6 +195,10 @@ function ScreenPane({
 
 export function NavHost({ initial, render }: NavHostProps) {
   const [stack, setStack] = useState<Screen[]>([initial]);
+  // 窗口宽度动态获取：旋转、分屏、折叠屏展开后转场距离与返回手势比例都跟随当前宽度
+  const { width } = useWindowDimensions();
+  const widthRef = useRef(width);
+  widthRef.current = width;
 
   const push = useCallback((name: string, params?: Record<string, unknown>) => {
     setStack((s) => [...s, { name, params }]);
@@ -277,10 +283,10 @@ export function NavHost({ initial, render }: NavHostProps) {
         onPanResponderRelease: (_evt, g) => {
           if (!committed.current) return;
           committed.current = false;
-          if (shouldDismiss(g.dx, g.vx, SCREEN_WIDTH)) {
+          if (shouldDismiss(g.dx, g.vx, widthRef.current)) {
             // 先动画到位，再真正出栈，避免闪一下
             Animated.timing(dragX, {
-              toValue: SCREEN_WIDTH,
+              toValue: widthRef.current,
               duration: 180,
               useNativeDriver: true,
             }).start(() => {
@@ -332,6 +338,7 @@ export function NavHost({ initial, render }: NavHostProps) {
               key={`${i}-${screen.name}`}
               active={isTop}
               covered={!isTop}
+              width={width}
               dragX={isTop && canGoBack ? dragX : undefined}
             >
               {render(screen)}
