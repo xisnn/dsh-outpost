@@ -92,10 +92,10 @@ check('同一会话重复记录取最新', () => {
   return r.length === 1 && r[0].text === 'new' ? true : JSON.stringify(r);
 });
 
-check('超长草稿按上限截断', () => {
+check('超长草稿原样保留（不静默截断）', () => {
   const long = 'x'.repeat(MAX_DRAFT_CHARS + 500);
   const r = parseDrafts(JSON.stringify([{ sessionId: 's1', text: long, updatedAt: 1 }]));
-  return r[0].text.length === MAX_DRAFT_CHARS ? true : `len=${r[0].text.length}`;
+  return r[0].text.length === long.length ? true : `len=${r[0].text.length}`;
 });
 
 check('序列化可按解析还原', () => {
@@ -161,6 +161,15 @@ async function run() {
   check('has() 只对非空草稿为 true', () =>
     store.has('s1') && !store.has('s3') ? true : '空/不存在会话误报',
   );
+
+  check('set 超长文本不截断（由输入框 maxLength 负责）', () => {
+    const long = '长'.repeat(MAX_DRAFT_CHARS + 200);
+    const longStore = new ComposerDraftStore(memoryStorage());
+    longStore.set('long-session', long);
+    return longStore.get('long-session').length === long.length
+      ? true
+      : `len=${longStore.get('long-session').length}`;
+  });
 
   check('300ms 防抖内不写盘（防输入卡顿）', () => storage.writes === 0, `writes=${storage.writes}`);
   await new Promise((r) => setTimeout(r, DRAFT_DEBOUNCE_MS + 120));
@@ -231,6 +240,81 @@ async function run() {
   check('clearAll 清空持久化（退出并清除授权）', () =>
     afterClear.size() === 0 && !storage.data.has(DRAFT_STORAGE_KEY) ? true : 'clearAll 有残留',
   );
+
+  // ── 竞态：防抖中 clear 不能被旧写入复活 ────────────────────────
+  const raceStorage = memoryStorage();
+  const raceStore = new ComposerDraftStore(raceStorage);
+  await raceStore.ensureHydrated();
+  raceStore.set('race-1', '要删除的草稿');
+  await raceStore.clear('race-1'); // clear 早于 300ms 防抖触发
+  await new Promise((r) => setTimeout(r, DRAFT_DEBOUNCE_MS + 200));
+  const raceReload = new ComposerDraftStore(raceStorage);
+  await raceReload.ensureHydrated();
+  check('防抖窗口内 clear 后，旧草稿不会复活', () =>
+    raceReload.get('race-1') === '' ? true : `resurrected=${JSON.stringify(raceReload.get('race-1'))}`,
+  );
+
+  // ── 竞态：慢存储下写入顺序错乱不覆盖新状态 ──────────────────────
+  let delayed = null;
+  const slowStorage = {
+    data: new Map(),
+    async getItem(k) {
+      return this.data.has(k) ? this.data.get(k) : null;
+    },
+    async setItem(k, v) {
+      // 第一次写入故意延迟，模拟「旧写入姗姗来迟」
+      if (!delayed) {
+        delayed = new Promise((resolve) => setTimeout(resolve, 120));
+        await delayed;
+      }
+      this.data.set(k, v);
+    },
+    async removeItem(k) {
+      this.data.delete(k);
+    },
+  };
+  const slowStore = new ComposerDraftStore(slowStorage);
+  await slowStore.ensureHydrated();
+  slowStore.set('slow-1', '旧内容');
+  const slowFlush1 = slowStore.flush(); // 这次写会慢
+  slowStore.set('slow-1', '新内容');
+  const slowFlush2 = slowStore.flush();
+  await Promise.all([slowFlush1, slowFlush2]);
+  const slowReload = new ComposerDraftStore(slowStorage);
+  await slowReload.ensureHydrated();
+  check('慢存储下后写的新草稿不被旧写入覆盖', () =>
+    slowReload.get('slow-1') === '新内容' ? true : `got=${JSON.stringify(slowReload.get('slow-1'))}`,
+  );
+
+  // ── 快速切换会话：各会话草稿独立 ────────────────────────────────
+  const switchStorage = memoryStorage();
+  const switchStore = new ComposerDraftStore(switchStorage);
+  await switchStore.ensureHydrated();
+  switchStore.set('sess-A', 'A 的草稿');
+  switchStore.set('sess-B', 'B 的草稿');
+  switchStore.set('sess-A', 'A 的新草稿');
+  await switchStore.flush();
+  const switchReload = new ComposerDraftStore(switchStorage);
+  await switchReload.ensureHydrated();
+  check('快速切换会话草稿不串、不丢', () =>
+    switchReload.get('sess-A') === 'A 的新草稿' && switchReload.get('sess-B') === 'B 的草稿'
+      ? true
+      : JSON.stringify({ a: switchReload.get('sess-A'), b: switchReload.get('sess-B') }),
+  );
+
+  // ── hydrate 与输入竞态：输入内容不能被磁盘旧值覆盖 ──────────────
+  const hydrationStorage = memoryStorage({
+    [DRAFT_STORAGE_KEY]: JSON.stringify([{ sessionId: 'hyd-1', text: '磁盘旧值', updatedAt: 1 }]),
+  });
+  const hydrationStore = new ComposerDraftStore(hydrationStorage);
+  const hydratePromise = hydrationStore.ensureHydrated();
+  hydrationStore.set('hyd-1', '用户刚输入的新值');
+  await hydratePromise;
+  check('hydrate 竞态下用户输入不被旧草稿覆盖', () =>
+    hydrationStore.get('hyd-1') === '用户刚输入的新值'
+      ? true
+      : JSON.stringify(hydrationStore.get('hyd-1')),
+  );
 }
 
 await run();
@@ -266,6 +350,16 @@ check('入队成功但发送失败时不重复留草稿', () =>
 );
 check('页面卸载时 flush 防抖草稿', () =>
   /draftStore\.flush\(\)/.test(chatSrc) ? true : '卸载没有 flush',
+);
+check('切后台时 flush 缩小强制停止丢字窗口', () =>
+  /AppState\.addEventListener\('change'[\s\S]{0,120}draftStore\.flush\(\)/.test(chatSrc)
+    ? true
+    : '缺少 AppState flush',
+);
+check('输入框达到上限时有可见提示（不静默丢字）', () =>
+  /maxLength=\{MAX_DRAFT_CHARS\}/.test(chatSrc) && /已达 \{MAX_DRAFT_CHARS\} 字草稿上限/.test(chatSrc)
+    ? true
+    : '缺少草稿上限提示或 maxLength', 
 );
 check('会话列表显示「草稿」标记', () =>
   /✎ 草稿/.test(sessionsSrc) && /draftStore\.has\(item\.sessionId\)/.test(sessionsSrc)

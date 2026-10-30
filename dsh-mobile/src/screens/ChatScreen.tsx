@@ -9,6 +9,7 @@
 import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import {
   ActivityIndicator,
+  AppState,
   FlatList,
   Image,
   Keyboard,
@@ -43,7 +44,7 @@ import {
   type ListTail,
 } from '../core/scrollFollow';
 import { buildAssistantCopyText } from '../core/copyText';
-import { draftStore } from '../core/draftStore';
+import { draftStore, MAX_DRAFT_CHARS } from '../core/draftStore';
 import { buildWorkGroupMap } from '../core/workGroup';
 import { WorkGroupCard } from '../components/WorkGroupCard';
 import { AssistantRichText } from '../components/AssistantRichText';
@@ -190,6 +191,14 @@ export function ChatScreen({
     return () => {
       void draftStore.flush();
     };
+  }, []);
+
+  // 切后台 / 锁屏前立即落盘，缩小「强制停止丢最后几个字」的窗口
+  useEffect(() => {
+    const sub = AppState.addEventListener('change', (state) => {
+      if (state !== 'active') void draftStore.flush();
+    });
+    return () => sub.remove();
   }, []);
 
   // P0-1：待发送记录独立于 chat fold，页面卸载/切换会话后仍从 store 恢复。
@@ -972,6 +981,12 @@ export function ChatScreen({
             </ScrollView>
           ) : null}
 
+          {draft.length >= MAX_DRAFT_CHARS ? (
+            <Text style={styles.draftLimitHint}>
+              已达 {MAX_DRAFT_CHARS} 字草稿上限，继续输入请先发送或删减
+            </Text>
+          ) : null}
+
           <View style={styles.composerRow}>
             <Pressable
               style={({ pressed }: { pressed: boolean }) => [
@@ -997,7 +1012,7 @@ export function ChatScreen({
               placeholder={attaching ? '正在上传附件…' : '发消息…'}
               placeholderTextColor={tv.colors.textFaint}
               multiline
-              maxLength={20000}
+              maxLength={MAX_DRAFT_CHARS}
             />
             <Pressable
               style={({ pressed }: { pressed: boolean }) => [
@@ -1351,6 +1366,13 @@ function makeStyles(tv: ReturnType<typeof useTheme>) {
       paddingHorizontal: layout.screenPadding,
       paddingBottom: space.sm,
       alignItems: 'flex-end',
+    },
+    draftLimitHint: {
+      color: tv.colors.warning,
+      fontSize: type.micro,
+      paddingHorizontal: layout.screenPadding,
+      paddingBottom: 4,
+      textAlign: 'right',
     },
     // 横向 ScrollView 在列容器里不加这个会被撑高
     draftRailScroll: { flexGrow: 0 },

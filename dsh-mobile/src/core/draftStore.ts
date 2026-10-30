@@ -35,7 +35,12 @@ export const DRAFT_STORAGE_KEY = '@dsh/chatDrafts';
 export const DRAFT_DEBOUNCE_MS = 300;
 /** 最多保留多少条非空会话草稿 */
 export const MAX_DRAFTS = 50;
-/** 单条草稿最大字符数（超长文本截断，避免恶意/误粘贴撑爆存储） */
+/**
+ * 单条草稿的**输入上限**（由输入框 `maxLength` 强制，达到上限时界面给出可见提示）。
+ *
+ * 注意：存储层**绝不做静默截断** —— 用户输入多少就存多少。这个常量只用于
+ * 输入框限制与提示文案，避免「打字打一半被悄悄吞掉」。
+ */
 export const MAX_DRAFT_CHARS = 20_000;
 /** 草稿过期时间：30 天没动过就清掉 */
 export const DRAFT_TTL_MS = 30 * 24 * 60 * 60 * 1000;
@@ -65,7 +70,8 @@ export function parseDrafts(raw: string | null): DraftRecord[] {
     if (!prev || updatedAt >= prev.updatedAt) {
       bySession.set(r.sessionId, {
         sessionId: r.sessionId,
-        text: r.text.slice(0, MAX_DRAFT_CHARS),
+        // 不截断：历史/异常数据原样保留，避免静默丢字
+        text: r.text,
         updatedAt,
       });
     }
@@ -114,6 +120,10 @@ export class ComposerDraftStore {
   private hydrated = false;
   private hydrating: Promise<void> | null = null;
   private timer: ReturnType<typeof setTimeout> | null = null;
+  /** 写入串行链：保证落盘顺序与内存最新状态一致，防止旧快照覆盖新状态 */
+  private persistChain: Promise<void> = Promise.resolve();
+  /** 用户已主动输入过的 session：hydrate 时不能用磁盘旧值覆盖 */
+  private touched = new Set<string>();
   private listeners = new Set<() => void>();
 
   constructor(storage?: DraftStorageLike, storageFactory: () => DraftStorageLike = defaultStorage) {
@@ -134,6 +144,8 @@ export class ComposerDraftStore {
       try {
         const raw = await this.getStorage().getItem(DRAFT_STORAGE_KEY);
         for (const rec of parseDrafts(raw)) {
+          // 用户在 hydrate 完成前已经输入过的会话，以内存中的新内容为准
+          if (this.touched.has(rec.sessionId)) continue;
           const prev = this.map.get(rec.sessionId);
           if (!prev || rec.updatedAt >= prev.updatedAt) this.map.set(rec.sessionId, rec);
         }
@@ -167,13 +179,14 @@ export class ComposerDraftStore {
   /** 更新草稿（空文本 = 删除），300ms 防抖落盘 */
   set(sessionId: string, text: string): void {
     if (!sessionId) return;
-    const trimmedRight = text.slice(0, MAX_DRAFT_CHARS);
-    if (!trimmedRight.trim()) {
+    this.touched.add(sessionId);
+    if (!text.trim()) {
       if (this.map.delete(sessionId)) this.schedulePersist();
       this.emit();
       return;
     }
-    this.map.set(sessionId, { sessionId, text: trimmedRight, updatedAt: Date.now() });
+    // 不截断：输入上限由输入框 maxLength + 可见提示负责
+    this.map.set(sessionId, { sessionId, text, updatedAt: Date.now() });
     // 限制总量：超过上限时淘汰最久未更新的草稿
     if (this.map.size > MAX_DRAFTS) {
       const sorted = [...this.map.values()].sort((a, b) => b.updatedAt - a.updatedAt);
@@ -186,9 +199,10 @@ export class ComposerDraftStore {
   /** 立即删除某会话草稿（发送入队成功后调用） */
   async clear(sessionId: string): Promise<void> {
     if (!sessionId) return;
+    this.touched.add(sessionId);
     const changed = this.map.delete(sessionId);
     this.emit();
-    if (changed) await this.persistNow();
+    if (changed) await this.enqueuePersist();
   }
 
   /**
@@ -202,7 +216,7 @@ export class ComposerDraftStore {
     this.map.clear();
     for (const rec of kept) this.map.set(rec.sessionId, rec);
     const removed = before - this.map.size;
-    if (removed > 0) await this.persistNow();
+    if (removed > 0) await this.enqueuePersist();
     else this.emit();
     return removed;
   }
@@ -214,9 +228,12 @@ export class ComposerDraftStore {
       this.timer = null;
     }
     const had = this.map.size > 0;
+    for (const id of this.map.keys()) this.touched.add(id);
     this.map.clear();
     this.emit();
     try {
+      // 串行化：排在所有已排队的旧写入之后，确保最终状态是「空」
+      await this.enqueuePersist();
       await this.getStorage().removeItem(DRAFT_STORAGE_KEY);
     } catch {
       // 存储不可用时无法确认清干净；下次 prune/覆盖会重试
@@ -224,13 +241,13 @@ export class ComposerDraftStore {
     }
   }
 
-  /** 把防抖中的变更立即写盘（页面卸载 / 切会话时调用） */
+  /** 把防抖中的变更立即写盘（页面卸载 / 切后台时调用） */
   async flush(): Promise<void> {
     if (this.timer) {
       clearTimeout(this.timer);
       this.timer = null;
     }
-    await this.persistNow();
+    await this.enqueuePersist();
   }
 
   subscribe(listener: () => void): () => void {
@@ -252,8 +269,21 @@ export class ComposerDraftStore {
     if (this.timer) clearTimeout(this.timer);
     this.timer = setTimeout(() => {
       this.timer = null;
-      void this.persistNow();
+      void this.enqueuePersist();
     }, DRAFT_DEBOUNCE_MS);
+  }
+
+  /**
+   * 把一次落盘排到串行链末尾。
+   *
+   * 关键：`persistNow()` 在真正执行时才读取 `this.list()`，所以即使前一次
+   * 写入还在途中，后加入的写入也会拿到「最新内存状态」；配合串行链保证
+   * 磁盘最终状态与内存一致，不会出现「已清除的草稿被旧写入复活」。
+   */
+  private enqueuePersist(): Promise<void> {
+    const run = () => this.persistNow();
+    this.persistChain = this.persistChain.then(run, run);
+    return this.persistChain;
   }
 
   private async persistNow(): Promise<void> {
