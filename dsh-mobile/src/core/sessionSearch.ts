@@ -26,3 +26,44 @@ export function filterSessions<T>(sessions: T[], query: string): T[] {
     return words.every((w) => title.includes(w));
   });
 }
+
+export interface GlobalSessionResult<T = unknown> {
+  session: T;
+  workspacePath: string;
+  workspaceName: string;
+}
+
+/**
+ * 跨工作区搜索：标题、sessionId、目录与工作区名均参与匹配。
+ * 结果保持原工作区/会话的既有顺序，不额外重排。
+ */
+export function searchSessionsAcrossWorkspaces<
+  T extends {
+    sessionId: string;
+    cwd?: string;
+    projections?: { values?: { title?: unknown } };
+  },
+  W extends { path: string; name: string; sessions: T[] },
+>(workspaces: readonly W[], query: string): GlobalSessionResult<T>[] {
+  const q = query.trim().toLowerCase();
+  if (!q) return [];
+  const words = q.split(/\s+/).filter(Boolean);
+  const results: GlobalSessionResult<T>[] = [];
+  for (const workspace of workspaces) {
+    for (const session of workspace.sessions) {
+      const rawTitle = session.projections?.values?.title;
+      const title = typeof rawTitle === 'string' ? rawTitle : '';
+      const haystack = [title, session.sessionId, session.cwd ?? '', workspace.path, workspace.name]
+        .join('\n')
+        .toLowerCase();
+      if (words.every((word) => haystack.includes(word))) {
+        results.push({
+          session,
+          workspacePath: workspace.path,
+          workspaceName: workspace.name,
+        });
+      }
+    }
+  }
+  return results;
+}

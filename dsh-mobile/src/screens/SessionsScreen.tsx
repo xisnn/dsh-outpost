@@ -28,6 +28,8 @@ import { RenameSheet } from '../components/RenameSheet';
 import { CompatBanner } from '../components/CompatBanner';
 import { filterSessions } from '../core/sessionSearch';
 import { draftStore } from '../core/draftStore';
+import { sessionPinStore, sortSessionsWithPins } from '../core/sessionPins';
+import { approvalSessionIds, retrySessionIds } from '../core/sessionStatus';
 
 export { filterSessions } from '../core/sessionSearch';
 
@@ -70,6 +72,35 @@ export function SessionsScreen({
   const [pendingRename, setPendingRename] = useState<{ id: string; title: string } | null>(null);
   const [renaming, setRenaming] = useState(false);
   const [renameError, setRenameError] = useState<string | null>(null);
+  // F-07：待重试徽标只来自真实 PendingSendRecord
+  const [retryIds, setRetryIds] = useState<ReadonlySet<string>>(new Set());
+  const [pinVersion, setPinVersion] = useState(0);
+
+  useEffect(() => {
+    let alive = true;
+    const reload = async () => {
+      try {
+        await store.pendingSends.ensureHydrated();
+        const records = await store.pendingSends.list();
+        if (alive) setRetryIds(retrySessionIds(records));
+      } catch {
+        // 存储暂不可用时保持空集合，不伪造待重试状态
+      }
+    };
+    void reload();
+    const unsub = store.pendingSends.subscribe(() => void reload());
+    return () => {
+      alive = false;
+      unsub();
+    };
+  }, [store]);
+
+  useEffect(() => {
+    const refresh = () => setPinVersion((n) => n + 1);
+    const unsub = sessionPinStore.subscribe(refresh);
+    void sessionPinStore.ensureHydrated().then(refresh);
+    return unsub;
+  }, []);
 
   useEffect(() => {
     const unsub = store.subscribe(() => force((n) => n + 1));
@@ -160,7 +191,11 @@ export function SessionsScreen({
 
   const ws = store.workspaces.find((w) => w.path === workspacePath);
   const sessions = ws?.sessions ?? [];
-  const shown = useMemo(() => filterSessions(sessions, query), [sessions, query]);
+  const approvalIds = approvalSessionIds(store.pendingApprovals);
+  const shown = useMemo(
+    () => sortSessionsWithPins(filterSessions(sessions, query), new Set(sessionPinStore.list())),
+    [sessions, query, pinVersion],
+  );
 
   /**
    * 工作区消失时自动返回。
@@ -322,9 +357,30 @@ export function SessionsScreen({
                     <Text style={styles.runningText}>运行中</Text>
                   </View>
                 ) : null}
+                <Pressable
+                  onPress={(e) => {
+                    e.stopPropagation();
+                    askActions(item.sessionId, title);
+                  }}
+                  hitSlop={8}
+                  style={styles.moreBtn}
+                  accessibilityRole="button"
+                  accessibilityLabel={`更多操作：${title}`}
+                >
+                  <Text style={styles.moreText}>⋯</Text>
+                </Pressable>
               </View>
 
               <View style={styles.tagRow}>
+                {sessionPinStore.isPinned(item.sessionId) ? (
+                  <Pill text="📌 置顶" color={tv.colors.accentBright} bg={tv.colors.accentWash} />
+                ) : null}
+                {approvalIds.has(item.sessionId) ? (
+                  <Pill text="⚠ 待审批" color={tv.colors.warning} bg={tv.colors.warningWash} />
+                ) : null}
+                {retryIds.has(item.sessionId) ? (
+                  <Pill text="↻ 待重试" color={tv.colors.danger} bg={tv.colors.dangerWash} />
+                ) : null}
                 {owned ? (
                   <View style={styles.ownedTag}>
                     <Text style={styles.ownedText}>手机</Text>
@@ -375,6 +431,26 @@ export function SessionsScreen({
             <Text style={styles.actionTitle} numberOfLines={1}>
               {actionTarget.title}
             </Text>
+            <Pressable
+              onPress={() => {
+                const id = actionTarget.id;
+                setActionTarget(null);
+                void sessionPinStore.toggle(id).catch(() => {
+                  setCreateError('置顶状态保存失败，请重试');
+                });
+              }}
+              style={({ pressed }: { pressed: boolean }) => [
+                styles.actionRow,
+                pressed ? { backgroundColor: tv.colors.bgCard } : null,
+              ]}
+              accessibilityRole="button"
+              accessibilityLabel={sessionPinStore.isPinned(actionTarget.id) ? '取消置顶' : '置顶'}
+            >
+              <Text style={styles.actionText}>
+                {sessionPinStore.isPinned(actionTarget.id) ? '取消置顶' : '置顶'}
+              </Text>
+            </Pressable>
+            <View style={styles.actionSep} />
             <Pressable
               onPress={() => {
                 setPendingRename(actionTarget);
@@ -580,6 +656,15 @@ function makeStyles(tv: ReturnType<typeof useTheme>) {
       marginLeft: 4,
       fontWeight: weight.medium,
     },
+    moreBtn: {
+      minWidth: 36,
+      minHeight: 32,
+      alignItems: 'center',
+      justifyContent: 'center',
+      marginLeft: 2,
+      marginTop: -6,
+    },
+    moreText: { color: C.textSecondary, fontSize: 24, lineHeight: 28 },
     tagRow: {
       flexDirection: 'row',
       alignItems: 'center',

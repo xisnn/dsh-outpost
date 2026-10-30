@@ -14,6 +14,7 @@ import {
   RefreshControl,
   StyleSheet,
   Text,
+  TextInput,
   View,
 } from 'react-native';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
@@ -23,12 +24,15 @@ import { useApp } from '../App';
 import { useNav } from '../nav/NavHost';
 import { useTheme } from '../design/theme';
 import { layout, space, type, weight } from '../design/tokens';
-import type { Workspace } from '../core/types';
+import type { SessionSummary, Workspace } from '../core/types';
+import type { GlobalSessionResult } from '../core/sessionSearch';
 import { Avatar, Dot, Tile } from '../components/ui';
 import { WorkspaceSheet } from '../components/WorkspaceSheet';
 import { NewWorkspaceSheet } from '../components/NewWorkspaceSheet';
 import { CompatBanner } from '../components/CompatBanner';
 import { draftStore } from '../core/draftStore';
+import { searchSessionsAcrossWorkspaces } from '../core/sessionSearch';
+import { approvalSessionIds, anySessionInSet, retrySessionIds } from '../core/sessionStatus';
 
 function formatAgo(ts: number): string {
   if (!ts) return '';
@@ -47,6 +51,8 @@ function formatAgo(ts: number): string {
 /** 最近用过的工作区路径（本地存，只用于输入提示） */
 const RECENT_WS_KEY = '@dsh/recentWorkspaces';
 
+type HomeListItem = Workspace | GlobalSessionResult<SessionSummary>;
+
 export function WorkspacesScreen() {
   const { store, butlerSessionId } = useApp();
   const nav = useNav();
@@ -61,6 +67,28 @@ export function WorkspacesScreen() {
   const [creating, setCreating] = useState(false);
   const [createError, setCreateError] = useState<string | undefined>(undefined);
   const [recentPaths, setRecentPaths] = useState<string[]>([]);
+  // F-07：跨工作区搜索与真实待重试状态
+  const [query, setQuery] = useState('');
+  const [retryIds, setRetryIds] = useState<ReadonlySet<string>>(new Set());
+
+  useEffect(() => {
+    let alive = true;
+    const reload = async () => {
+      try {
+        await store.pendingSends.ensureHydrated();
+        const records = await store.pendingSends.list();
+        if (alive) setRetryIds(retrySessionIds(records));
+      } catch {
+        // 存储不可用时保持空集合，不伪造状态
+      }
+    };
+    void reload();
+    const unsub = store.pendingSends.subscribe(() => void reload());
+    return () => {
+      alive = false;
+      unsub();
+    };
+  }, [store]);
 
   // 最近成功用过的工作区路径（只存本地，不是服务端数据）
   useEffect(() => {
@@ -138,6 +166,13 @@ export function WorkspacesScreen() {
     () => store.workspaces.reduce((n, w) => n + w.sessions.length, 0),
     [store.workspaces],
   );
+  const approvalIds = approvalSessionIds(store.pendingApprovals);
+  const globalResults = useMemo<GlobalSessionResult<SessionSummary>[]>(
+    () => searchSessionsAcrossWorkspaces(store.workspaces, query),
+    [store.workspaces, query],
+  );
+  const isSearching = query.trim().length > 0;
+  const listData: HomeListItem[] = isSearching ? globalResults : store.workspaces;
 
   const header = (
     <View style={[styles.header, { paddingTop: insets.top + 8 }]}>
@@ -176,6 +211,26 @@ export function WorkspacesScreen() {
         >
           <Text style={styles.newBtnText}>+</Text>
         </Pressable>
+      </View>
+      <View style={styles.searchWrap}>
+        <Text style={styles.searchIcon}>⌕</Text>
+        <TextInput
+          value={query}
+          onChangeText={setQuery}
+          placeholder="搜索全部会话"
+          placeholderTextColor={tv.colors.textFaint}
+          style={styles.searchInput}
+          returnKeyType="search"
+          autoCorrect={false}
+          autoCapitalize="none"
+          clearButtonMode="while-editing"
+          accessibilityLabel="搜索全部会话"
+        />
+        {query ? (
+          <Pressable onPress={() => setQuery('')} hitSlop={10} style={styles.clearBtn}>
+            <Text style={styles.clearText}>✕</Text>
+          </Pressable>
+        ) : null}
       </View>
     </View>
   );
@@ -231,10 +286,13 @@ export function WorkspacesScreen() {
         </View>
       ) : null}
       <CompatBanner summary={store.compatSummary} missing={store.compatMissing} />
-      <FlatList
+      <FlatList<HomeListItem>
         contentContainerStyle={styles.content}
-        data={store.workspaces}
-        keyExtractor={(w) => w.path || '__none__'}
+        data={listData}
+        keyExtractor={(item) =>
+          'session' in item ? item.session.sessionId : item.path || '__none__'
+        }
+        keyboardShouldPersistTaps="handled"
         refreshControl={
           <RefreshControl
             refreshing={refreshing}
@@ -246,17 +304,62 @@ export function WorkspacesScreen() {
         }
         ListEmptyComponent={
           <View style={styles.center}>
-            <Text style={styles.emptyIcon}>◫</Text>
-            <Text style={styles.empty}>还没有会话</Text>
-            <Text style={styles.emptyHint}>在电脑上开一个 DSH 会话就会出现在这里</Text>
+            <Text style={styles.emptyIcon}>{isSearching ? '⌕' : '◫'}</Text>
+            <Text style={styles.empty}>
+              {isSearching ? `没找到匹配「${query.trim()}」的会话` : '还没有会话'}
+            </Text>
+            <Text style={styles.emptyHint}>
+              {isSearching ? '可搜索标题、工作区、目录或会话 ID' : '在电脑上开一个 DSH 会话就会出现在这里'}
+            </Text>
           </View>
         }
         ListFooterComponent={
-          store.workspaces.length > 0 ? (
+          !isSearching && store.workspaces.length > 0 ? (
             <Text style={styles.footerHint}>长按工作区可改名或换头像</Text>
           ) : null
         }
-        renderItem={({ item }: { item: (typeof store.workspaces)[number] }) => {
+        renderItem={({ item }) => {
+          if ('session' in item) {
+            const session = item.session;
+            const title = session.projections?.values?.title ?? '未命名会话';
+            return (
+              <Pressable
+                style={({ pressed }: { pressed: boolean }) => [
+                  styles.row,
+                  pressed && styles.rowPressed,
+                ]}
+                onPress={() => nav.push('Chat', { sessionId: session.sessionId, title })}
+                accessibilityRole="button"
+                accessibilityLabel={`打开会话：${title}`}
+              >
+                <View style={styles.rowBody}>
+                  <View style={styles.rowTop}>
+                    <Text style={styles.name} numberOfLines={1}>
+                      {title}
+                    </Text>
+                    <Text style={styles.time}>{formatAgo(session.updatedAt)}</Text>
+                  </View>
+                  <View style={styles.rowMid}>
+                    {approvalIds.has(session.sessionId) ? (
+                      <Text style={styles.approvalBadge}>⚠ 待审批</Text>
+                    ) : null}
+                    {retryIds.has(session.sessionId) ? (
+                      <Text style={styles.retryBadge}>↻ 待重试</Text>
+                    ) : null}
+                    {draftStore.has(session.sessionId) ? (
+                      <Text style={styles.draftBadge}>✎ 草稿</Text>
+                    ) : null}
+                  </View>
+                  <View style={styles.rowBottom}>
+                    <Text style={styles.path} numberOfLines={1}>
+                      {item.workspaceName} · {item.workspacePath || '未记录目录'}
+                    </Text>
+                  </View>
+                </View>
+                <Text style={styles.chevron}>›</Text>
+              </Pressable>
+            );
+          }
           const latest = item.sessions[0];
           const title = latest?.projections?.values?.title ?? '未命名会话';
           const custom = store.customFor(item.path);
@@ -290,6 +393,12 @@ export function WorkspacesScreen() {
                       <Dot color={tv.colors.success} size={5} />
                       <Text style={styles.runningText}>运行中</Text>
                     </View>
+                  ) : null}
+                  {anySessionInSet(item.sessions, approvalIds) ? (
+                    <Text style={styles.approvalBadge}>⚠ 待审批</Text>
+                  ) : null}
+                  {anySessionInSet(item.sessions, retryIds) ? (
+                    <Text style={styles.retryBadge}>↻ 待重试</Text>
                   ) : null}
                   {item.sessions.some((s) => draftStore.has(s.sessionId)) ? (
                     <Text style={styles.draftBadge}>✎ 草稿</Text>
@@ -395,6 +504,25 @@ function makeStyles(tv: ReturnType<typeof useTheme>) {
       letterSpacing: 1.4,
     },
     headerSub: { color: C.textTertiary, fontSize: type.xs, marginTop: 2 },
+    searchWrap: {
+      flexDirection: 'row',
+      alignItems: 'center',
+      marginTop: space.sm,
+      paddingHorizontal: space.sm,
+      borderRadius: tv.radius.md,
+      backgroundColor: C.bgCard,
+      borderWidth: StyleSheet.hairlineWidth,
+      borderColor: C.border,
+    },
+    searchIcon: { color: C.textFaint, fontSize: type.base, marginRight: 6 },
+    searchInput: {
+      flex: 1,
+      color: C.text,
+      fontSize: type.sm,
+      paddingVertical: 8,
+    },
+    clearBtn: { padding: 6 },
+    clearText: { color: C.textFaint, fontSize: type.sm },
 
     content: { paddingTop: space.sm, paddingBottom: space.xl },
     center: { alignItems: 'center', justifyContent: 'center', padding: space.xxxl },
@@ -459,6 +587,18 @@ function makeStyles(tv: ReturnType<typeof useTheme>) {
     runningText: { color: C.success, fontSize: type.xs, marginLeft: 4 },
     draftBadge: {
       color: C.accentBright,
+      fontSize: type.micro,
+      fontWeight: weight.medium,
+      marginRight: space.sm,
+    },
+    approvalBadge: {
+      color: C.warning,
+      fontSize: type.micro,
+      fontWeight: weight.medium,
+      marginRight: space.sm,
+    },
+    retryBadge: {
+      color: C.danger,
       fontSize: type.micro,
       fontWeight: weight.medium,
       marginRight: space.sm,
