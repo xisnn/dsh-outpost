@@ -691,21 +691,6 @@ export function ChatScreen({
           onChange={switchButlerMode}
         /> : null}
 
-      {/* 有工具在等授权：手机端无法响应，明确告诉用户卡在哪、怎么办 */}
-      <ApprovalBanner
-        approvals={(store.pendingApprovals ?? []).map((a) => ({
-          id: a.rpcId,
-          toolName: a.toolName,
-          reason: a.reason,
-        }))}
-        readonlyApprovals={pendingApprovals}
-        gatewayOnline={store.gatewayStatus === 'online'}
-        onAnswer={(a, outcome) => {
-          const hit = (store.pendingApprovals ?? []).find((p) => p.rpcId === a.id);
-          if (hit) store.answerApproval(hit, outcome);
-        }}
-      />
-
       {/* 加载失败必须让用户知道。
           之前这里加了「空会话且没内容就不显示」的条件，理由是「静默重试即可」——
           结果后端明明有 46 条记录、App 却只显示「空调话」，用户完全不知道为什么。
@@ -916,6 +901,32 @@ export function ChatScreen({
             setComposerHeight((prev) => (prev === h ? prev : h));
           }}
         >
+          {/* F-01：底部停靠式审批面板（在输入框正上方，严格按 sessionId 过滤） */}
+          <ApprovalBanner
+            sessionId={sessionId}
+            approvals={(store.pendingApprovals ?? []).map((a) => ({
+              id: a.rpcId,
+              sessionId: a.sessionId,
+              approvalId: a.approvalId,
+              toolName: a.toolName,
+              reason: a.reason,
+              displayReason: a.displayReason,
+              replay: a.replay,
+            }))}
+            readonlyApprovals={pendingApprovals}
+            gatewayOnline={store.gatewayStatus === 'online'}
+            authInvalidated={store.authInvalidated}
+            sessions={store.sessions}
+            onAnswer={(a, outcome) => {
+              const hit = (store.pendingApprovals ?? []).find((p) => p.rpcId === a.id);
+              if (!hit) return false;
+              return store.answerApproval(hit, outcome);
+            }}
+            onOpenSession={(targetSessionId, targetTitle) => {
+              nav.push('Chat', { sessionId: targetSessionId, title: targetTitle });
+            }}
+          />
+
           {/* 普通聊天用底部团队条；管家模式用顶部头像条，别重复 */}
           {butler ? null : <TeamBar team={chat.agentTeam} />}
 

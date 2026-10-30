@@ -733,11 +733,15 @@ export class Store {
     detail?: string;
     sessionId?: string;
   }): void {
-    // 同样的文案 10 秒内不重复推（轮询可能连着两次看到同一状态）
+    // 同类型、同会话、同文案 10 秒内不重复推（done 与 approval 独立分桶，互不吞没）
     const now = Date.now();
     if (
       this.notices.some(
-        (x) => x.text === n.text && x.sessionId === n.sessionId && now - x.time < 10_000,
+        (x) =>
+          x.kind === n.kind &&
+          x.text === n.text &&
+          x.sessionId === n.sessionId &&
+          now - x.time < 10_000,
       )
     ) {
       return;
@@ -750,10 +754,14 @@ export class Store {
       sessionId: n.sessionId,
       time: now,
     };
-    this.notices = [item, ...this.notices].slice(0, 3);
-    // 同时震动 + 弹系统通知（后台也能看到）。
-    // 把会话 id 传过去，用户点通知能直接跳回对应会话。
+    // approval 通知优先保留，防止连续 done 通知把未读审批横幅挤出队列
+    const combined = [item, ...this.notices];
+    const approvals = combined.filter((x) => x.kind === 'approval');
+    const others = combined.filter((x) => x.kind !== 'approval');
+    this.notices = [...approvals, ...others].slice(0, 3);
+    // 同时震动 + 弹系统通知（后台也能看到），按 kind + sessionId 分桶去重。
     notifyDone(n.text, false, {
+      kind: n.kind,
       sessionId: n.sessionId,
       detail: n.detail ? `${n.detail} · DSH` : 'DSH',
     });
@@ -846,8 +854,11 @@ export class Store {
             this.pendingApprovals = [...this.pendingApprovals, a];
           }
           this.emit();
-          // 需要用户决策，震一下提醒
-          notifyDone(`需要审批：${a.toolName}`);
+          // 需要用户决策，按 approval + sessionId 分桶提醒（不被 done 通知冷却拦截）
+          notifyDone(`需要审批：${a.toolName}`, false, {
+            kind: 'approval',
+            sessionId: a.sessionId,
+          });
         },
         onResolved: (rpcId, outcome) => {
           this.pendingApprovals = this.pendingApprovals.filter((p) => p.rpcId !== rpcId);
@@ -915,13 +926,11 @@ export class Store {
     return markApprovalRevoked(reason);
   }
 
-  /** 回答一个审批 */
+  /** 回答一个审批（未连接或 401/403 终止态时拒绝伪造成功，真正已决状态由 onResolved 确认） */
   answerApproval(a: PendingApproval, outcome: ApprovalOutcome): boolean {
-    if (!this.gateway) return false;
+    if (!this.gateway || this.gatewayStatus !== 'online' || this.authInvalidated) return false;
     const ok = this.gateway.respond(a, outcome);
     if (ok) {
-      // 乐观移除，等服务端 approval-resolved 再确认
-      this.markApprovalDecided(a.rpcId, outcome);
       this.emit();
     }
     return ok;

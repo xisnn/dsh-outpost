@@ -28,6 +28,9 @@
  */
 
 import { AppState, Platform, Vibration } from 'react-native';
+import { notifyBucketKey, type NotifyKind } from './notifyBuckets';
+
+export { notifyBucketKey, shouldThrottleNotify, type NotifyKind } from './notifyBuckets';
 
 // 延迟加载原生模块：加载失败时降级，而不是整个 App 起不来
 type NotifeeModule = {
@@ -108,8 +111,8 @@ const CHANNEL_ID = 'dsh-task';
 /** 通知开关（用户可在设置里关掉） */
 let enabled = true;
 
-/** 上次提醒时间，避免短时间内连续震动 */
-let lastAt = 0;
+/** 按 kind + sessionId 分桶记录上次提醒时间，防止 done 吞掉 approval */
+const lastAtByBucket = new Map<string, number>();
 const MIN_GAP_MS = 3000;
 
 export function setNotifyEnabled(v: boolean): void {
@@ -217,15 +220,18 @@ export async function showSystemNotification(
 export function notifyDone(
   text: string,
   force = false,
-  opts?: { sessionId?: string; detail?: string },
+  opts?: { sessionId?: string; detail?: string; kind?: NotifyKind },
 ): void {
   if (!enabled) return;
 
   const now = Date.now();
+  const kind: NotifyKind = opts?.kind ?? 'done';
+  const bucketKey = notifyBucketKey(kind, opts?.sessionId);
+  const lastAt = lastAtByBucket.get(bucketKey) ?? -MIN_GAP_MS;
   if (!force && now - lastAt < MIN_GAP_MS) return;
-  lastAt = now;
+  lastAtByBucket.set(bucketKey, now);
 
-  vibrateShort('done');
+  vibrateShort(kind === 'approval' ? 'ask' : 'done');
 
   // 系统通知：前台也弹（用户可能正在看别的页面）。
   // 不 await —— 通知是锦上添花，不能阻塞调用方。

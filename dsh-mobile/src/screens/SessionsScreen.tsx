@@ -27,6 +27,7 @@ import { ConfirmSheet } from '../components/ConfirmSheet';
 import { RenameSheet } from '../components/RenameSheet';
 import { CompatBanner } from '../components/CompatBanner';
 import { ConnectionBanner } from '../components/ConnectionBanner';
+import { ApprovalReminderStrip } from '../components/ApprovalBanner';
 import { filterSessions } from '../core/sessionSearch';
 import { draftStore } from '../core/draftStore';
 import { sessionPinStore, sortSessionsWithPins } from '../core/sessionPins';
@@ -260,6 +261,12 @@ export function SessionsScreen({
         connection={store.connection}
         hint={store.connectionHint}
         terminal={store.authInvalidated}
+      />
+      <ApprovalReminderStrip
+        approvals={store.pendingApprovals}
+        sessions={store.sessions}
+        workspaceSessionIds={new Set(sessions.map((s) => s.sessionId))}
+        onOpenSession={(sid, title) => nav.push('Chat', { sessionId: sid, title })}
       />
       {createError ? (
         <View style={styles.errorBar}>
