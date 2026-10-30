@@ -168,6 +168,7 @@ export function SessionsScreen({
     try {
       await store.archiveSession(targetId);
       await draftStore.clear(targetId);
+      await sessionPinStore.remove(targetId).catch(() => undefined);
     } catch {
       // 失败就不删，列表保持原样
     } finally {

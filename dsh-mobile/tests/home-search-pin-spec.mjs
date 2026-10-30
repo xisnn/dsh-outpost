@@ -181,6 +181,89 @@ check('置顶写盘失败抛错并回滚内存，不伪造已置顶', () =>
   toggleThrew && !failingStore.isPinned('x') ? true : '写失败被静默吞掉或内存未回滚',
 );
 
+// ── 并发连续 toggle 与清理回归测试 ─────────────────────────────────
+let firstWriteSlow = true;
+const racePinStorage = {
+  data: new Map(),
+  async getItem(k) {
+    return this.data.has(k) ? this.data.get(k) : null;
+  },
+  async setItem(k, v) {
+    if (firstWriteSlow) {
+      firstWriteSlow = false;
+      await new Promise((r) => setTimeout(r, 100));
+    }
+    this.data.set(k, v);
+  },
+  async removeItem(k) {
+    this.data.delete(k);
+  },
+};
+const racePinStore = new SessionPinStore(racePinStorage);
+await racePinStore.ensureHydrated();
+// 快速连续置顶再取消置顶：第一次 setItem 慢（100ms），第二次立刻发起
+const pToggle1 = racePinStore.toggle('race-a');
+const pToggle2 = racePinStore.toggle('race-a');
+await Promise.all([pToggle1, pToggle2]);
+const racePinReload = new SessionPinStore(racePinStorage);
+await racePinReload.ensureHydrated();
+check('快速连续置顶/取消置顶时异步 setItem 不乱序，重启后与最后一次操作一致', () =>
+  !racePinStore.isPinned('race-a') && !racePinReload.isPinned('race-a')
+    ? true
+    : `mem=${racePinStore.list().join(',')} disk=${racePinReload.list().join(',')}`,
+);
+
+// 并发操作不同会话，其中第一次写盘失败回滚时不得冲掉另一会话的置顶
+let failCount = 0;
+const partialFailStorage = {
+  data: new Map(),
+  async getItem(k) {
+    return this.data.has(k) ? this.data.get(k) : null;
+  },
+  async setItem(k, v) {
+    failCount += 1;
+    if (failCount === 1) {
+      await new Promise((r) => setTimeout(r, 40));
+      throw new Error('transient write failure');
+    }
+    this.data.set(k, v);
+  },
+};
+const partialStore = new SessionPinStore(partialFailStorage);
+await partialStore.ensureHydrated();
+const pFailA = partialStore.toggle('sess-a').catch(() => 'failed');
+const pOkB = partialStore.toggle('sess-b');
+await Promise.all([pFailA, pOkB]);
+const partialReload = new SessionPinStore(partialFailStorage);
+await partialReload.ensureHydrated();
+check('并发写盘单次失败回滚时只回滚对应会话，不冲掉其他会话置顶', () =>
+  !partialStore.isPinned('sess-a') &&
+  partialStore.isPinned('sess-b') &&
+  partialReload.isPinned('sess-b')
+    ? true
+    : `mem=${partialStore.list().join(',')} disk=${partialReload.list().join(',')}`,
+);
+
+// 删除会话 remove 与退出清除全部授权 clearAll
+await partialStore.remove('sess-b');
+const afterRemoveReload = new SessionPinStore(partialFailStorage);
+await afterRemoveReload.ensureHydrated();
+check('删除会话调用 remove 后置顶记录同步移除并持久化', () =>
+  !partialStore.isPinned('sess-b') && !afterRemoveReload.isPinned('sess-b')
+    ? true
+    : `left=${afterRemoveReload.list().join(',')}`,
+);
+
+await racePinStore.toggle('keep-1');
+await racePinStore.clearAll();
+const afterClearAllReload = new SessionPinStore(racePinStorage);
+await afterClearAllReload.ensureHydrated();
+check('clearAll 清空内存与磁盘置顶记录（退出并清除授权）', () =>
+  racePinStore.list().length === 0 && afterClearAllReload.list().length === 0
+    ? true
+    : `left=${afterClearAllReload.list().join(',')}`,
+);
+
 console.log('\n── 状态徽标只来自真实数据 ─────────────────────────');
 check('待审批只来自 PendingApproval.sessionId', () => {
   const ids = approvalSessionIds([
@@ -218,6 +301,7 @@ check('工作区徽标只在内部会话真实命中时显示', () =>
 console.log('\n── UI 接线与既有行为静态检查 ──────────────────────');
 const home = readFileSync('src/screens/WorkspacesScreen.tsx', 'utf8');
 const sessions = readFileSync('src/screens/SessionsScreen.tsx', 'utf8');
+const appSrc = readFileSync('src/App.tsx', 'utf8');
 check('首页有跨工作区搜索框', () =>
   /placeholder="搜索全部会话"/.test(home) && /searchSessionsAcrossWorkspaces/.test(home)
     ? true
@@ -252,11 +336,16 @@ check('置顶排序通过稳定纯函数，不改变服务端顺序', () =>
     ? true
     : '未使用稳定置顶排序',
 );
-check('删除确认与归档逻辑仍保留', () =>
-  /<ConfirmSheet/.test(sessions) && /store\.archiveSession\(targetId\)/.test(sessions) &&
+check('删除确认与归档逻辑仍保留，且删除会话时同步清理置顶记录', () =>
+  /<ConfirmSheet/.test(sessions) &&
+  /store\.archiveSession\(targetId\)/.test(sessions) &&
+  /sessionPinStore\.remove\(targetId\)/.test(sessions) &&
   /title="删除这个对话？"/.test(sessions)
     ? true
-    : '删除确认或归档行为被破坏',
+    : '删除确认或置顶清理缺失',
+);
+check('退出并清除所有授权时同步清理置顶记录', () =>
+  /sessionPinStore\.clearAll\(\)/.test(appSrc) ? true : 'App.clearAuthorization 未清理置顶记录',
 );
 check('会话卡待审批/待重试来自真实 store 数据', () =>
   /approvalSessionIds\(store\.pendingApprovals\)/.test(sessions) &&
