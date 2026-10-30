@@ -43,6 +43,7 @@ import {
   type ListTail,
 } from '../core/scrollFollow';
 import { buildAssistantCopyText } from '../core/copyText';
+import { draftStore } from '../core/draftStore';
 import { buildWorkGroupMap } from '../core/workGroup';
 import { WorkGroupCard } from '../components/WorkGroupCard';
 import { AssistantRichText } from '../components/AssistantRichText';
@@ -171,6 +172,25 @@ export function ChatScreen({
 
   const chat = store.getChat(sessionId);
   const hasTeam = !!chat.agentTeam;
+
+  // F-04：进入会话时恢复该 sessionId 的草稿；离开页面时把防抖中的草稿立即落盘。
+  useEffect(() => {
+    let alive = true;
+    void draftStore.ensureHydrated().then(() => {
+      if (!alive) return;
+      // 切换会话时必须换成该会话自己的草稿，不能沿用上一会话输入框内容
+      setDraft(draftStore.get(sessionId));
+    });
+    return () => {
+      alive = false;
+    };
+  }, [sessionId]);
+
+  useEffect(() => {
+    return () => {
+      void draftStore.flush();
+    };
+  }, []);
 
   // P0-1：待发送记录独立于 chat fold，页面卸载/切换会话后仍从 store 恢复。
   useEffect(() => {
@@ -391,6 +411,7 @@ export function ChatScreen({
     const text = draft.trim();
     if ((!text && drafts.length === 0) || sending) return;
     const pendingAttachments = drafts;
+    const startedAt = Date.now();
 
     // 文本、图片、文件、混合消息统一进入 PendingSendStore。
     // 附件在 Store 内先复制到私有暂存区并计算字节 SHA-256，再持久化记录。
@@ -401,10 +422,35 @@ export function ChatScreen({
     setDrafts([]);
     try {
       await store.sendPending(sessionId, text, pendingAttachments);
+      // 已成功进入 PendingSend 队列：草稿清除
+      await draftStore.clear(sessionId);
       setNearBottom(true);
     } catch (e) {
-      setDraft(text);
-      setDrafts(pendingAttachments);
+      // 区分「入队失败」和「入队成功但发送失败」：
+      //   · 入队失败（staging/create 抛错）→ 文本必须还给用户；
+      //   · 入队成功但 runPendingSend 抛错 → PendingSend 里已有记录（气泡会显示重试），
+      //     草稿不能留，否则用户会重复发一条。
+      let queued = false;
+      try {
+        await store.pendingSends.ensureHydrated();
+        const records = await store.pendingSends.list(sessionId);
+        queued = records.some(
+          (r) =>
+            r.createdAt >= startedAt - 2000 &&
+            r.text === text &&
+            r.state !== 'abandoned' &&
+            r.state !== 'confirmed',
+        );
+      } catch {
+        queued = false;
+      }
+      if (queued) {
+        await draftStore.clear(sessionId);
+      } else {
+        setDraft(text);
+        setDrafts(pendingAttachments);
+        draftStore.set(sessionId, text);
+      }
       setSendError(describeSendError(e));
     } finally {
       setSending(false);
@@ -943,7 +989,11 @@ export function ChatScreen({
             <TextInput
               style={styles.input}
               value={draft}
-              onChangeText={setDraft}
+              onChangeText={(t: string) => {
+                setDraft(t);
+                // 立即写入内存 + 300ms 防抖落盘；切换会话后回来能恢复
+                draftStore.set(sessionId, t);
+              }}
               placeholder={attaching ? '正在上传附件…' : '发消息…'}
               placeholderTextColor={tv.colors.textFaint}
               multiline

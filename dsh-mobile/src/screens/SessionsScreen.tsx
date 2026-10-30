@@ -27,6 +27,7 @@ import { ConfirmSheet } from '../components/ConfirmSheet';
 import { RenameSheet } from '../components/RenameSheet';
 import { CompatBanner } from '../components/CompatBanner';
 import { filterSessions } from '../core/sessionSearch';
+import { draftStore } from '../core/draftStore';
 
 export { filterSessions } from '../core/sessionSearch';
 
@@ -73,6 +74,23 @@ export function SessionsScreen({
   useEffect(() => {
     const unsub = store.subscribe(() => force((n) => n + 1));
     return unsub;
+  }, [store]);
+
+  // F-04：草稿标记需要跟随输入实时刷新；顺带清理已删除会话的残稿
+  const [, forceDrafts] = useState(0);
+  useEffect(() => {
+    const refresh = () => forceDrafts((n) => n + 1);
+    const unsub = draftStore.subscribe(refresh);
+    void draftStore.ensureHydrated().then(() => {
+      refresh();
+      // sessions 可能是空数组（尚未加载完），此时不要误删全部草稿
+      if (store.workspaces.length > 0) {
+        void draftStore.prune(store.workspaces.flatMap((w) => w.sessions.map((s) => s.sessionId)));
+      }
+    });
+    return () => {
+      unsub();
+    };
   }, [store]);
 
   const onRefresh = async () => {
@@ -299,6 +317,9 @@ export function SessionsScreen({
                   </View>
                 ) : null}
                 {item.blank ? <Pill text="空白" /> : null}
+                {draftStore.has(item.sessionId) ? (
+                  <Pill text="✎ 草稿" color={tv.colors.accentBright} bg={tv.colors.accentWash} />
+                ) : null}
                 {modelName ? <Pill text={modelName} /> : null}
                 {ratio > 0 ? (
                   <Pill

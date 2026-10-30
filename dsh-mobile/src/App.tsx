@@ -48,6 +48,7 @@ import {
 } from './core/loginIntent';
 import { revokeOwnDeviceDetailed } from './core/deviceAuth';
 import { WORKSPACE_CUSTOM_KEY, type WorkspaceCustom } from './core/workspace-custom';
+import { draftStore } from './core/draftStore';
 import { ThemeProvider, useTheme } from './design/theme';
 import { palettes, type ThemeMode } from './design/tokens';
 import { buildButlerPrime, BUTLER_PRIME_VERSION } from './core/butler';
@@ -973,6 +974,10 @@ export default function App() {
         OWNED_KEY,
       ].map((k) => AsyncStorage.removeItem(k).catch(() => undefined)),
     );
+
+    // F-04：草稿是用户输入（可能含敏感内容），彻底清除授权时一并删除。
+    // 断开连接（signOut）不调用这里，草稿保留。
+    await draftStore.clearAll().catch(() => undefined);
 
     // ── 登录意图也要处理 ──────────────────────────────────────
     //

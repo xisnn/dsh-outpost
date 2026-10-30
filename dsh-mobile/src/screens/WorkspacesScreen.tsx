@@ -28,6 +28,7 @@ import { Avatar, Dot, Tile } from '../components/ui';
 import { WorkspaceSheet } from '../components/WorkspaceSheet';
 import { NewWorkspaceSheet } from '../components/NewWorkspaceSheet';
 import { CompatBanner } from '../components/CompatBanner';
+import { draftStore } from '../core/draftStore';
 
 function formatAgo(ts: number): string {
   if (!ts) return '';
@@ -96,6 +97,22 @@ export function WorkspacesScreen() {
     const unsub = store.subscribe(() => force((n) => n + 1));
     if (store.workspaces.length === 0) void store.loadSessions();
     return unsub;
+  }, [store]);
+
+  // F-04：工作区行上的「草稿」标记（含最近会话有草稿）
+  const [, forceDrafts] = useState(0);
+  useEffect(() => {
+    const refresh = () => forceDrafts((n) => n + 1);
+    const unsub = draftStore.subscribe(refresh);
+    void draftStore.ensureHydrated().then(() => {
+      refresh();
+      if (store.workspaces.length > 0) {
+        void draftStore.prune(store.workspaces.flatMap((w) => w.sessions.map((s) => s.sessionId)));
+      }
+    });
+    return () => {
+      unsub();
+    };
   }, [store]);
 
   const onRefresh = useCallback(async () => {
@@ -261,6 +278,9 @@ export function WorkspacesScreen() {
                       <Text style={styles.runningText}>运行中</Text>
                     </View>
                   ) : null}
+                  {item.sessions.some((s) => draftStore.has(s.sessionId)) ? (
+                    <Text style={styles.draftBadge}>✎ 草稿</Text>
+                  ) : null}
                   <Text style={styles.preview} numberOfLines={1}>
                     {title}
                   </Text>
@@ -424,6 +444,12 @@ function makeStyles(tv: ReturnType<typeof useTheme>) {
     rowMid: { flexDirection: 'row', alignItems: 'center', marginTop: 3 },
     runningWrap: { flexDirection: 'row', alignItems: 'center', marginRight: space.sm },
     runningText: { color: C.success, fontSize: type.xs, marginLeft: 4 },
+    draftBadge: {
+      color: C.accentBright,
+      fontSize: type.micro,
+      fontWeight: weight.medium,
+      marginRight: space.sm,
+    },
     preview: { color: C.textSecondary, fontSize: type.sm, flex: 1 },
     rowBottom: { flexDirection: 'row', alignItems: 'center', marginTop: 5 },
     path: { color: C.textFaint, fontSize: type.micro, flex: 1, marginRight: space.sm },
