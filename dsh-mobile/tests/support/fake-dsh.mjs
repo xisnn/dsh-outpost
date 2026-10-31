@@ -341,6 +341,43 @@ export async function startFakeDsh(opts = {}) {
       return;
     }
 
+    // ── 文件二进制上传（可选扩展）───────────────────────────────
+    //
+    // 真实 UploadApi 直接走 react-native-blob-util 的 POST
+    // `/api/session/uploadFileBinary?sessionId=...&name=...`，不经过
+    // DshConnection.call；因此这里必须在通用 unary RPC 分支之前处理。
+    // 未注入 uploadHandler 时明确返回 not-implemented，避免“看似成功”。
+    if (req.method === 'POST' && url.pathname === '/api/session/uploadFileBinary') {
+      if (!(req.headers.cookie ?? '').includes(cookieName)) {
+        res.writeHead(401, { 'content-type': 'text/plain' });
+        res.end('unauthorized');
+        return;
+      }
+      const chunks = [];
+      for await (const chunk of req) chunks.push(Buffer.from(chunk));
+      const body = Buffer.concat(chunks);
+      try {
+        if (typeof opts.uploadHandler !== 'function') {
+          throw new Error('fake dsh uploadHandler 未配置');
+        }
+        const value = await opts.uploadHandler({
+          sessionId: url.searchParams.get('sessionId') ?? '',
+          name: url.searchParams.get('name') ?? '',
+          body,
+          contentType: req.headers['content-type'] ?? '',
+        });
+        res.writeHead(200, { 'content-type': 'application/json' });
+        res.end(JSON.stringify({ ok: true, value }));
+      } catch (e) {
+        res.writeHead(200, { 'content-type': 'application/json' });
+        res.end(JSON.stringify({
+          ok: false,
+          error: { code: 'upload-failed', message: String(e?.message ?? e) },
+        }));
+      }
+      return;
+    }
+
     // ── 网关状态（真实插件同款）────────────────────────────────
     //
     // 真实插件：`GET /mgw/status` 返回

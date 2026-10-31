@@ -324,7 +324,9 @@ export function ChatScreen({
   // P0-1：待发送记录独立于 chat fold，页面卸载/切换会话后仍从 store 恢复。
   useEffect(() => {
     let alive = true;
+    const reloadGeneration = { current: 0 };
     const reload = () => {
+      const generation = ++reloadGeneration.current;
       void store.pendingSends
         .ensureHydrated()
         .then(() => store.pendingSends.prune())
@@ -339,7 +341,10 @@ export function ChatScreen({
           return store.pendingSends.list(sessionId);
         })
         .then((records) => {
-          if (!alive) return;
+          // 发送过程中会连续 emit（queued/preparing/ready/sending/accepted）。
+          // 每次 reload 的结果必须只让最新一代落地，否则旧的 queued 列表
+          // 晚到会覆盖新状态，短暂显示“继续发送/移除”，误导用户重复操作。
+          if (!alive || generation !== reloadGeneration.current) return;
           if (__DEV__) {
             for (const r of records) {
               if (r.state === 'unknown') {
