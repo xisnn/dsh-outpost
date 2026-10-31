@@ -119,20 +119,25 @@ async function moveTo(store, record, state) {
   if (state === 'preparing') return cur;
   cur = await store.apply(cur.requestId, { type: 'attachments-ready' });
   if (state === 'ready') return cur;
+  if (state === 'failed') {
+    return store.apply(cur.requestId, { type: 'definite-failure', code: 'attachment-invalid' });
+  }
   cur = await store.apply(cur.requestId, { type: 'begin-send' });
   if (state === 'sending') return cur;
   if (state === 'accepted') return store.apply(cur.requestId, { type: 'accept' });
   if (state === 'unknown') {
     return store.apply(cur.requestId, { type: 'unknown-failure', code: 'network-lost' });
   }
-  if (state === 'failed') {
-    return store.apply(cur.requestId, { type: 'definite-failure', code: 'http-500' });
-  }
   throw new Error(`unsupported state ${state}`);
 }
 
 function recordLike(state, updatedAt = clock) {
-  return { state, updatedAt };
+  return {
+    state, updatedAt, attemptCount: 0,
+    ...(state === 'failed'
+      ? { lastError: { classification: 'definite', code: 'attachment-invalid' } }
+      : {}),
+  };
 }
 
 console.log('\n── 1. preparing/sending 600ms 延迟转圈 ──────────────');

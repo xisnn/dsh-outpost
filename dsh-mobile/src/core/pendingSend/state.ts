@@ -86,23 +86,29 @@ export function canUserRetry(record: PendingSendRecord): boolean {
 }
 
 /**
- * 是否允许用户放弃（移除）待发送记录（F-05）。
- *
- * 只允许「prompt 一定尚未发出」的状态（queued/preparing/ready）和
- * 「明确未送达、任务确定未执行」的 failed。
- *
- * 禁止：
- *   · sending —— prompt 可能已在途；
- *   · accepted —— 服务端已受理，可能已执行；
- *   · unknown —— 结果未知，可能已执行；
- * 移除这些记录会让用户误以为消息未执行，必须保留安全提示与重试语义。
+ * F-05 移除入口的保守判据，不改变 P0-1 状态迁移。
+ * failed 可能来自 begin-send 之后；通用 RPC/HTTP 拒绝不能证明整个 requestId 从未执行。
+ * 重试会清除 lastError，因此 attemptCount > 0 的 preparing/ready/failed 同样不能当作未发出。
  */
+const PRE_PROMPT_FAILURE_CODES: ReadonlySet<string> = new Set([
+  'attachment-upload-failed',
+  'attachment-invalid',
+  'attachment-unreadable',
+  'identity-verification-failed',
+  'process-restarted-before-send',
+]);
+
 export function canAbandonPendingSend(record: PendingSendRecord): boolean {
+  if (record.attemptCount !== 0 || record.acceptedAt !== undefined || record.confirmedAt !== undefined) {
+    return false;
+  }
   return (
     record.state === 'queued' ||
     record.state === 'preparing' ||
     record.state === 'ready' ||
-    record.state === 'failed'
+    (record.state === 'failed' &&
+      record.lastError?.classification === 'definite' &&
+      PRE_PROMPT_FAILURE_CODES.has(record.lastError.code))
   );
 }
 

@@ -5,6 +5,12 @@
  *   · unknown / accepted / sending 等结果不确定状态禁止移除，避免误导为未执行。
  */
 import type { PendingSendRecord } from './types';
+import { canAbandonPendingSend } from './state';
+
+/** failed 本身不是“从未发送”的证据；沿用移除入口的同一保守判据。 */
+export function pendingSendFailureLabel(record: PendingSendRecord): string {
+  return canAbandonPendingSend(record) ? '未发出' : '发送失败，执行结果未确认';
+}
 
 export const PENDING_SEND_SPINNER_DELAY_MS = 600;
 

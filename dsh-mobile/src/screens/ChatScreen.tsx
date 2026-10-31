@@ -612,9 +612,13 @@ export function ChatScreen({
       await store.abandonPending(sessionId, requestId);
       setPendingRemove(null);
     } catch (e) {
-      setSendError(
-        e instanceof Error ? `移除失败：${e.message}` : '移除失败，请稍后重试',
-      );
+      if (e instanceof PendingSendStoreError && e.code === 'cleanup-failed') {
+        // abandoned 已落盘，不能让用户以为仍可发送；明确报告附件待补清。
+        setPendingRemove(null);
+        setSendError(e.message);
+      } else {
+        setSendError(e instanceof Error ? `移除失败：${e.message}` : '移除失败，请稍后重试');
+      }
     } finally {
       setRemovingPendingId(undefined);
     }
@@ -1258,11 +1262,7 @@ export function ChatScreen({
       <ConfirmSheet
         visible={pendingRemove !== null}
         title="移除待发送消息？"
-        message={
-          pendingRemove?.state === 'failed'
-            ? '这条消息已确认未发出。移除后会删除本机记录与暂存附件，不影响已保存的 requestId 去重记录。'
-            : '只会删除本机的待发送记录和暂存附件，不会发送或撤回任何消息；已保存的 requestId 去重记录不受影响。'
-        }
+        message="移除后将隐藏这条本机待发送记录，并清理不再使用的暂存附件；不会发送消息，也不会撤回电脑端任务。"
         confirmText="移除"
         cancelText="取消"
         destructive

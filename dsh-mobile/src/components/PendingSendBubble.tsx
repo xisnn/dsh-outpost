@@ -11,7 +11,7 @@ import { useTheme } from '../design/theme';
 import { layout, radius, space, type, weight } from '../design/tokens';
 import type { PendingSendRecord } from '../core/pendingSend/types';
 import { canAbandonPendingSend, canUserRetry } from '../core/pendingSend/state';
-import { pendingSendSpinnerDelayMs } from '../core/pendingSend/ui';
+import { pendingSendFailureLabel, pendingSendSpinnerDelayMs } from '../core/pendingSend/ui';
 
 export const PENDING_SEND_SPINNER_DELAY_MS = 600;
 
@@ -58,10 +58,10 @@ function statusOf(record: PendingSendRecord): { label: string; tone: 'muted' | '
     case 'unknown':
       return { label: '结果未知，可能已在电脑执行', tone: 'warning' };
     case 'failed':
-      return { label: '未发出', tone: 'danger' };
+      return { label: pendingSendFailureLabel(record), tone: 'danger' };
     case 'expired': {
       const from = record.expiredFrom;
-      if (from === 'unknown' || from === 'sending') {
+      if (from === 'unknown' || from === 'sending' || from === 'failed' || record.attemptCount > 0) {
         return {
           label: '已过期，发送结果未确认，可能已执行（附件已清理）',
           tone: 'warning',

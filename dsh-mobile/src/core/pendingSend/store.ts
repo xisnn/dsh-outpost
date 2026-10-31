@@ -318,9 +318,9 @@ export class PendingSendStore {
       const recovered = await this.recoverInternal();
       const prunedRecords = await this.pruneInternal();
       // 启动时清理不再被任何记录引用的暂存文件（崩溃/清理失败的残留）。
-      const referenced = this.doc.records.flatMap((r) =>
-        r.attachments.map((a) => a.stagedUri),
-      );
+      const referenced = this.doc.records
+        .filter((r) => r.state !== 'abandoned')
+        .flatMap((r) => r.attachments.map((a) => a.stagedUri));
       await this.staging.cleanupOrphans(referenced).catch(() => 0);
       this.emit();
       return { recovered, pruned: prunedRecords.length };
@@ -644,7 +644,16 @@ export class PendingSendStore {
           .flatMap((r) => r.attachments.map((a) => a.stagedUri)),
       );
       const cleanup = current.attachments.filter((a) => !stillReferenced.has(a.stagedUri));
-      await this.staging.removeAttachments(cleanup).catch(() => undefined);
+      try {
+        await this.staging.removeAttachments(cleanup);
+      } catch (e) {
+        // 放弃已持久化，不能回滚成可发送。附件元数据保留；下次 hydrate 清理孤儿文件时重试。
+        throw new PendingSendStoreError(
+          'cleanup-failed',
+          '记录已移除，但暂存附件未清理完成；下次启动会重试清理',
+          e,
+        );
+      }
       return cloneRecord(next);
     });
   }

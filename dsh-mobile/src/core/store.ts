@@ -2248,14 +2248,23 @@ export class Store {
     return promise;
   }
 
+  private async assertPendingNotRemoved(requestId: string): Promise<void> {
+    const latest = await this.pendingSends.get(requestId);
+    if (!latest || latest.state === 'abandoned') {
+      throw new Error('待发送记录已移除');
+    }
+  }
+
   private async preparePendingAttachments(
     current: PendingSendRecord,
   ): Promise<PendingAttachment[]> {
     const attachments = current.attachments.map((a) => ({ ...a }));
     for (let i = 0; i < attachments.length; i += 1) {
+      await this.assertPendingNotRemoved(current.requestId);
       const attachment = attachments[i]!;
       // 每次都按原始字节重新校验；临时 URI 失效/文件被删/内容被改都拒绝。
       await this.pendingSends.verifyAttachments([attachment]);
+      await this.assertPendingNotRemoved(current.requestId);
       if (attachment.kind === 'file' && !attachment.receiptId) {
         const receipt = await this.upload.uploadBinary(
           current.sessionId,
@@ -2273,6 +2282,8 @@ export class Store {
           attachmentId: receipt.file.attachmentId,
           size: receipt.file.bytes ?? attachment.size,
         };
+        // 原生上传可能已经在途；迟到完成不得写回或推进已移除的记录。
+        await this.assertPendingNotRemoved(current.requestId);
         // 每成功一个就写回，上传中断/进程被杀后已成功的回执可复用。
         await this.pendingSends.updateAttachments(current.requestId, attachments);
       }
@@ -2326,6 +2337,7 @@ export class Store {
     code: string,
     error: unknown,
   ): Promise<never> {
+    await this.assertPendingNotRemoved(requestId);
     try {
       await this.pendingSends.apply(requestId, {
         type: 'definite-failure',
@@ -2377,6 +2389,7 @@ export class Store {
         return this.failPendingAttachments(requestId, 'attachment-invalid', e);
       }
 
+      await this.assertPendingNotRemoved(requestId);
       let outgoing: OutgoingAttachment[];
       try {
         outgoing = await this.buildOutgoingAttachments(current.attachments);
@@ -2384,6 +2397,7 @@ export class Store {
         return this.failPendingAttachments(requestId, 'attachment-unreadable', e);
       }
 
+      await this.assertPendingNotRemoved(requestId);
       // 新建发送在 prompt 之前做已认证的远端身份核验；显式 retry 已在
       // retryPending 中提前核验，避免重复网络请求。
       if (!options.identityVerified) {
@@ -2469,6 +2483,12 @@ export class Store {
       }
       this.emit();
       return (await this.pendingSends.get(requestId))!;
+    }).catch(async (error) => {
+      // 移除与异步验证/上传可能交错。状态机已阻止 abandoned→sending；
+      // 返回实际终态，使 ChatScreen 不把取消误当发送失败而恢复成待发草稿。
+      const latest = await this.pendingSends.get(initial.requestId);
+      if (latest?.state === 'abandoned') return latest;
+      throw error;
     });
   }
 

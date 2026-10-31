@@ -239,7 +239,15 @@ export class ReactNativePendingSendStaging implements PendingSendStaging {
     for (const attachment of attachments) {
       const path = this.normalizeStagedUri(attachment.stagedUri);
       this.assertInsideDir(path);
-      await fs.unlink(bareFilePath(path)).catch(() => undefined);
+      const filePath = bareFilePath(path);
+      try {
+        if (await fs.exists(filePath)) await fs.unlink(filePath);
+        if (await fs.exists(filePath)) {
+          throw new Error('暂存文件删除后仍存在');
+        }
+      } catch (e) {
+        throw new PendingSendStagingError('cleanup-failed', '暂存附件未能确认删除', e);
+      }
       if (typeof __DEV__ !== 'undefined' && __DEV__) {
         console.log(`[p0-verify] staged-removed name=${attachment.name} stagedUri=${path}`);
       }
