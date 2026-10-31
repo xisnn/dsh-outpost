@@ -58,6 +58,7 @@ import { ButlerThinking } from '../components/ButlerThinking';
 import { ApprovalBanner } from '../components/ApprovalBanner';
 import { isForbiddenRejection } from '../core/rpc-error';
 import { PendingSendBubble } from '../components/PendingSendBubble';
+import { ConfirmSheet } from '../components/ConfirmSheet';
 import { ButlerWorkspacePicker } from '../components/ButlerWorkspacePicker';
 import { FileCard } from '../components/FileCard';
 import { isImagePath } from '../core/filerefs';
@@ -242,6 +243,8 @@ export function ChatScreen({
   /** P0-1：文本/图片/文件的持久化待发送记录。 */
   const [pendingSends, setPendingSends] = useState<PendingSendRecord[]>([]);
   const [retryingPendingId, setRetryingPendingId] = useState<string | undefined>(undefined);
+  const [removingPendingId, setRemovingPendingId] = useState<string | undefined>(undefined);
+  const [pendingRemove, setPendingRemove] = useState<PendingSendRecord | null>(null);
   // 管家模式：chat=闲聊（默认，直接回答）/ plan=计划（先对齐需求再派活）
   const [butlerMode, setButlerMode] = useState<ButlerMode>('chat');
   // 管家页顶部的「切换项目」弹层
@@ -600,6 +603,23 @@ export function ChatScreen({
     [retryingPendingId, sessionId, store],
   );
 
+  const confirmRemovePending = useCallback(async () => {
+    if (!pendingRemove || removingPendingId) return;
+    const requestId = pendingRemove.requestId;
+    setRemovingPendingId(requestId);
+    setSendError(undefined);
+    try {
+      await store.abandonPending(sessionId, requestId);
+      setPendingRemove(null);
+    } catch (e) {
+      setSendError(
+        e instanceof Error ? `移除失败：${e.message}` : '移除失败，请稍后重试',
+      );
+    } finally {
+      setRemovingPendingId(undefined);
+    }
+  }, [pendingRemove, removingPendingId, sessionId, store]);
+
   const renderBlocks = useCallback(
     (
       blocks: Block[],
@@ -924,8 +944,9 @@ export function ChatScreen({
                 <PendingSendBubble
                   key={record.requestId}
                   record={record}
-                  busy={retryingPendingId === record.requestId}
+                  busy={retryingPendingId === record.requestId || removingPendingId === record.requestId}
                   onRetry={retryPendingSend}
+                  onRemove={setPendingRemove}
                 />
               ))}
               {chat.running ? (
@@ -1231,6 +1252,24 @@ export function ChatScreen({
         visible={actionText !== null}
         text={actionText ?? ''}
         onClose={() => setActionText(null)}
+      />
+
+      {/* F-05：移除待发送记录前的明确确认（不会撤回已发送消息） */}
+      <ConfirmSheet
+        visible={pendingRemove !== null}
+        title="移除待发送消息？"
+        message={
+          pendingRemove?.state === 'failed'
+            ? '这条消息已确认未发出。移除后会删除本机记录与暂存附件，不影响已保存的 requestId 去重记录。'
+            : '只会删除本机的待发送记录和暂存附件，不会发送或撤回任何消息；已保存的 requestId 去重记录不受影响。'
+        }
+        confirmText="移除"
+        cancelText="取消"
+        destructive
+        onCancel={() => {
+          if (!removingPendingId) setPendingRemove(null);
+        }}
+        onConfirm={() => void confirmRemovePending()}
       />
     </View>
   );

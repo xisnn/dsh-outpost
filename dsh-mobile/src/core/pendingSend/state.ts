@@ -86,6 +86,27 @@ export function canUserRetry(record: PendingSendRecord): boolean {
 }
 
 /**
+ * 是否允许用户放弃（移除）待发送记录（F-05）。
+ *
+ * 只允许「prompt 一定尚未发出」的状态（queued/preparing/ready）和
+ * 「明确未送达、任务确定未执行」的 failed。
+ *
+ * 禁止：
+ *   · sending —— prompt 可能已在途；
+ *   · accepted —— 服务端已受理，可能已执行；
+ *   · unknown —— 结果未知，可能已执行；
+ * 移除这些记录会让用户误以为消息未执行，必须保留安全提示与重试语义。
+ */
+export function canAbandonPendingSend(record: PendingSendRecord): boolean {
+  return (
+    record.state === 'queued' ||
+    record.state === 'preparing' ||
+    record.state === 'ready' ||
+    record.state === 'failed'
+  );
+}
+
+/**
  * 应用一个状态迁移。非法迁移抛错，绝不猜测。
  *
  * @param now 由调用方注入，便于测试；生产传 Date.now()。

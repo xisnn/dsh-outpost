@@ -2192,6 +2192,18 @@ export class Store {
     return this.runPendingSend(record);
   }
 
+  /** 用户明确放弃（移除）待发送记录：仅允许确定未发出/明确失败的状态。 */
+  async abandonPending(sessionId: string, requestId: string): Promise<PendingSendRecord> {
+    await this.pendingSends.ensureHydrated();
+    const existing = await this.pendingSends.get(requestId);
+    if (!existing || existing.sessionId !== sessionId) {
+      throw new Error('找不到待发送记录');
+    }
+    const record = await this.pendingSends.abandon(requestId);
+    this.emit();
+    return record;
+  }
+
   /** 用户明确点击“重试（安全）”：只在这里复用旧 requestId。 */
   async retryPending(sessionId: string, requestId: string): Promise<PendingSendRecord> {
     await this.pendingSends.ensureHydrated();

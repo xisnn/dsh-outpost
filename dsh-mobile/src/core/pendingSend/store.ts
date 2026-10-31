@@ -25,6 +25,7 @@ import {
 } from './types';
 import {
   canUserRetry,
+  canAbandonPendingSend,
   evaluatePendingSendBinding,
   transitionPendingSend,
   type BindingRejectionReason,
@@ -67,6 +68,7 @@ export type PendingSendStoreErrorCode =
   | 'duplicate-request-id'
   | 'request-not-found'
   | 'request-not-retryable'
+  | 'request-not-abandonable'
   | 'limit-exceeded'
   | 'invalid-record'
   | 'cleanup-failed';
@@ -606,6 +608,43 @@ export class PendingSendStore {
       const index = doc.records.indexOf(current);
       records[index] = next;
       await this.save({ ...doc, records });
+      return cloneRecord(next);
+    });
+  }
+
+  /** 用户显式放弃（移除）记录：只允许确定未发出/明确失败的状态。 */
+  async abandon(requestId: string): Promise<PendingSendRecord> {
+    return this.runExclusive(async () => {
+      const doc = this.requireDoc();
+      const index = doc.records.findIndex((r) => r.requestId === requestId);
+      if (index < 0) {
+        throw new PendingSendStoreError('request-not-found', `找不到待发送记录 ${requestId}`);
+      }
+      const current = doc.records[index]!;
+      if (!canAbandonPendingSend(current)) {
+        throw new PendingSendStoreError(
+          'request-not-abandonable',
+          `状态 ${current.state} 结果不确定，禁止移除`,
+        );
+      }
+      const next = transitionPendingSend(current, { type: 'abandon' }, this.now());
+      const records = doc.records.slice();
+      records[index] = next;
+      await this.save({ ...doc, records });
+
+      // 共享同一 stagedUri 的其他未决记录仍可能使用该文件，只清理不再被引用的附件。
+      const stillReferenced = new Set(
+        records
+          .filter(
+            (r) =>
+              r.state !== 'confirmed' &&
+              r.state !== 'abandoned' &&
+              r.state !== 'expired',
+          )
+          .flatMap((r) => r.attachments.map((a) => a.stagedUri)),
+      );
+      const cleanup = current.attachments.filter((a) => !stillReferenced.has(a.stagedUri));
+      await this.staging.removeAttachments(cleanup).catch(() => undefined);
       return cloneRecord(next);
     });
   }

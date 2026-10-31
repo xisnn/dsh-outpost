@@ -4,13 +4,44 @@
  * 文本发送由 PendingSendRecord 驱动：这里展示“待发送 / 发送中 /
  * 结果未知 / 未发出 / 已受理”，并只把“用户明确重试”交给上层。
  */
-import React, { useMemo } from 'react';
+import React, { useEffect, useMemo, useState } from 'react';
 import { ActivityIndicator, Pressable, StyleSheet, Text, View } from 'react-native';
 
 import { useTheme } from '../design/theme';
 import { layout, radius, space, type, weight } from '../design/tokens';
 import type { PendingSendRecord } from '../core/pendingSend/types';
-import { canUserRetry } from '../core/pendingSend/state';
+import { canAbandonPendingSend, canUserRetry } from '../core/pendingSend/state';
+import { pendingSendSpinnerDelayMs } from '../core/pendingSend/ui';
+
+export const PENDING_SEND_SPINNER_DELAY_MS = 600;
+
+/** 延迟转圈：preparing/sending 持续超过 600ms 才显示，避免快速发送时闪烁。 */
+function DelayedSpinner({ record }: { record: PendingSendRecord }) {
+  const tv = useTheme();
+  const delay = pendingSendSpinnerDelayMs(record);
+  const [visible, setVisible] = useState(delay === 0);
+
+  useEffect(() => {
+    if (delay === null) {
+      setVisible(false);
+      return;
+    }
+    if (delay <= 0) {
+      setVisible(true);
+      return;
+    }
+    setVisible(false);
+    const timer = setTimeout(() => setVisible(true), delay);
+    return () => clearTimeout(timer);
+  }, [delay, record.state, record.updatedAt]);
+
+  if (delay === null) return null;
+  return (
+    <View style={{ width: 16, height: 16, alignItems: 'center', justifyContent: 'center' }}>
+      {visible ? <ActivityIndicator size="small" color={tv.colors.accent} /> : null}
+    </View>
+  );
+}
 
 function statusOf(record: PendingSendRecord): { label: string; tone: 'muted' | 'warning' | 'danger' | 'accent' } {
   switch (record.state) {
@@ -57,15 +88,18 @@ export function PendingSendBubble({
   record,
   busy = false,
   onRetry,
+  onRemove,
 }: {
   record: PendingSendRecord;
   busy?: boolean;
   onRetry: (record: PendingSendRecord) => void;
+  onRemove?: (record: PendingSendRecord) => void;
 }) {
   const tv = useTheme();
   const styles = useMemo(() => makeStyles(tv), [tv]);
   const status = statusOf(record);
   const retryable = canUserRetry(record);
+  const removable = canAbandonPendingSend(record) && !!onRemove;
   const toneColor =
     status.tone === 'warning'
       ? tv.colors.warning
@@ -89,9 +123,7 @@ export function PendingSendBubble({
           </View>
         ) : null}
         <View style={styles.footer}>
-          {record.state === 'sending' || record.state === 'preparing' ? (
-            <ActivityIndicator size="small" color={tv.colors.accent} />
-          ) : null}
+          <DelayedSpinner record={record} />
           <Text style={[styles.status, { color: toneColor }]}>{status.label}</Text>
           {retryable ? (
             <Pressable
@@ -107,6 +139,18 @@ export function PendingSendBubble({
                   ? '安全重试（复用原 ID）'
                   : '继续发送'}
               </Text>
+            </Pressable>
+          ) : null}
+          {removable ? (
+            <Pressable
+              disabled={busy}
+              onPress={() => onRemove?.(record)}
+              style={({ pressed }: { pressed: boolean }) => [
+                styles.remove,
+                pressed ? { opacity: tv.motion.pressOpacity } : null,
+              ]}
+            >
+              <Text style={styles.removeText}>移除</Text>
             </Pressable>
           ) : null}
         </View>
@@ -165,6 +209,19 @@ function makeStyles(tv: ReturnType<typeof useTheme>) {
     },
     retryText: {
       color: C.accent,
+      fontSize: type.xs,
+      fontWeight: weight.medium,
+    },
+    remove: {
+      paddingHorizontal: space.sm,
+      paddingVertical: 3,
+      borderRadius: radius.sm,
+      backgroundColor: C.bg,
+      borderColor: C.borderStrong,
+      borderWidth: StyleSheet.hairlineWidth,
+    },
+    removeText: {
+      color: C.danger,
       fontSize: type.xs,
       fontWeight: weight.medium,
     },
