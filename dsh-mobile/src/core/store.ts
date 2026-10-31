@@ -781,6 +781,8 @@ export class Store {
   private gateway?: ApprovalGateway;
   /** 待审批列表，key 是 rpcId */
   pendingApprovals: PendingApproval[] = [];
+  /** 服务端 approval-resolved 权威确认集合；不能由本地 pendingApprovals 缺失反推 */
+  readonly resolvedApprovalIds = new Set<string>();
   /** 网关连接状态 */
   gatewayStatus: GatewayStatus = 'idle';
   /** 网关不可用时的原因（用于 UI 提示） */
@@ -861,6 +863,12 @@ export class Store {
           });
         },
         onResolved: (rpcId, outcome) => {
+          this.resolvedApprovalIds.add(rpcId);
+          // 有界保留近期权威确认，避免长期运行无限增长
+          if (this.resolvedApprovalIds.size > 100) {
+            const oldest = this.resolvedApprovalIds.values().next().value;
+            if (oldest) this.resolvedApprovalIds.delete(oldest);
+          }
           this.pendingApprovals = this.pendingApprovals.filter((p) => p.rpcId !== rpcId);
           this.emit();
           // 让聊天记录里那张卡片也进入已决状态

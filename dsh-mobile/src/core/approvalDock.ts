@@ -40,6 +40,8 @@ export interface PartitionedApprovals<T extends ApprovalCandidate = ApprovalCand
   current: T[];
   /** 其他会话的待审批原始列表 */
   other: T[];
+  /** 缺少 sessionId、来源不明的审批（只读展示并禁用操作，不归入当前会话） */
+  unknown: T[];
   /** 按其他会话聚合后的跳转摘要 */
   otherGroups: OtherSessionApprovalGroup[];
 }
@@ -71,10 +73,15 @@ export function partitionApprovalsBySession<T extends ApprovalCandidate>(
 
   const current: T[] = [];
   const other: T[] = [];
+  const unknown: T[] = [];
   const groupMap = new Map<string, OtherSessionApprovalGroup>();
 
   for (const item of approvals) {
-    if (!item.sessionId || item.sessionId === currentSessionId) {
+    if (!item.sessionId) {
+      // 缺少 sessionId 的可操作审批（来源不明）绝不默认归入当前会话（即使 currentSessionId 也为空），
+      // 单独保留为只读提示，由 UI 明确禁用操作。
+      unknown.push(item);
+    } else if (currentSessionId && item.sessionId === currentSessionId) {
       if (inFlight?.has(item.id)) continue;
       current.push(item);
     } else {
@@ -97,6 +104,7 @@ export function partitionApprovalsBySession<T extends ApprovalCandidate>(
   return {
     current,
     other,
+    unknown,
     otherGroups: [...groupMap.values()],
   };
 }
@@ -328,7 +336,8 @@ export class ApprovalSubmitController {
     approval: ApprovalCandidate;
     outcome: ApprovalDecision;
     gatewayOnline: boolean;
-    authInvalidated?: boolean;
+    /** 鉴权终止态：true（401 凭据失效）或 'forbidden'（403 Host 未受信任，保留现有 Cookie） */
+    authInvalidated?: boolean | 'forbidden';
     now?: number;
     send: (approval: ApprovalCandidate, outcome: ApprovalDecision) => boolean;
   }): SubmitActionResult {
@@ -338,6 +347,13 @@ export class ApprovalSubmitController {
 
     if (this.inFlight.has(rpcId)) {
       return { status: 'duplicate', rpcId };
+    }
+
+    // 来源不明的审批永远不可提交（即使未来 UI 误传，也在状态机层 fail-closed）
+    if (!approval.sessionId) {
+      const error = '审批提交失败：缺少会话标识（sessionId），来源不明，已禁用审批操作';
+      this.errors.set(rpcId, error);
+      return { status: 'failed', rpcId, error };
     }
 
     // 高危操作点「允许一次」必须两步确认（拒绝无需二次确认）
@@ -353,7 +369,10 @@ export class ApprovalSubmitController {
     this.disarm();
 
     if (authInvalidated) {
-      const error = '审批提交失败：登录状态已失效或访问受限（401/403），请重新连接后再试';
+      const error =
+        authInvalidated === 'forbidden'
+          ? '审批提交失败：服务地址未被允许访问（HTTP 403：Host 未受信任），已保留现有凭据，请在电脑端将 Host 加入 trustedHosts 后重试'
+          : '审批提交失败：登录状态已失效（401），请重新连接后再试';
       this.errors.set(rpcId, error);
       return { status: 'failed', rpcId, error };
     }
@@ -384,25 +403,30 @@ export class ApprovalSubmitController {
 
   /**
    * 与当前服务端仍在等待的 `pendingApprovals` 对账：
-   *   - 若某条在途 `rpcId` 已经不在服务端待审批列表中（且当前未断线/未 401），说明服务端已确认解决；
-   *   - 若网关断线或发生 401/403，但该 `rpcId` 仍未解决，则立即回滚恢复为待审批并提示失败；
-   *   - 若超过 `commitTimeoutMs` 仍未收到服务端 `approval-resolved`，自动回滚恢复待审批并提示超时。
+   *   - 在线且 `rpcId` 仍在权威待审批列表中时，**始终继续等待**，绝不因本地列表暂时缺失而认定已处理；
+   *   - 只有收到权威 `approval-resolved` 帧（`serverResolvedIds`）才清理在途状态；
+   *   - 断线、401（鉴权失效）、403（trustedHosts 未受信任）或超过 `commitTimeoutMs`
+   *     仍未收到权威 `approval-resolved` 帧时，回滚恢复为待审批并提示原因；
+   *   - 403 保持与 401 不同的诊断语义：提示 Host 未受信任且保留现有 Cookie，不误导用户重新获取凭据。
    *
    * @returns 是否有在途状态发生回滚或完成变更
    */
   reconcile(params: {
     serverPendingIds: ReadonlySet<string>;
     gatewayOnline: boolean;
-    authInvalidated?: boolean;
+    /** 鉴权终止态：true（401 凭据失效）或 'forbidden'（403 Host 未受信任，保留现有 Cookie） */
+    authInvalidated?: boolean | 'forbidden';
+    /** 已收到服务端权威 approval-resolved 帧的 rpcId 集合（Store.onResolved 提供） */
+    serverResolvedIds?: ReadonlySet<string>;
     now?: number;
   }): boolean {
-    const { serverPendingIds, gatewayOnline, authInvalidated = false } = params;
+    const { serverPendingIds, gatewayOnline, authInvalidated = false, serverResolvedIds } = params;
     const now = params.now ?? Date.now();
     let changed = false;
 
     for (const [rpcId, meta] of [...this.inFlight.entries()]) {
-      if (!serverPendingIds.has(rpcId)) {
-        // 服务端已移除该待审批
+      if (serverResolvedIds?.has(rpcId)) {
+        // 只有收到权威的 approval-resolved 帧，才确认服务端已处理
         this.inFlight.delete(rpcId);
         this.errors.delete(rpcId);
         changed = true;
@@ -413,7 +437,9 @@ export class ApprovalSubmitController {
         this.inFlight.delete(rpcId);
         this.errors.set(
           rpcId,
-          '审批提交未完成：登录状态已失效或受限（401/403），已恢复待审批状态',
+          authInvalidated === 'forbidden'
+            ? '审批提交未完成：服务地址未被允许访问（HTTP 403：Host 未受信任），已恢复待审批状态并保留现有凭据，请在电脑端将 Host 加入 trustedHosts 后重试'
+            : '审批提交未完成：登录状态已失效（401），已恢复待审批状态，请重新连接后再试',
         );
         changed = true;
         continue;
@@ -436,6 +462,12 @@ export class ApprovalSubmitController {
           '审批响应超时（电脑未确认），已恢复待审批状态，请检查电脑端状态后重试',
         );
         changed = true;
+        continue;
+      }
+
+      if (serverPendingIds.has(rpcId)) {
+        // 网关在线且该 rpcId 仍处于服务端权威待审批列表中：继续等待权威 resolved 或超时。
+        continue;
       }
     }
 

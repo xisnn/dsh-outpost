@@ -56,6 +56,7 @@ import { TeammateNote } from '../components/TeammateNote';
 import { CompletionNotice } from '../components/CompletionNotice';
 import { ButlerThinking } from '../components/ButlerThinking';
 import { ApprovalBanner } from '../components/ApprovalBanner';
+import { isForbiddenRejection } from '../core/rpc-error';
 import { PendingSendBubble } from '../components/PendingSendBubble';
 import { ButlerWorkspacePicker } from '../components/ButlerWorkspacePicker';
 import { FileCard } from '../components/FileCard';
@@ -915,7 +916,14 @@ export function ChatScreen({
             }))}
             readonlyApprovals={pendingApprovals}
             gatewayOnline={store.gatewayStatus === 'online'}
-            authInvalidated={store.authInvalidated}
+            authInvalidated={
+              store.authInvalidated
+                ? isForbiddenRejection(store.connectionError)
+                  ? 'forbidden'
+                  : true
+                : false
+            }
+            serverResolvedIds={store.resolvedApprovalIds}
             sessions={store.sessions}
             onAnswer={(a, outcome) => {
               const hit = (store.pendingApprovals ?? []).find((p) => p.rpcId === a.id);

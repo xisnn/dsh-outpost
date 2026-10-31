@@ -82,6 +82,33 @@ check('其他会话审批严格隔离并按会话聚合出跳转摘要', () => {
     : JSON.stringify(part.otherGroups);
 });
 
+check('缺少 sessionId 的可操作审批绝不默认归入当前会话（来源不明安全禁用）', () => {
+  const items = [
+    { id: 'rpc-known', sessionId: 'sess-A', toolName: 'read', reason: 'config.ts' },
+    { id: 'rpc-unknown', toolName: 'pwsh', reason: 'Remove-Item -Recurse -Force E:\\tmp' },
+  ];
+  const part = partitionApprovalsBySession(items, 'sess-A');
+  const partEmptySid = partitionApprovalsBySession(
+    [{ id: 'rpc-empty', sessionId: '', toolName: 'pwsh', reason: 'echo 1' }],
+    '',
+  );
+  const ctrl = new ApprovalSubmitController();
+  const rejected = ctrl.submit({
+    approval: items[1],
+    outcome: 'allowed-once',
+    gatewayOnline: true,
+    send: () => true,
+  });
+  return part.current.map((a) => a.id).join(',') === 'rpc-known' &&
+    part.unknown.some((a) => a.id === 'rpc-unknown') &&
+    !part.current.some((a) => a.id === 'rpc-unknown') &&
+    partEmptySid.current.length === 0 &&
+    partEmptySid.unknown.length === 1 &&
+    rejected.status === 'failed'
+    ? true
+    : JSON.stringify({ part, partEmptySid, rejected });
+});
+
 check('在途（inFlightIds）审批从当前可见列表隐藏，回滚后重新出现', () => {
   const hidden = partitionApprovalsBySession(sampleApprovals, 'sess-A', {
     inFlightIds: new Set(['rpc-a1']),
@@ -316,12 +343,44 @@ check('网关断线或 401/403 或 send 返回 false 时，保留待审批状态
   return rOffline.status === 'failed' &&
     !!errOffline &&
     rAuth.status === 'failed' &&
-    /401\/403/.test(errAuth ?? '') &&
+    /401/.test(errAuth ?? '') &&
     rSendFalse.status === 'failed' &&
     !!errSend &&
     !ctrl.inFlightIds.has('rpc-fail')
     ? true
     : JSON.stringify({ rOffline, rAuth, rSendFalse });
+});
+
+check('403（Host 未受信任）与 401（Cookie 失效）保持不同诊断语义：403 不误导用户重新获取凭据', () => {
+  const ctrl = new ApprovalSubmitController();
+  const item = { id: 'rpc-403', sessionId: 'sess-A', toolName: 'read', reason: 'a.ts' };
+  const r403 = ctrl.submit({
+    approval: item,
+    outcome: 'allowed-once',
+    gatewayOnline: true,
+    authInvalidated: 'forbidden',
+    send: () => true,
+  });
+  const err403 = ctrl.errorFor('rpc-403') ?? '';
+  const ctrl401 = new ApprovalSubmitController();
+  const r401 = ctrl401.submit({
+    approval: item,
+    outcome: 'allowed-once',
+    gatewayOnline: true,
+    authInvalidated: true,
+    send: () => true,
+  });
+  const err401 = ctrl401.errorFor('rpc-403') ?? '';
+  return r403.status === 'failed' &&
+    /403/.test(err403) &&
+    /trustedHosts/.test(err403) &&
+    /保留现有凭据/.test(err403) &&
+    !/重新连接后再试/.test(err403) &&
+    r401.status === 'failed' &&
+    /401/.test(err401) &&
+    /重新连接后再试/.test(err401)
+    ? true
+    : JSON.stringify({ err403, err401 });
 });
 
 check('提交后若中途断线或发生 401/403，reconcile 立即回滚恢复待审批并记录错误', () => {
@@ -349,7 +408,7 @@ check('提交后若中途断线或发生 401/403，reconcile 立即回滚恢复�
     /断开/.test(ctrl.errorFor('rpc-mid-drop') ?? '') &&
     changed401 &&
     !ctrl.inFlightIds.has('rpc-mid-401') &&
-    /401\/403/.test(ctrl.errorFor('rpc-mid-401') ?? '')
+    /401/.test(ctrl.errorFor('rpc-mid-401') ?? '')
     ? true
     : '中途断线或 401 未回滚恢复待审批';
 });
@@ -378,6 +437,33 @@ check('提交后若超过超时时间服务端仍未确认，reconcile 自动回
     : '超时未自动回滚恢复待审批';
 });
 
+check('权威 pendingIds 暂时缺失时不再仅凭本地列表缺失认定已处理，保持等待而非误清', () => {
+  const ctrl = new ApprovalSubmitController();
+  const item = { id: 'rpc-pending-authoritative', sessionId: 'sess-A', toolName: 'read', reason: 'd.ts' };
+  ctrl.submit({
+    approval: item,
+    outcome: 'allowed-once',
+    gatewayOnline: true,
+    now: 1000,
+    send: () => true,
+  });
+  const changedMissing = ctrl.reconcile({
+    serverPendingIds: new Set(),
+    gatewayOnline: true,
+    now: 1200,
+  });
+  const changedPending = ctrl.reconcile({
+    serverPendingIds: new Set(['rpc-pending-authoritative']),
+    gatewayOnline: true,
+    now: 1400,
+  });
+  return !changedMissing &&
+    !changedPending &&
+    ctrl.inFlightIds.has('rpc-pending-authoritative')
+    ? true
+    : '仅凭本地列表缺失就错误地认定服务端已处理';
+});
+
 check('服务端确认移除后，reconcile 清理在途状态与历史报错', () => {
   const ctrl = new ApprovalSubmitController();
   const item = { id: 'rpc-ok', sessionId: 'sess-A', toolName: 'read', reason: 'd.ts' };
@@ -385,6 +471,7 @@ check('服务端确认移除后，reconcile 清理在途状态与历史报错', 
   const changed = ctrl.reconcile({
     serverPendingIds: new Set(),
     gatewayOnline: true,
+    serverResolvedIds: new Set(['rpc-ok']),
     now: 1200,
   });
   return changed && !ctrl.inFlightIds.has('rpc-ok') && ctrl.errorFor('rpc-ok') === null
@@ -453,6 +540,34 @@ check('store.onApproval 与 pushBanner 按 kind: approval 分桶提醒，且 ans
   /this\.gatewayStatus !== 'online' \|\| this\.authInvalidated/.test(storeSrc)
     ? true
     : 'store 审批通知分桶或 answerApproval 守卫缺失',
+);
+
+check('Store.onResolved 的权威确认集合已接入 ApprovalBanner', () =>
+  /resolvedApprovalIds\.add\(rpcId\)/.test(storeSrc) &&
+  /serverResolvedIds=\{store\.resolvedApprovalIds\}/.test(chatSrc)
+    ? true
+    : '缺少服务端权威 resolved 信号接线',
+);
+check('ApprovalBanner 对缺少 sessionId 的来源不明审批明确禁用「允许一次」', () =>
+  /unknownSession/.test(bannerSrc) &&
+  /缺少会话标识/.test(bannerSrc) &&
+  /canAnswer && !unknownSession/.test(bannerSrc)
+    ? true
+    : '缺少来源不明审批的安全禁用提示或按钮隐藏逻辑',
+);
+check('ApprovalBanner 8 秒超时回调始终使用 latestStateRef 的最新权威状态对账（不捕获旧值）', () =>
+  /latestStateRef\.current = \{ approvals, gatewayOnline, authInvalidated, serverResolvedIds \}/.test(bannerSrc) &&
+  /serverPendingIds: new Set\(latest\.approvals\.map/.test(bannerSrc) &&
+  /serverResolvedIds: latest\.serverResolvedIds/.test(bannerSrc)
+    ? true
+    : '超时回调仍捕获旧的 approvals/gatewayOnline/authInvalidated 或未带最新 resolved 信号',
+);
+check('ApprovalBanner 对 403（trustedHosts）给出不同于 401 的提示且不要求重新获取 Cookie', () =>
+  /authInvalidated === 'forbidden'/.test(bannerSrc) &&
+  /Host 加入 trustedHosts/.test(bannerSrc) &&
+  /登录状态已失效（401）/.test(bannerSrc)
+    ? true
+    : '403 提示仍误导用户重新获取 Cookie 或与 401 混淆',
 );
 
 console.log(`\n结果：${pass} 通过 / ${fail} 失败`);
