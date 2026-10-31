@@ -118,7 +118,10 @@ export function areChatItemRowPropsEqual(prev: ChatItemRowProps, next: ChatItemR
     prev.sessionId === next.sessionId &&
     prev.uploadApi === next.uploadApi &&
     prev.openMessageActions === next.openMessageActions &&
-    prev.renderBlocks === next.renderBlocks
+    prev.renderBlocks === next.renderBlocks &&
+    prev.dividerStyle === next.dividerStyle &&
+    prev.dividerLineStyle === next.dividerLineStyle &&
+    prev.dividerTextStyle === next.dividerTextStyle
   );
 }
 

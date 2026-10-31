@@ -51,6 +51,9 @@ const {
   createIncrementalFoldCache,
   stabilizeTurns,
   stabilizeChatItems,
+  areTurnsStructurallyEqual,
+  areChatItemsStructurallyEqual,
+  areAttachRefsEqual,
 } = await imp(path.join(__dirname, '..', 'src', 'core', 'fold', 'index.ts'));
 const { buildWorkGroup, buildWorkGroupMap } = await imp(
   path.join(__dirname, '..', 'src', 'core', 'workGroup.ts'),
@@ -618,13 +621,113 @@ check('extractAuthoritativeRunning 正确解析 snapshot 与 summary 的权威�
 
 store.close();
 
-console.log('\n── 5. ChatScreen 列表项 React.memo 静态检查 ─────────');
+console.log('\n── 5. ChatScreen 列表项 React.memo 与三项收尾边界回归 ─');
 const chatSrc = readFileSync(path.join(__dirname, '..', 'src', 'screens', 'ChatScreen.tsx'), 'utf8');
 check('ChatScreen 使用 React.memo(ChatItemRow) 与 areChatItemRowPropsEqual', () => {
   return (
     /const ChatItemRow = React\.memo\(/.test(chatSrc) &&
     /areChatItemRowPropsEqual/.test(chatSrc) &&
     /<ChatItemRow/.test(chatSrc)
+  );
+});
+
+// 边界 1：user.parts 附件数量相同但内容（attachmentId / localUri / name / bytes / mediaType）变化时不得误复用旧引用
+check('边界 1：user.parts 数量相同但附件内容变化时，Turn 与 ChatItem 引用正确更新（不忽略附件内容变化）', () => {
+  const partA = { kind: 'image', attachmentId: 'att-1', name: 'a.png', mediaType: 'image/png', bytes: 100, localUri: 'file:///a.png' };
+  const partB = { kind: 'image', attachmentId: 'att-2', name: 'a.png', mediaType: 'image/png', bytes: 100, localUri: 'file:///b.png' };
+  const turnA = { turn: 1, running: false, endedAt: 200, user: { id: 'u1', text: 'pic', time: 100, parts: [partA] }, steps: [] };
+  const turnB = { turn: 1, running: false, endedAt: 200, user: { id: 'u1', text: 'pic', time: 100, parts: [partB] }, steps: [] };
+  const itemA = { kind: 'user', key: 'u-1-u1', turn: 1, text: 'pic', time: 100, parts: [partA] };
+  const itemB = { kind: 'user', key: 'u-1-u1', turn: 1, text: 'pic', time: 100, parts: [partB] };
+
+  const stabilizedTurn = stabilizeTurns([turnA], [turnB])[0];
+  const stabilizedItem = stabilizeChatItems([itemA], [itemB])[0];
+  return (
+    !areAttachRefsEqual([partA], [partB]) &&
+    !areTurnsStructurallyEqual(turnA, turnB) &&
+    !areChatItemsStructurallyEqual(itemA, itemB) &&
+    stabilizedTurn === turnB &&
+    stabilizedItem === itemB
+  );
+});
+
+// 边界 2：同 seq 事件原地更新 & 重连历史回填时，增量 foldCache 必须正确失效并与全量 foldEvents 100% 一致
+check('边界 2A：同 seq 事件更新（位于已冻结前缀内且总长度不变）时，foldCache 正确失效并与全量 foldEvents 一致', () => {
+  const c = createIncrementalFoldCache();
+  const recs = [
+    { event: { type: 'turn/start', seq: 1, time: 100, data: { turn: 1 } } },
+    { event: { type: 'user/message', seq: 2, time: 110, data: { turn: 1, id: 'u1', content: [{ type: 'text', text: '原始问题' }] } } },
+    { event: { type: 'turn/end', seq: 3, time: 120, data: { turn: 1, reason: { kind: 'completed' } } } },
+    { event: { type: 'turn/start', seq: 4, time: 200, data: { turn: 2 } } },
+    { event: { type: 'user/message', seq: 5, time: 210, data: { turn: 2, id: 'u2', content: [{ type: 'text', text: '第二轮' }] } } },
+  ];
+  // 首次构建检查点：第 1 轮（seq 1..3）被冻结进 prefixTurns
+  foldEventsIncremental(recs, c);
+  // 同 seq=2 事件被更新为新内容（总记录数仍为 5，tailStartSeq 仍为 4）
+  const updatedRecs = recs.slice();
+  updatedRecs[1] = {
+    event: {
+      type: 'user/message',
+      seq: 2,
+      time: 110,
+      data: { turn: 1, id: 'u1', content: [{ type: 'text', text: '同 seq 更新后的问题' }] },
+    },
+  };
+  const incRes = foldEventsIncremental(updatedRecs, c);
+  const fullTurns = foldEvents(updatedRecs);
+  const fullItems = toChatItems(fullTurns);
+  return (
+    !incRes.usedFastPath &&
+    incRes.turns[0].user?.text === '同 seq 更新后的问题' &&
+    JSON.stringify(incRes.turns) === JSON.stringify(fullTurns) &&
+    JSON.stringify(incRes.items) === JSON.stringify(fullItems)
+  );
+});
+
+check('边界 2B：重连历史缺口回填（在中间插入缺失 seq 事件）时，foldCache 正确失效并与全量 foldEvents 一致', () => {
+  const c = createIncrementalFoldCache();
+  const initial = [
+    { event: { type: 'turn/start', seq: 1, time: 100, data: { turn: 1 } } },
+    { event: { type: 'user/message', seq: 2, time: 110, data: { turn: 1, id: 'u1', content: [{ type: 'text', text: 'T1' }] } } },
+    { event: { type: 'turn/end', seq: 5, time: 150, data: { turn: 1, reason: { kind: 'completed' } } } },
+    { event: { type: 'turn/start', seq: 10, time: 200, data: { turn: 2 } } },
+    { event: { type: 'step/start', seq: 11, time: 210, data: { turn: 2, step: 1 } } },
+  ];
+  foldEventsIncremental(initial, c);
+
+  // 断线回填补齐了第 1 轮中间缺失的 seq=3,4 事件，以及第 1、2 轮之间的事件
+  const afterBackfill = [
+    initial[0],
+    initial[1],
+    { event: { type: 'step/start', seq: 3, time: 120, data: { turn: 1, step: 1 } } },
+    {
+      event: {
+        type: 'assistant/message',
+        seq: 4,
+        time: 130,
+        data: { turn: 1, step: 1, message: { role: 'assistant', content: [{ type: 'text', text: '回填的助手回复' }] } },
+      },
+    },
+    initial[2],
+    initial[3],
+    initial[4],
+  ];
+  const incRes = foldEventsIncremental(afterBackfill, c);
+  const fullTurns = foldEvents(afterBackfill);
+  const fullItems = toChatItems(fullTurns);
+  return (
+    !incRes.usedFastPath &&
+    JSON.stringify(incRes.turns) === JSON.stringify(fullTurns) &&
+    JSON.stringify(incRes.items) === JSON.stringify(fullItems)
+  );
+});
+
+// 边界 3：React.memo 的 ChatItemRow 比较器必须比较 dividerStyle / dividerLineStyle / dividerTextStyle
+check('边界 3：areChatItemRowPropsEqual 比较 dividerStyle / dividerLineStyle / dividerTextStyle，深浅主题切换后分割线样式实时更新', () => {
+  return (
+    /prev\.dividerStyle === next\.dividerStyle/.test(chatSrc) &&
+    /prev\.dividerLineStyle === next\.dividerLineStyle/.test(chatSrc) &&
+    /prev\.dividerTextStyle === next\.dividerTextStyle/.test(chatSrc)
   );
 });
 

@@ -648,16 +648,49 @@ function areBlocksEqual(a: Block, b: Block): boolean {
     return a.path === b.path && a.description === b.description;
   }
   if (a.kind === 'tool' && b.kind === 'tool') {
+    const argsEqual =
+      a.rawArguments !== undefined || b.rawArguments !== undefined
+        ? a.rawArguments === b.rawArguments
+        : a.input === b.input || JSON.stringify(a.input) === JSON.stringify(b.input);
     return (
       a.callId === b.callId &&
       a.name === b.name &&
-      a.rawArguments === b.rawArguments &&
+      argsEqual &&
       a.output === b.output &&
       a.isError === b.isError &&
       a.pending === b.pending
     );
   }
   return false;
+}
+
+export function areAttachRefsEqual(a: readonly AttachRef[], b: readonly AttachRef[]): boolean {
+  if (a === b) return true;
+  if (a.length !== b.length) return false;
+  for (let i = 0; i < a.length; i += 1) {
+    const pa = a[i]!;
+    const pb = b[i]!;
+    if (pa === pb) continue;
+    if (
+      pa.kind !== pb.kind ||
+      pa.attachmentId !== pb.attachmentId ||
+      pa.name !== pb.name ||
+      pa.bytes !== pb.bytes ||
+      pa.localUri !== pb.localUri
+    ) {
+      return false;
+    }
+    if (pa.kind === 'image' && pb.kind === 'image') {
+      if (
+        pa.mediaType !== pb.mediaType ||
+        pa.width !== pb.width ||
+        pa.height !== pb.height
+      ) {
+        return false;
+      }
+    }
+  }
+  return true;
 }
 
 function areBlockArraysEqual(a: readonly Block[], b: readonly Block[]): boolean {
@@ -687,7 +720,7 @@ export function areTurnsStructurallyEqual(a: Turn, b: Turn): boolean {
       a.user.id !== b.user.id ||
       a.user.text !== b.user.text ||
       a.user.time !== b.user.time ||
-      a.user.parts.length !== b.user.parts.length
+      !areAttachRefsEqual(a.user.parts, b.user.parts)
     ) {
       return false;
     }
@@ -733,7 +766,11 @@ export function areChatItemsStructurallyEqual(a: ChatItem, b: ChatItem): boolean
   if (a === b) return true;
   if (a.kind !== b.kind || a.key !== b.key || a.turn !== b.turn) return false;
   if (a.kind === 'user' && b.kind === 'user') {
-    return a.text === b.text && a.time === b.time && a.parts.length === b.parts.length;
+    return (
+      a.text === b.text &&
+      a.time === b.time &&
+      areAttachRefsEqual(a.parts, b.parts)
+    );
   }
   if (a.kind === 'teammate' && b.kind === 'teammate') {
     return a.from === b.from && a.text === b.text && a.notice === b.notice;
@@ -801,6 +838,9 @@ export interface IncrementalFoldCache {
   /** 上一次处理过的总记录数与最大 seq */
   lastRecordCount: number;
   lastMaxSeq: number;
+  /** 上一次输入记录与事件对象的浅快照（用于检测同 seq 事件原地更新与断线历史回填插入） */
+  lastRecords: EventRecord[];
+  lastEvents: Array<EventRecord['event'] | undefined>;
   /** 已冻结的历史已完成 Turn 与 ChatItem 前缀 */
   prefixTurns: Turn[];
   prefixItems: ChatItem[];
@@ -816,6 +856,8 @@ export function createIncrementalFoldCache(): IncrementalFoldCache {
     tailTurnNo: -1,
     lastRecordCount: 0,
     lastMaxSeq: -1,
+    lastRecords: [],
+    lastEvents: [],
     prefixTurns: [],
     prefixItems: [],
     lastTurns: [],
@@ -854,6 +896,8 @@ export function foldEventsIncremental(
     cache.tailTurnNo = -1;
     cache.lastRecordCount = 0;
     cache.lastMaxSeq = -1;
+    cache.lastRecords = [];
+    cache.lastEvents = [];
     cache.prefixTurns = [];
     cache.prefixItems = [];
     cache.lastTurns = [];
@@ -863,21 +907,42 @@ export function foldEventsIncremental(
 
   const maxSeq = sortedRecords[len - 1]?.event?.seq ?? -1;
 
-  // 检查是否可以走增量尾轮折叠快路径
+  // 查找与上一次记录快照首个不一致的位置（检测同 seq 更新、原地替换或断线历史回填插入）
+  const minCommon = Math.min(len, cache.lastRecords.length);
+  let firstDiffIdx = minCommon;
+  for (let i = 0; i < minCommon; i += 1) {
+    if (
+      sortedRecords[i] !== cache.lastRecords[i] ||
+      sortedRecords[i]?.event !== cache.lastEvents[i]
+    ) {
+      firstDiffIdx = i;
+      break;
+    }
+  }
+
+  // 检查是否可以走增量尾轮折叠快路径：
+  //   1. 已冻结的前缀 [0 .. prefixRecordCount - 1] 必须完全未被修改或位移（firstDiffIdx >= prefixRecordCount）；
+  //   2. 尾轮起始锚点 seq 未变；
+  //   3. 尾部所有事件均不指向更早轮次，且不含无 turn 号的 approval/decided。
   let canUseFastPath =
     cache.prefixRecordCount > 0 &&
     cache.tailTurnNo >= 0 &&
-    len >= cache.lastRecordCount &&
     len > cache.prefixRecordCount &&
+    firstDiffIdx >= cache.prefixRecordCount &&
     sortedRecords[cache.prefixRecordCount]?.event?.seq === cache.tailStartSeq;
 
   if (canUseFastPath) {
-    for (let i = cache.lastRecordCount; i < len; i += 1) {
+    const checkStart = Math.max(cache.prefixRecordCount, firstDiffIdx);
+    const prevSeqBeforeCheck =
+      checkStart > 0 ? (sortedRecords[checkStart - 1]?.event?.seq ?? -1) : -1;
+    let prevSeq = prevSeqBeforeCheck;
+    for (let i = checkStart; i < len; i += 1) {
       const ev = sortedRecords[i]?.event;
-      if (!ev || typeof ev.seq !== 'number' || ev.seq <= cache.lastMaxSeq) {
+      if (!ev || typeof ev.seq !== 'number' || ev.seq <= prevSeq) {
         canUseFastPath = false;
         break;
       }
+      prevSeq = ev.seq;
       const d = (ev.data ?? {}) as Record<string, unknown>;
       const evTurn = num(d.turn) ?? num(d.turnNo);
       if (evTurn !== undefined && evTurn < cache.tailTurnNo) {
@@ -921,9 +986,12 @@ export function foldEventsIncremental(
   // 更新检查点：若倒数第二轮及之前均已结束且无未决审批，将前缀冻结到最后一轮的 turn/start 位置
   cache.lastRecordCount = len;
   cache.lastMaxSeq = maxSeq;
+  cache.lastRecords = sortedRecords.slice();
+  cache.lastEvents = sortedRecords.map((r) => r?.event);
   cache.lastTurns = turns;
   cache.lastItems = items;
 
+  let checkpointUpdated = false;
   if (turns.length >= 2) {
     const lastTurn = turns[turns.length - 1]!;
     const prefixAllCompleted = turns
@@ -961,9 +1029,18 @@ export function foldEventsIncremental(
           cache.tailTurnNo = lastTurn.turn;
           cache.prefixTurns = prefixTurns;
           cache.prefixItems = prefixItems;
+          checkpointUpdated = true;
         }
       }
     }
+  }
+
+  if (!checkpointUpdated) {
+    cache.prefixRecordCount = 0;
+    cache.tailStartSeq = -1;
+    cache.tailTurnNo = -1;
+    cache.prefixTurns = [];
+    cache.prefixItems = [];
   }
 
   return { turns, items, usedFastPath };
