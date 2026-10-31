@@ -50,12 +50,20 @@ export interface WorkGroupView {
   durationSec?: number;
 }
 
+const workGroupCache = new WeakMap<Turn, WorkGroupView | null>();
+
 /**
  * 从一轮构建执行过程组。
+ *
+ * 对同一 Turn 引用做 WeakMap 缓存：流式输出时历史已完成 Turn 引用保持不变，
+ * 直接 O(1) 复用同一 WorkGroupView 引用，避免 FlatList 历史行重渲染。
  *
  * @returns 不需要分组时返回 null（单工具 / 单段思考 / 纯文本回答）
  */
 export function buildWorkGroup(turn: Turn): WorkGroupView | null {
+  if (workGroupCache.has(turn)) {
+    return workGroupCache.get(turn) ?? null;
+  }
   const flat: WorkGroupItem[] = [];
   let index = 0;
   for (const step of turn.steps) {
@@ -64,7 +72,10 @@ export function buildWorkGroup(turn: Turn): WorkGroupView | null {
       flat.push({ index, step: step.step, block });
     }
   }
-  if (flat.length === 0) return null;
+  if (flat.length === 0) {
+    workGroupCache.set(turn, null);
+    return null;
+  }
 
   // 最后一个「非文本块」（思考或工具）之后的内容 = 最终回答
   let lastNonText = -1;
@@ -72,7 +83,10 @@ export function buildWorkGroup(turn: Turn): WorkGroupView | null {
     const k = flat[i].block.kind;
     if (k === 'reasoning' || k === 'tool') lastNonText = i;
   }
-  if (lastNonText < 0) return null; // 纯文本回答，不需要组
+  if (lastNonText < 0) {
+    workGroupCache.set(turn, null);
+    return null; // 纯文本回答，不需要组
+  }
 
   const items = flat.slice(0, lastNonText + 1);
   const finalBlocks = flat.slice(lastNonText + 1).map((x) => x.block);
@@ -84,9 +98,15 @@ export function buildWorkGroup(turn: Turn): WorkGroupView | null {
   const toolCount = toolBlocks.length;
 
   // 单个工具调用：直接展示单张 ToolCard（及其思考面板），不再外包一层「已执行 1 步」的折叠组
-  if (toolCount === 1) return null;
+  if (toolCount === 1) {
+    workGroupCache.set(turn, null);
+    return null;
+  }
   // 没有工具、且只有一段思考：交给现有的 ThinkingAccordion，不必再包一层
-  if (toolCount === 0 && reasoningCount <= 1) return null;
+  if (toolCount === 0 && reasoningCount <= 1) {
+    workGroupCache.set(turn, null);
+    return null;
+  }
 
   const hasPendingTool = toolBlocks.some((b) => b.pending);
   const failed = toolBlocks.some((b) => b.isError);
@@ -97,7 +117,7 @@ export function buildWorkGroup(turn: Turn): WorkGroupView | null {
     durationSec = Math.max(1, Math.round((turn.endedAt - turn.startedAt) / 1000));
   }
 
-  return {
+  const view: WorkGroupView = {
     turn: turn.turn,
     items,
     finalBlocks,
@@ -111,6 +131,8 @@ export function buildWorkGroup(turn: Turn): WorkGroupView | null {
     endedAt: turn.endedAt,
     durationSec,
   };
+  workGroupCache.set(turn, view);
+  return view;
 }
 
 /** 每轮一个组，供聊天页按 turn 取用（不跨轮合并） */

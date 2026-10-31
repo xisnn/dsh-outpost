@@ -636,3 +636,335 @@ export function toChatItems(turns: Turn[]): ChatItem[] {
   }
   return items;
 }
+
+// ── F-03：历史轮次与列表项引用稳定化 + 增量尾轮折叠 ────────────────
+
+function areBlocksEqual(a: Block, b: Block): boolean {
+  if (a === b) return true;
+  if (a.kind !== b.kind) return false;
+  if (a.kind === 'text' && b.kind === 'text') return a.text === b.text;
+  if (a.kind === 'reasoning' && b.kind === 'reasoning') return a.text === b.text;
+  if (a.kind === 'file' && b.kind === 'file') {
+    return a.path === b.path && a.description === b.description;
+  }
+  if (a.kind === 'tool' && b.kind === 'tool') {
+    return (
+      a.callId === b.callId &&
+      a.name === b.name &&
+      a.rawArguments === b.rawArguments &&
+      a.output === b.output &&
+      a.isError === b.isError &&
+      a.pending === b.pending
+    );
+  }
+  return false;
+}
+
+function areBlockArraysEqual(a: readonly Block[], b: readonly Block[]): boolean {
+  if (a === b) return true;
+  if (a.length !== b.length) return false;
+  for (let i = 0; i < a.length; i += 1) {
+    if (!areBlocksEqual(a[i]!, b[i]!)) return false;
+  }
+  return true;
+}
+
+export function areTurnsStructurallyEqual(a: Turn, b: Turn): boolean {
+  if (a === b) return true;
+  if (
+    a.turn !== b.turn ||
+    a.running !== b.running ||
+    a.startedAt !== b.startedAt ||
+    a.endedAt !== b.endedAt ||
+    a.reason !== b.reason ||
+    a.delegated !== b.delegated
+  ) {
+    return false;
+  }
+  if (Boolean(a.user) !== Boolean(b.user)) return false;
+  if (a.user && b.user) {
+    if (
+      a.user.id !== b.user.id ||
+      a.user.text !== b.user.text ||
+      a.user.time !== b.user.time ||
+      a.user.parts.length !== b.user.parts.length
+    ) {
+      return false;
+    }
+  }
+  const tmA = a.teammates ?? [];
+  const tmB = b.teammates ?? [];
+  if (tmA.length !== tmB.length) return false;
+  for (let i = 0; i < tmA.length; i += 1) {
+    if (
+      tmA[i]!.id !== tmB[i]!.id ||
+      tmA[i]!.text !== tmB[i]!.text ||
+      tmA[i]!.from !== tmB[i]!.from ||
+      tmA[i]!.notice !== tmB[i]!.notice
+    ) {
+      return false;
+    }
+  }
+  const apA = a.approvals ?? [];
+  const apB = b.approvals ?? [];
+  if (apA.length !== apB.length) return false;
+  for (let i = 0; i < apA.length; i += 1) {
+    if (
+      apA[i]!.id !== apB[i]!.id ||
+      apA[i]!.toolName !== apB[i]!.toolName ||
+      apA[i]!.reason !== apB[i]!.reason ||
+      apA[i]!.decided !== apB[i]!.decided
+    ) {
+      return false;
+    }
+  }
+  if (a.steps.length !== b.steps.length) return false;
+  for (let i = 0; i < a.steps.length; i += 1) {
+    const sa = a.steps[i]!;
+    const sb = b.steps[i]!;
+    if (sa.step !== sb.step || !areBlockArraysEqual(sa.blocks, sb.blocks)) {
+      return false;
+    }
+  }
+  return true;
+}
+
+export function areChatItemsStructurallyEqual(a: ChatItem, b: ChatItem): boolean {
+  if (a === b) return true;
+  if (a.kind !== b.kind || a.key !== b.key || a.turn !== b.turn) return false;
+  if (a.kind === 'user' && b.kind === 'user') {
+    return a.text === b.text && a.time === b.time && a.parts.length === b.parts.length;
+  }
+  if (a.kind === 'teammate' && b.kind === 'teammate') {
+    return a.from === b.from && a.text === b.text && a.notice === b.notice;
+  }
+  if (a.kind === 'divider' && b.kind === 'divider') {
+    return a.reason === b.reason;
+  }
+  if (a.kind === 'assistant' && b.kind === 'assistant') {
+    return (
+      a.step === b.step &&
+      a.delegated === b.delegated &&
+      areBlockArraysEqual(a.blocks, b.blocks)
+    );
+  }
+  return false;
+}
+
+/**
+ * 复用未变化的历史 Turn 引用（prevTurn === nextTurn）。
+ */
+export function stabilizeTurns(prevTurns: readonly Turn[], nextTurns: Turn[]): Turn[] {
+  if (prevTurns.length === 0) return nextTurns;
+  const prevByTurn = new Map<number, Turn>();
+  for (const t of prevTurns) prevByTurn.set(t.turn, t);
+  let allSame = prevTurns.length === nextTurns.length;
+  const out = nextTurns.map((next, idx) => {
+    const prev = prevByTurn.get(next.turn);
+    if (prev && areTurnsStructurallyEqual(prev, next)) {
+      if (prevTurns[idx] !== prev) allSame = false;
+      return prev;
+    }
+    allSame = false;
+    return next;
+  });
+  return allSame ? (prevTurns as Turn[]) : out;
+}
+
+/**
+ * 复用未变化的历史 ChatItem 引用（prevItem === nextItem）。
+ */
+export function stabilizeChatItems(prevItems: readonly ChatItem[], nextItems: ChatItem[]): ChatItem[] {
+  if (prevItems.length === 0) return nextItems;
+  const prevByKey = new Map<string, ChatItem>();
+  for (const item of prevItems) prevByKey.set(item.key, item);
+  let allSame = prevItems.length === nextItems.length;
+  const out = nextItems.map((next, idx) => {
+    const prev = prevByKey.get(next.key);
+    if (prev && areChatItemsStructurallyEqual(prev, next)) {
+      if (prevItems[idx] !== prev) allSame = false;
+      return prev;
+    }
+    allSame = false;
+    return next;
+  });
+  return allSame ? (prevItems as ChatItem[]) : out;
+}
+
+export interface IncrementalFoldCache {
+  /** 已冻结的完成态前缀在 sortedRecords 中的起始切片长度 */
+  prefixRecordCount: number;
+  /** tail 切片首个事件（最后一轮 turn/start）的 seq */
+  tailStartSeq: number;
+  /** tail 起始轮次号 */
+  tailTurnNo: number;
+  /** 上一次处理过的总记录数与最大 seq */
+  lastRecordCount: number;
+  lastMaxSeq: number;
+  /** 已冻结的历史已完成 Turn 与 ChatItem 前缀 */
+  prefixTurns: Turn[];
+  prefixItems: ChatItem[];
+  /** 上一次完整输出的 Turn[] 与 ChatItem[]（用于引用稳定化对比） */
+  lastTurns: Turn[];
+  lastItems: ChatItem[];
+}
+
+export function createIncrementalFoldCache(): IncrementalFoldCache {
+  return {
+    prefixRecordCount: 0,
+    tailStartSeq: -1,
+    tailTurnNo: -1,
+    lastRecordCount: 0,
+    lastMaxSeq: -1,
+    prefixTurns: [],
+    prefixItems: [],
+    lastTurns: [],
+    lastItems: [],
+  };
+}
+
+function applyAuthoritativeRunningOverride(
+  turns: Turn[],
+  authoritativeRunning?: boolean,
+): Turn[] {
+  if (authoritativeRunning !== false || turns.length === 0) return turns;
+  const last = turns[turns.length - 1]!;
+  if (!last.running) return turns;
+  const copy = turns.slice();
+  copy[copy.length - 1] = { ...last, running: false };
+  return copy;
+}
+
+/**
+ * 增量折叠（F-03）：
+ *   - 当流式事件仅追加在当前活跃最后一轮（tail）时，跳过全部已完成历史轮次（prefixTurns），
+ *     只对最后一轮的尾部事件切片调用 `foldEvents`，使单次 rebuild 复杂度从 O(N_total) 降至 O(N_tail)；
+ *   - 当发生历史回填、加载更早消息或跨轮次变更时，自动回退全量 `foldEvents` 并通过
+ *     `stabilizeTurns` / `stabilizeChatItems` 保持所有未变历史对象的引用严格相等（`===`）。
+ */
+export function foldEventsIncremental(
+  sortedRecords: readonly EventRecord[],
+  cache: IncrementalFoldCache,
+  opts?: { authoritativeRunning?: boolean },
+): { turns: Turn[]; items: ChatItem[]; usedFastPath: boolean } {
+  const len = sortedRecords.length;
+  if (len === 0) {
+    cache.prefixRecordCount = 0;
+    cache.tailStartSeq = -1;
+    cache.tailTurnNo = -1;
+    cache.lastRecordCount = 0;
+    cache.lastMaxSeq = -1;
+    cache.prefixTurns = [];
+    cache.prefixItems = [];
+    cache.lastTurns = [];
+    cache.lastItems = [];
+    return { turns: [], items: [], usedFastPath: false };
+  }
+
+  const maxSeq = sortedRecords[len - 1]?.event?.seq ?? -1;
+
+  // 检查是否可以走增量尾轮折叠快路径
+  let canUseFastPath =
+    cache.prefixRecordCount > 0 &&
+    cache.tailTurnNo >= 0 &&
+    len >= cache.lastRecordCount &&
+    len > cache.prefixRecordCount &&
+    sortedRecords[cache.prefixRecordCount]?.event?.seq === cache.tailStartSeq;
+
+  if (canUseFastPath) {
+    for (let i = cache.lastRecordCount; i < len; i += 1) {
+      const ev = sortedRecords[i]?.event;
+      if (!ev || typeof ev.seq !== 'number' || ev.seq <= cache.lastMaxSeq) {
+        canUseFastPath = false;
+        break;
+      }
+      const d = (ev.data ?? {}) as Record<string, unknown>;
+      const evTurn = num(d.turn) ?? num(d.turnNo);
+      if (evTurn !== undefined && evTurn < cache.tailTurnNo) {
+        canUseFastPath = false;
+        break;
+      }
+      if (ev.type === 'approval/decided' && evTurn === undefined) {
+        canUseFastPath = false;
+        break;
+      }
+    }
+  }
+
+  let turns: Turn[];
+  let items: ChatItem[];
+  let usedFastPath = false;
+
+  if (canUseFastPath) {
+    const tailSlice = sortedRecords.slice(cache.prefixRecordCount) as EventRecord[];
+    const rawTailTurns = applyAuthoritativeRunningOverride(
+      foldEvents(tailSlice),
+      opts?.authoritativeRunning,
+    );
+    const prevTailTurns = cache.lastTurns.slice(cache.prefixTurns.length);
+    const stableTailTurns = stabilizeTurns(prevTailTurns, rawTailTurns);
+    const prevTailItems = cache.lastItems.slice(cache.prefixItems.length);
+    const stableTailItems = stabilizeChatItems(prevTailItems, toChatItems(stableTailTurns));
+
+    turns = cache.prefixTurns.concat(stableTailTurns);
+    items = cache.prefixItems.concat(stableTailItems);
+    usedFastPath = true;
+  } else {
+    const rawTurns = applyAuthoritativeRunningOverride(
+      foldEvents(sortedRecords as EventRecord[]),
+      opts?.authoritativeRunning,
+    );
+    turns = stabilizeTurns(cache.lastTurns, rawTurns);
+    items = stabilizeChatItems(cache.lastItems, toChatItems(turns));
+  }
+
+  // 更新检查点：若倒数第二轮及之前均已结束且无未决审批，将前缀冻结到最后一轮的 turn/start 位置
+  cache.lastRecordCount = len;
+  cache.lastMaxSeq = maxSeq;
+  cache.lastTurns = turns;
+  cache.lastItems = items;
+
+  if (turns.length >= 2) {
+    const lastTurn = turns[turns.length - 1]!;
+    const prefixAllCompleted = turns
+      .slice(0, -1)
+      .every((t) => !t.running && t.endedAt !== undefined && (!t.approvals || t.approvals.length === 0));
+    if (prefixAllCompleted) {
+      // 从后往前找最后一轮的 turn/start 且在那之后没有任何属于更早轮次的事件
+      let startIdx = -1;
+      for (let i = len - 1; i >= 0; i -= 1) {
+        const ev = sortedRecords[i]?.event;
+        if (!ev) continue;
+        const d = (ev.data ?? {}) as Record<string, unknown>;
+        const tNo = num(d.turn) ?? num(d.turnNo);
+        if (ev.type === 'turn/start' && tNo === lastTurn.turn) {
+          startIdx = i;
+          break;
+        }
+      }
+      if (startIdx > 0) {
+        let tailClean = true;
+        for (let i = startIdx; i < len; i += 1) {
+          const ev = sortedRecords[i]?.event;
+          const d = (ev?.data ?? {}) as Record<string, unknown>;
+          const tNo = num(d.turn) ?? num(d.turnNo);
+          if (tNo !== undefined && tNo < lastTurn.turn) {
+            tailClean = false;
+            break;
+          }
+        }
+        if (tailClean) {
+          const prefixTurns = turns.slice(0, -1);
+          const prefixItems = items.filter((item) => item.turn < lastTurn.turn);
+          cache.prefixRecordCount = startIdx;
+          cache.tailStartSeq = sortedRecords[startIdx]!.event.seq;
+          cache.tailTurnNo = lastTurn.turn;
+          cache.prefixTurns = prefixTurns;
+          cache.prefixItems = prefixItems;
+        }
+      }
+    }
+  }
+
+  return { turns, items, usedFastPath };
+}

@@ -17,7 +17,17 @@ import { UploadApi } from '../core/rpc/upload';
 import { WorkspaceApi } from '../core/rpc/workspace';
 import { DirectoryPickerApi } from '../core/rpc/directory';
 import type { WorkspaceCustom } from '../core/workspace-custom';
-import { foldEvents, toChatItems, isInjectedMessage, stripModeTag, type ChatItem, type Turn } from '../core/fold';
+import {
+  foldEvents,
+  toChatItems,
+  foldEventsIncremental,
+  createIncrementalFoldCache,
+  isInjectedMessage,
+  stripModeTag,
+  type ChatItem,
+  type IncrementalFoldCache,
+  type Turn,
+} from '../core/fold';
 import { notifyDone } from '../core/notify';
 import { buildCompatReport, classifyError } from '../core/protocol';
 import { isAuthFailure, isForbiddenRejection, isRetryable, RpcError } from '../core/rpc-error';
@@ -89,6 +99,60 @@ import type { AttachRef, AgentTeam, EventRecord, PromptPart, SessionAddress, Ses
  * 少了一个数量级的重渲染。具体取舍见 emit() 的注释。
  */
 const EMIT_THROTTLE_MS = 60;
+export const REBUILD_BATCH_MS = 60;
+
+/**
+ * 判断流事件是否属于必须 0ms 立即刷新的关键状态事件（F-03）：
+ *   - user/message：P0-1 PendingSend 对账确认（accepted → confirmed）不得延迟；
+ *   - turn/start / turn/end：回合开始与结束状态、最终回答落定不得延迟；
+ *   - approval/asked / approval/decided：F-01 审批安全状态不得延迟；
+ *   - deliverables/presented：交付文件卡片即时展示。
+ * 其余高频中间事件（step/start、assistant/message 流式片段、tool/call、tool/result）
+ * 进入 60ms 批量合并窗口，避免每收到一个流事件都全量 rebuild。
+ */
+export function isCriticalStreamEvent(eventType?: string): boolean {
+  return (
+    eventType === 'user/message' ||
+    eventType === 'turn/start' ||
+    eventType === 'turn/end' ||
+    eventType === 'approval/asked' ||
+    eventType === 'approval/decided' ||
+    eventType === 'deliverables/presented'
+  );
+}
+
+/**
+ * 从快照或会话列表行提取服务端权威运行状态（F-03）：
+ * 用于修正断线恢复后因缺失 turn/end 事件而可能残留的「进行中」状态。
+ */
+export function extractAuthoritativeRunning(
+  snapshot?: unknown,
+  summary?: { running?: boolean },
+): boolean | undefined {
+  if (snapshot && typeof snapshot === 'object') {
+    const snap = snapshot as Record<string, unknown>;
+    if (typeof snap.running === 'boolean') return snap.running;
+    const proj = snap.projections as { values?: Record<string, unknown> } | undefined;
+    const values = proj?.values;
+    if (values && typeof values === 'object') {
+      if (typeof values.running === 'boolean') return values.running;
+      const st = values.status;
+      if (typeof st === 'string') {
+        if (st === 'idle' || st === 'completed' || st === 'stopped' || st === 'aborted') {
+          return false;
+        }
+        if (st === 'running' || st === 'in_progress') return true;
+      } else if (st && typeof st === 'object') {
+        const stObj = st as Record<string, unknown>;
+        if (typeof stObj.running === 'boolean') return stObj.running;
+      }
+    }
+  }
+  if (summary && typeof summary.running === 'boolean') {
+    return summary.running;
+  }
+  return undefined;
+}
 
 function withTimeout<T>(p: Promise<T>, ms: number): Promise<T> {
   return Promise.race([
@@ -279,6 +343,13 @@ export class Store {
       handle?: StreamHandle;
       cursor: number;
       records: Map<number, EventRecord>;
+      sortedRecords: EventRecord[];
+      maxSeq: number;
+      recordsNeedSort: boolean;
+      foldCache: IncrementalFoldCache;
+      rebuildTimer?: ReturnType<typeof setTimeout>;
+      rebuildPending: boolean;
+      authoritativeRunning?: boolean;
       snapshot: unknown;
       address?: SessionAddress;
       generation: number;
@@ -505,8 +576,25 @@ export class Store {
         }
       }
 
+      const entry = this.streams.get(sessionId);
+      if (entry && typeof row?.running === 'boolean') {
+        entry.authoritativeRunning = row.running;
+      }
+      const nextRunning =
+        typeof row?.running === 'boolean' ? row.running : cur.running;
+      let nextTurns = cur.turns;
+      if (nextRunning === false && cur.turns.length > 0) {
+        const lastTurn = cur.turns[cur.turns.length - 1]!;
+        if (lastTurn.running) {
+          nextTurns = cur.turns.slice();
+          nextTurns[nextTurns.length - 1] = { ...lastTurn, running: false };
+        }
+      }
+
       this.chats.set(sessionId, {
         ...cur,
+        turns: nextTurns,
+        running: nextRunning,
         title: status.title ?? cur.title,
         contextUsed: status.contextUsed,
         contextWindow: status.contextWindow,
@@ -1118,6 +1206,16 @@ export class Store {
     this.emitPending = true;
   }
 
+  /** 立刻同步通知所有订阅者（用于关键安全/完成状态，不经过 60ms 延迟） */
+  private emitImmediate(): void {
+    if (this.emitTimer !== null) {
+      clearTimeout(this.emitTimer);
+      this.emitTimer = null;
+    }
+    this.emitPending = false;
+    this.flushEmit();
+  }
+
   /** 立刻同步通知所有订阅者 */
   private flushEmit(): void {
     for (const fn of this.listeners) {
@@ -1293,6 +1391,7 @@ export class Store {
       this.sessions = items;
       this.workspaces = groupByWorkspace(this.visibleSessions(items));
       this.sessionsError = undefined;
+      this.syncAuthoritativeRunningFromList(items);
     } catch (e) {
       if (isAuthFailure(e) || isForbiddenRejection(e)) {
         this.markAuthTerminal(e);
@@ -1402,8 +1501,43 @@ export class Store {
     return [...this.archived];
   }
 
+  /**
+   * 用 session/list 返回的服务端权威 running 状态修正所有已打开会话的残留「进行中」状态（F-03）。
+   */
+  private syncAuthoritativeRunningFromList(items: readonly SessionSummary[]): void {
+    for (const row of items) {
+      if (typeof row?.running !== 'boolean') continue;
+      const entry = this.streams.get(row.sessionId);
+      if (entry) {
+        entry.authoritativeRunning = row.running;
+      }
+      const cur = this.chats.get(row.sessionId);
+      if (!cur) continue;
+      if (row.running === false && cur.running) {
+        let nextTurns = cur.turns;
+        if (cur.turns.length > 0) {
+          const last = cur.turns[cur.turns.length - 1]!;
+          if (last.running) {
+            nextTurns = cur.turns.slice();
+            nextTurns[nextTurns.length - 1] = { ...last, running: false };
+          }
+        }
+        this.chats.set(row.sessionId, { ...cur, turns: nextTurns, running: false });
+      }
+    }
+  }
+
   // ── 对话 ──────────────────────────────────────────────────────────
   getChat(sessionId: string): ChatState {
+    const entry = this.streams.get(sessionId);
+    if (entry?.rebuildPending) {
+      if (entry.rebuildTimer) {
+        clearTimeout(entry.rebuildTimer);
+        entry.rebuildTimer = undefined;
+      }
+      entry.rebuildPending = false;
+      this.rebuild(sessionId, {}, { silentEmit: true });
+    }
     return this.chats.get(sessionId) ?? { sessionId, ...EMPTY_CHAT };
   }
 
@@ -1448,6 +1582,11 @@ export class Store {
     this.streams.set(sessionId, {
       cursor: -1,
       records: new Map<number, EventRecord>(),
+      sortedRecords: [],
+      maxSeq: -1,
+      recordsNeedSort: false,
+      foldCache: createIncrementalFoldCache(),
+      rebuildPending: false,
       snapshot: undefined,
       address,
       generation,
@@ -1505,7 +1644,7 @@ export class Store {
       for (const r of snapshot.records ?? []) {
         const seq = r?.event?.seq;
         if (typeof seq === 'number') {
-          entry.records.set(seq, r);
+          this.upsertStreamRecord(entry, seq, r);
           if (seq < minNewSnapSeq) minNewSnapSeq = seq;
         }
       }
@@ -1535,6 +1674,13 @@ export class Store {
       }
 
       const status = readStatus(snapshot.projections);
+      const authRunning = extractAuthoritativeRunning(
+        snapshot,
+        isReconnect ? undefined : this.sessions.find((s) => s.sessionId === sessionId),
+      );
+      if (typeof authRunning === 'boolean') {
+        entry.authoritativeRunning = authRunning;
+      }
       this.authInvalidated = false;
       this.connection = 'connected';
       this.connectionError = undefined;
@@ -1554,7 +1700,13 @@ export class Store {
         error: undefined,
       });
       // 首帧 records 也要 fold 一次，否则界面是空的
-      this.rebuild(sessionId, { error: undefined });
+      this.rebuild(sessionId, { error: undefined }, { immediateEmit: true });
+
+      // 断线重连后若因缺少 turn/end 仍处于 running，且快照本身未携带权威 running 字段，
+      // 主动拉一次 session/list 同步服务端权威 running 状态，防止永久残留「进行中」。
+      if (isReconnect && authRunning === undefined && this.chats.get(sessionId)?.running) {
+        void this.refreshChatMeta(sessionId);
+      }
 
       // 异步补更早的历史（仅首次且 hasMore 时触发，避免重连反复拉全量旧历史）
       if (!isReconnect && snapshot.hasMore) {
@@ -1602,7 +1754,7 @@ export class Store {
         for (const r of recs) {
           const seq = r?.event?.seq;
           if (typeof seq === 'number') {
-            entry.records.set(seq, r);
+            this.upsertStreamRecord(entry, seq, r);
             if (seq < earliest) earliest = seq;
           }
         }
@@ -1723,12 +1875,31 @@ export class Store {
         }
         const seq = rec.event?.seq;
         if (typeof seq !== 'number') continue;
-        entry.records.set(seq, rec);
+        const evType = rec.event?.type;
+        if (
+          evType === 'turn/start' ||
+          evType === 'step/start' ||
+          evType === 'assistant/message' ||
+          evType === 'tool/call'
+        ) {
+          entry.authoritativeRunning = true;
+        } else if (evType === 'turn/end') {
+          entry.authoritativeRunning = false;
+        }
+        this.upsertStreamRecord(entry, seq, rec);
         if (seq > entry.cursor) entry.cursor = seq;
-        this.rebuild(sessionId);
+        this.scheduleRebuild(sessionId, { immediate: isCriticalStreamEvent(evType) });
       }
     } catch (e) {
       if (this.streams.get(sessionId) !== entry || entry.generation !== generation) return;
+      if (entry.rebuildPending) {
+        if (entry.rebuildTimer) {
+          clearTimeout(entry.rebuildTimer);
+          entry.rebuildTimer = undefined;
+        }
+        entry.rebuildPending = false;
+        this.rebuild(sessionId, {}, { silentEmit: true });
+      }
       this.handleStreamDisconnect(sessionId, entry, generation, e);
     }
   }
@@ -1753,9 +1924,9 @@ export class Store {
         maxMessages: batch,
       });
       for (const r of page.records ?? []) {
-        if (r?.event?.seq !== undefined) entry.records.set(r.event.seq, r);
+        if (r?.event?.seq !== undefined) this.upsertStreamRecord(entry, r.event.seq, r);
       }
-      this.rebuild(sessionId, { hasOlder: page.hasMore, loadingOlder: false });
+      this.rebuild(sessionId, { hasOlder: page.hasMore, loadingOlder: false }, { immediateEmit: true });
     } catch (e) {
       const c = this.getChat(sessionId);
       this.chats.set(sessionId, {
@@ -1773,30 +1944,90 @@ export class Store {
     this.emit();
   }
 
-  /** 用当前全部记录重新 fold */
-  private rebuild(sessionId: string, patch: Partial<ChatState> = {}): void {
+  private upsertStreamRecord(
+    entry: NonNullable<ReturnType<typeof this.streams.get>>,
+    seq: number,
+    rec: EventRecord,
+  ): void {
+    const existed = entry.records.has(seq);
+    entry.records.set(seq, rec);
+    if (!existed && seq > entry.maxSeq && !entry.recordsNeedSort) {
+      entry.sortedRecords.push(rec);
+      entry.maxSeq = seq;
+    } else {
+      entry.recordsNeedSort = true;
+      if (seq > entry.maxSeq) entry.maxSeq = seq;
+    }
+  }
+
+  /**
+   * 调度会话折叠重建（F-03）：
+   *   - 关键状态事件（immediate = true）：立即执行 rebuild 并同步 flushEmit（0ms 延迟）；
+   *   - 高频中间流事件（immediate = false）：在 60ms 窗口内批量合并，窗口结束时只执行一次 rebuild。
+   */
+  private scheduleRebuild(sessionId: string, opts?: { immediate?: boolean }): void {
     const entry = this.streams.get(sessionId);
-    const cur = this.getChat(sessionId);
-    if (!entry) {
-      this.chats.set(sessionId, { ...cur, ...patch });
-      this.emit();
+    if (!entry) return;
+    if (opts?.immediate) {
+      if (entry.rebuildTimer) {
+        clearTimeout(entry.rebuildTimer);
+        entry.rebuildTimer = undefined;
+      }
+      entry.rebuildPending = false;
+      this.rebuild(sessionId, {}, { immediateEmit: true });
       return;
     }
-    const records = [...entry.records.values()].sort(
-      (a, b) => (a.event?.seq ?? 0) - (b.event?.seq ?? 0),
-    );
-    const turns = foldEvents(records);
-    const items = toChatItems(turns);
+
+    entry.rebuildPending = true;
+    if (entry.rebuildTimer) return;
+    entry.rebuildTimer = setTimeout(() => {
+      entry.rebuildTimer = undefined;
+      if (!entry.rebuildPending || this.streams.get(sessionId) !== entry) return;
+      entry.rebuildPending = false;
+      this.rebuild(sessionId, {}, { immediateEmit: true });
+    }, REBUILD_BATCH_MS);
+  }
+
+  /** 用当前记录（优先走增量尾轮折叠与历史引用复用）更新会话视图状态 */
+  private rebuild(
+    sessionId: string,
+    patch: Partial<ChatState> = {},
+    opts?: { immediateEmit?: boolean; silentEmit?: boolean },
+  ): void {
+    const entry = this.streams.get(sessionId);
+    const cur = this.chats.get(sessionId) ?? { sessionId, ...EMPTY_CHAT };
+    if (!entry) {
+      this.chats.set(sessionId, { ...cur, ...patch });
+      if (!opts?.silentEmit) {
+        if (opts?.immediateEmit) this.emitImmediate();
+        else this.emit();
+      }
+      return;
+    }
+    if (entry.recordsNeedSort) {
+      entry.sortedRecords = [...entry.records.values()].sort(
+        (a, b) => (a.event?.seq ?? 0) - (b.event?.seq ?? 0),
+      );
+      entry.recordsNeedSort = false;
+    }
+    const { turns, items } = foldEventsIncremental(entry.sortedRecords, entry.foldCache, {
+      authoritativeRunning: entry.authoritativeRunning,
+    });
     const last = turns[turns.length - 1];
+    const running =
+      entry.authoritativeRunning === false ? false : (last?.running ?? false);
     this.chats.set(sessionId, {
       ...cur,
       ...patch,
       turns,
       items,
-      running: last?.running ?? false,
+      running,
       loading: false,
     });
-    this.emit();
+    if (!opts?.silentEmit) {
+      if (opts?.immediateEmit) this.emitImmediate();
+      else this.emit();
+    }
     void this.reconcilePendingNow(sessionId);
   }
 
@@ -2280,6 +2511,11 @@ export class Store {
     const entry = this.streams.get(sessionId);
     if (!entry) return;
     entry.generation = ++this.streamGenerationCounter;
+    if (entry.rebuildTimer) {
+      clearTimeout(entry.rebuildTimer);
+      entry.rebuildTimer = undefined;
+    }
+    entry.rebuildPending = false;
     if (entry.retryTimer) {
       clearTimeout(entry.retryTimer);
       entry.retryTimer = undefined;

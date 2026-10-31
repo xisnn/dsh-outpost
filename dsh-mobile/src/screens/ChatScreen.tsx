@@ -45,7 +45,7 @@ import {
 } from '../core/scrollFollow';
 import { buildAssistantCopyText } from '../core/copyText';
 import { draftStore, MAX_DRAFT_CHARS } from '../core/draftStore';
-import { buildWorkGroupMap } from '../core/workGroup';
+import { buildWorkGroupMap, type WorkGroupView } from '../core/workGroup';
 import { WorkGroupCard } from '../components/WorkGroupCard';
 import { AssistantRichText } from '../components/AssistantRichText';
 import { TeamBar } from '../components/TeamBar';
@@ -90,6 +90,119 @@ interface Draft {
   size?: number;
   mime?: string;
 }
+
+interface ChatItemRowProps {
+  item: ChatItem;
+  group?: WorkGroupView;
+  turnRunning: boolean;
+  doneTaskCount: number;
+  sessionId: string;
+  uploadApi: ReturnType<typeof useApp>['store']['upload'];
+  openMessageActions: (text: string) => void;
+  renderBlocks: (
+    blocks: Block[],
+    keyPrefix: string,
+    opts?: { onLongPressText?: () => void; turnRunning?: boolean },
+  ) => React.ReactNode;
+  dividerStyle: object;
+  dividerLineStyle: object;
+  dividerTextStyle: object;
+}
+
+export function areChatItemRowPropsEqual(prev: ChatItemRowProps, next: ChatItemRowProps): boolean {
+  return (
+    prev.item === next.item &&
+    prev.group === next.group &&
+    prev.turnRunning === next.turnRunning &&
+    prev.doneTaskCount === next.doneTaskCount &&
+    prev.sessionId === next.sessionId &&
+    prev.uploadApi === next.uploadApi &&
+    prev.openMessageActions === next.openMessageActions &&
+    prev.renderBlocks === next.renderBlocks
+  );
+}
+
+/**
+ * F-03 聊天列表项组件（React.memo）：
+ * 当已完成的历史轮次保持相同 ChatItem 与 WorkGroupView 引用时，跳过整行重渲染。
+ */
+const ChatItemRow = React.memo(function ChatItemRow({
+  item,
+  group,
+  turnRunning,
+  doneTaskCount,
+  sessionId,
+  uploadApi,
+  openMessageActions,
+  renderBlocks,
+  dividerStyle,
+  dividerLineStyle,
+  dividerTextStyle,
+}: ChatItemRowProps) {
+  if (item.kind === 'user') {
+    return (
+      <UserBubble
+        text={item.text}
+        time={item.time}
+        parts={item.parts}
+        sessionId={sessionId}
+        api={uploadApi}
+        onLongPress={openMessageActions}
+      />
+    );
+  }
+  if (item.kind === 'divider') {
+    return (
+      <View style={dividerStyle}>
+        <View style={dividerLineStyle} />
+        <Text style={dividerTextStyle}>
+          {item.reason === 'aborted' ? '已打断' : item.reason ?? '中断'}
+        </Text>
+        <View style={dividerLineStyle} />
+      </View>
+    );
+  }
+  if (item.kind === 'teammate') {
+    return <TeammateNote from={item.from} text={item.text} notice={item.notice} />;
+  }
+  if (group) {
+    const finalText = buildAssistantCopyText(group.finalBlocks);
+    return (
+      <View>
+        <WorkGroupCard group={group} sessionId={sessionId} />
+        {group.finalBlocks.length > 0 ? (
+          <View>
+            {renderBlocks(group.finalBlocks, `${item.key}-final`, {
+              onLongPressText: finalText ? () => openMessageActions(finalText) : undefined,
+              turnRunning,
+            })}
+          </View>
+        ) : null}
+      </View>
+    );
+  }
+  // 派过活的那一轮：管家的汇总默认折叠，点开才看
+  // （闲聊回复 delegated 为 false，直接显示，不打扰用户）
+  const bodyText = buildAssistantCopyText(item.blocks);
+  if (item.delegated) {
+    return (
+      <CompletionNotice taskCount={doneTaskCount}>
+        {renderBlocks(item.blocks, item.key, {
+          onLongPressText: bodyText ? () => openMessageActions(bodyText) : undefined,
+          turnRunning,
+        })}
+      </CompletionNotice>
+    );
+  }
+  return (
+    <View>
+      {renderBlocks(item.blocks, item.key, {
+        onLongPressText: bodyText ? () => openMessageActions(bodyText) : undefined,
+        turnRunning,
+      })}
+    </View>
+  );
+}, areChatItemRowPropsEqual);
 
 export function ChatScreen({
   sessionId,
@@ -484,16 +597,49 @@ export function ChatScreen({
     [retryingPendingId, sessionId, store],
   );
 
-  const renderBlocks = (
-    blocks: Block[],
-    keyPrefix: string,
-    opts?: { onLongPressText?: () => void },
-  ) => {
-    const nodes = blocks.map((b, i) => {
-      // 管家页只显示「人话」：工具调用留给队员事件流。
-      // 但思考过程要留 —— 它在生成时可见，能明显减轻「干等着」的焦虑；
-      // 跑完就自动收起成一行，不占地方。
-      if (butler) {
+  const renderBlocks = useCallback(
+    (
+      blocks: Block[],
+      keyPrefix: string,
+      opts?: { onLongPressText?: () => void; turnRunning?: boolean },
+    ) => {
+      const isTurnLive = opts?.turnRunning ?? false;
+      const nodes = blocks.map((b, i) => {
+        // 管家页只显示「人话」：工具调用留给队员事件流。
+        // 但思考过程要留 —— 它在生成时可见，能明显减轻「干等着」的焦虑；
+        // 跑完就自动收起成一行，不占地方。
+        if (butler) {
+          if (b.kind === 'text') {
+            return (
+              <AssistantText
+                key={`${keyPrefix}-t${i}`}
+                text={b.text}
+                sessionId={sessionId}
+                onLongPress={opts?.onLongPressText}
+              />
+            );
+          }
+          if (b.kind === 'reasoning') {
+            const isLive = i === blocks.length - 1 && isTurnLive;
+            return (
+              <ButlerThinking key={`${keyPrefix}-r${i}`} text={b.text} live={isLive} />
+            );
+          }
+          // 交付物：管家 present 出来的图片/文件，渲染成可点开的卡片
+          if (b.kind === 'file') {
+            return (
+              <View key={`${keyPrefix}-f${i}`} style={styles.fileBlockWrap}>
+                <FileCard
+                  path={b.path}
+                  alt={b.description}
+                  image={isImagePath(b.path)}
+                  sessionId={sessionId}
+                />
+              </View>
+            );
+          }
+          return null;
+        }
         if (b.kind === 'text') {
           return (
             <AssistantText
@@ -505,12 +651,9 @@ export function ChatScreen({
           );
         }
         if (b.kind === 'reasoning') {
-          const isLive = i === blocks.length - 1 && chat.running;
-          return (
-            <ButlerThinking key={`${keyPrefix}-r${i}`} text={b.text} live={isLive} />
-          );
+          const isLive = i === blocks.length - 1 && isTurnLive;
+          return <ThinkingAccordion key={`${keyPrefix}-r${i}`} text={b.text} done={!isLive} />;
         }
-        // 交付物：管家 present 出来的图片/文件，渲染成可点开的卡片
         if (b.kind === 'file') {
           return (
             <View key={`${keyPrefix}-f${i}`} style={styles.fileBlockWrap}>
@@ -523,39 +666,13 @@ export function ChatScreen({
             </View>
           );
         }
-        return null;
-      }
-      if (b.kind === 'text') {
-        return (
-          <AssistantText
-            key={`${keyPrefix}-t${i}`}
-            text={b.text}
-            sessionId={sessionId}
-            onLongPress={opts?.onLongPressText}
-          />
-        );
-      }
-      if (b.kind === 'reasoning') {
-        const isLive = i === blocks.length - 1 && chat.running;
-        return <ThinkingAccordion key={`${keyPrefix}-r${i}`} text={b.text} done={!isLive} />;
-      }
-      if (b.kind === 'file') {
-        return (
-          <View key={`${keyPrefix}-f${i}`} style={styles.fileBlockWrap}>
-            <FileCard
-              path={b.path}
-              alt={b.description}
-              image={isImagePath(b.path)}
-              sessionId={sessionId}
-            />
-          </View>
-        );
-      }
-      return <ToolCard key={`${keyPrefix}-c${i}`} block={b} />;
-    });
+        return <ToolCard key={`${keyPrefix}-c${i}`} block={b} />;
+      });
 
-    return nodes;
-  };
+      return nodes;
+    },
+    [butler, sessionId, styles.fileBlockWrap],
+  );
 
   // 空会话 = 还没有任何轮次、也没有内容；这种会话连不上属于正常（follow 流可能还没就绪）
   const isBlankChat = chat.turns.length === 0 && chat.items.length === 0;
@@ -596,6 +713,11 @@ export function ChatScreen({
     }
     return map;
   }, [chat.items]);
+  const completedTaskCount = useMemo(
+    () => (chat.agentTeam?.tasks ?? []).filter((t) => t.status === 'completed').length,
+    [chat.agentTeam?.tasks],
+  );
+  const lastTurnNo = chat.turns.length > 0 ? chat.turns[chat.turns.length - 1]!.turn : -1;
 
   // 审批网关的连/断已经上移到 App 级（见 App.tsx 的 GlobalNotices）。
   //
@@ -813,74 +935,24 @@ export function ChatScreen({
             </>
           }
           renderItem={({ item }: { item: ChatItem }) => {
-            if (item.kind === 'user') {
-              return (
-                <UserBubble
-                  text={item.text}
-                  time={item.time}
-                  parts={item.parts}
-                  sessionId={sessionId}
-                  api={store.upload}
-                  onLongPress={openMessageActions}
-                />
-              );
-            }
-            if (item.kind === 'divider') {
-              return (
-                <View style={styles.divider}>
-                  <View style={styles.dividerLine} />
-                  <Text style={styles.dividerText}>
-                    {item.reason === 'aborted' ? '已打断' : item.reason ?? '中断'}
-                  </Text>
-                  <View style={styles.dividerLine} />
-                </View>
-              );
-            }
-            if (item.kind === 'teammate') {
-              return <TeammateNote from={item.from} text={item.text} notice={item.notice} />;
-            }
             // F-02：执行过程组（思考 + 工具）默认折叠；最终回答单独渲染在组外。
             // 管家模式（butler）不启用：它本来就把工具藏在队员事件流里。
-            const group = !butler && !item.delegated ? workGroups.get(item.turn) : undefined;
-            if (group) {
-              if (firstAssistantKey.get(item.turn) !== item.key) return null;
-              const finalText = buildAssistantCopyText(group.finalBlocks);
-              return (
-                <View>
-                  <WorkGroupCard group={group} sessionId={sessionId} />
-                  {group.finalBlocks.length > 0 ? (
-                    <View>
-                      {renderBlocks(group.finalBlocks, `${item.key}-final`, {
-                        onLongPressText: finalText
-                          ? () => openMessageActions(finalText)
-                          : undefined,
-                      })}
-                    </View>
-                  ) : null}
-                </View>
-              );
-            }
-            // 派过活的那一轮：管家的汇总默认折叠，点开才看
-            // （闲聊回复 delegated 为 false，直接显示，不打扰用户）
-            const bodyText = buildAssistantCopyText(item.blocks);
-            if (item.delegated) {
-              const doneCount = (chat.agentTeam?.tasks ?? []).filter(
-                (t) => t.status === 'completed',
-              ).length;
-              return (
-                <CompletionNotice taskCount={doneCount}>
-                  {renderBlocks(item.blocks, item.key, {
-                    onLongPressText: bodyText ? () => openMessageActions(bodyText) : undefined,
-                  })}
-                </CompletionNotice>
-              );
-            }
+            const group = item.kind === 'assistant' && !butler && !item.delegated ? workGroups.get(item.turn) : undefined;
+            if (group && firstAssistantKey.get(item.turn) !== item.key) return null;
             return (
-              <View>
-                {renderBlocks(item.blocks, item.key, {
-                  onLongPressText: bodyText ? () => openMessageActions(bodyText) : undefined,
-                })}
-              </View>
+              <ChatItemRow
+                item={item}
+                group={group}
+                turnRunning={chat.running && item.turn === lastTurnNo}
+                doneTaskCount={item.kind === 'assistant' && item.delegated ? completedTaskCount : 0}
+                sessionId={sessionId}
+                uploadApi={store.upload}
+                openMessageActions={openMessageActions}
+                renderBlocks={renderBlocks}
+                dividerStyle={styles.divider}
+                dividerLineStyle={styles.dividerLine}
+                dividerTextStyle={styles.dividerText}
+              />
             );
           }}
         />
