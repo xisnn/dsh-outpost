@@ -783,6 +783,8 @@ export class Store {
   pendingApprovals: PendingApproval[] = [];
   /** 服务端 approval-resolved 权威确认集合；不能由本地 pendingApprovals 缺失反推 */
   readonly resolvedApprovalIds = new Set<string>();
+  /** 服务端最近一次权威下发/重放（approval-requested）每条 rpcId 的时间戳，用于断线重连后解除「结果未知」锁定 */
+  readonly authoritativeApprovalAt = new Map<string, number>();
   /** 网关连接状态 */
   gatewayStatus: GatewayStatus = 'idle';
   /** 网关不可用时的原因（用于 UI 提示） */
@@ -851,6 +853,12 @@ export class Store {
           this.emit();
         },
         onApproval: (a) => {
+          // 记录服务端权威下发/重放该待审批的最新时间（重连后服务端重放未决项可据此解除「结果未知」锁定）
+          this.authoritativeApprovalAt.set(a.rpcId, Date.now());
+          if (this.authoritativeApprovalAt.size > 200) {
+            const oldestKey = this.authoritativeApprovalAt.keys().next().value;
+            if (oldestKey) this.authoritativeApprovalAt.delete(oldestKey);
+          }
           // 按 rpcId 去重：重连时服务端会重放未决审批
           if (!this.pendingApprovals.some((p) => p.rpcId === a.rpcId)) {
             this.pendingApprovals = [...this.pendingApprovals, a];

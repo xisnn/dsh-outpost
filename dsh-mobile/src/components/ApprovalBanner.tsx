@@ -40,6 +40,7 @@ export function ApprovalBanner({
   gatewayOnline = false,
   authInvalidated = false,
   serverResolvedIds,
+  authoritativePendingAt,
   sessions = [],
   onAnswer,
   onOpenSession,
@@ -52,6 +53,8 @@ export function ApprovalBanner({
   authInvalidated?: boolean | 'forbidden';
   /** 服务端 approval-resolved 权威确认集合（Store.onResolved 写入） */
   serverResolvedIds?: ReadonlySet<string>;
+  /** 服务端最近一次权威下发/重放每条 rpcId 的时间戳 */
+  authoritativePendingAt?: ReadonlyMap<string, number>;
   sessions?: readonly SessionTitleLike[];
   onAnswer?: (a: ReadonlyApproval, outcome: ApprovalDecision) => boolean | void;
   onOpenSession?: (sessionId: string, title: string) => void;
@@ -69,8 +72,15 @@ export function ApprovalBanner({
     gatewayOnline,
     authInvalidated,
     serverResolvedIds,
+    authoritativePendingAt,
   });
-  latestStateRef.current = { approvals, gatewayOnline, authInvalidated, serverResolvedIds };
+  latestStateRef.current = {
+    approvals,
+    gatewayOnline,
+    authInvalidated,
+    serverResolvedIds,
+    authoritativePendingAt,
+  };
 
   const serverPendingIds = useMemo(
     () => new Set(approvals.map((a) => a.id)),
@@ -84,9 +94,10 @@ export function ApprovalBanner({
       gatewayOnline: gatewayOnline && !authInvalidated,
       authInvalidated,
       serverResolvedIds,
+      authoritativePendingAt,
     });
     if (changed) bump((n) => n + 1);
-  }, [controller, serverPendingIds, serverResolvedIds, gatewayOnline, authInvalidated]);
+  }, [controller, serverPendingIds, serverResolvedIds, authoritativePendingAt, gatewayOnline, authInvalidated]);
 
   // 严格按 sessionId 拆分当前会话与其他会话
   const partitioned = partitionApprovalsBySession(approvals, sessionId, {
@@ -109,6 +120,8 @@ export function ApprovalBanner({
   const canAnswer = isCurrentAnswerable && gatewayOnline && !authInvalidated && !!onAnswer;
   /** 当前条目来源不明（缺少 sessionId）时仅展示，不提供任何审批操作 */
   const unknownSession = current ? unknownApprovalIds.has(current.id) : false;
+  /** 当前条目已发出响应但结果未知（超时或中途断线未收到权威确认）：禁止盲目再次提交 */
+  const isCurrentUnconfirmed = current ? controller.isUnconfirmed(current.id) : false;
 
   // 高危二次确认倒计时到期后自动复位按钮文案
   const armed = current ? controller.isArmed(current.id) : false;
@@ -149,6 +162,7 @@ export function ApprovalBanner({
           gatewayOnline: latest.gatewayOnline && !latest.authInvalidated,
           authInvalidated: latest.authInvalidated,
           serverResolvedIds: latest.serverResolvedIds,
+          authoritativePendingAt: latest.authoritativePendingAt,
         });
         if (rolledBack) bump((n) => n + 1);
       }, APPROVAL_COMMIT_TIMEOUT_MS + 50);
@@ -347,7 +361,7 @@ export function ApprovalBanner({
             ) : null}
 
             {/* 操作区 */}
-            {canAnswer && !unknownSession ? (
+            {canAnswer && !unknownSession && !isCurrentUnconfirmed ? (
               <View style={styles.actions}>
                 <Pressable
                   onPress={() => press('rejected')}
@@ -380,6 +394,8 @@ export function ApprovalBanner({
               <Text style={styles.help}>
                 {unknownSession
                   ? '来源不明，已禁用审批操作。请到电脑上核对请求来源后再处理。'
+                  : isCurrentUnconfirmed
+                    ? '审批响应已发出但当前结果未知。为防止重复审批或重复执行，已禁止盲目再次允许，正在等待服务端权威状态确认。'
                   : !isCurrentAnswerable
                     ? '这条请求来自会话记录，无法在手机上回答。到电脑上确认，或把权限模式调成「完全访问」。'
                     : authInvalidated === 'forbidden'

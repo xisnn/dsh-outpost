@@ -1012,6 +1012,19 @@ export class ApprovalGateway {
 
     if (kind === 'approval-resolved') {
       this.events.onResolved?.(String(frame.rpcId ?? ''), String(frame.outcome ?? ''));
+      return;
+    }
+
+    if (kind === 'approval-response') {
+      // 真实 dsh-plugin-mobile-gateway 对每次 approval-response 都会回推一条同名确认帧：
+      //   - accepted === true：服务端已受理并完成该次审批（即使广播的 approval-resolved 丢失也可据此权威确认）；
+      //   - accepted === false && reason === 'not-pending'：服务端权威告知该 rpcId 已不再处于待审批状态（已被处理或取消）。
+      if (frame.accepted === true || frame.reason === 'not-pending') {
+        this.events.onResolved?.(
+          String(frame.rpcId ?? ''),
+          String(frame.outcome ?? 'resolved'),
+        );
+      }
     }
   }
 

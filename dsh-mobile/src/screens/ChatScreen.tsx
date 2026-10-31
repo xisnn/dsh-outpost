@@ -924,6 +924,7 @@ export function ChatScreen({
                 : false
             }
             serverResolvedIds={store.resolvedApprovalIds}
+            authoritativePendingAt={store.authoritativeApprovalAt}
             sessions={store.sessions}
             onAnswer={(a, outcome) => {
               const hit = (store.pendingApprovals ?? []).find((p) => p.rpcId === a.id);

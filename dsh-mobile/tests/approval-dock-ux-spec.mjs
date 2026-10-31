@@ -383,7 +383,7 @@ check('403（Host 未受信任）与 401（Cookie 失效）保持不同诊断语
     : JSON.stringify({ err403, err401 });
 });
 
-check('提交后若中途断线或发生 401/403，reconcile 立即回滚恢复待审批并记录错误', () => {
+check('提交后若中途断线或发生 401/403，reconcile 转入「结果未知（unconfirmed）」并锁定盲目重复提交', () => {
   const ctrl = new ApprovalSubmitController();
   const item1 = { id: 'rpc-mid-drop', sessionId: 'sess-A', toolName: 'read', reason: 'a.ts' };
   const item2 = { id: 'rpc-mid-401', sessionId: 'sess-A', toolName: 'read', reason: 'b.ts' };
@@ -393,6 +393,17 @@ check('提交后若中途断线或发生 401/403，reconcile 立即回滚恢复�
     serverPendingIds: new Set(['rpc-mid-drop']),
     gatewayOnline: false,
     now: 1500,
+  });
+  let retryCalls = 0;
+  const blockedRetry = ctrl.submit({
+    approval: item1,
+    outcome: 'allowed-once',
+    gatewayOnline: true,
+    now: 1600,
+    send: () => {
+      retryCalls += 1;
+      return true;
+    },
   });
 
   ctrl.submit({ approval: item2, outcome: 'allowed-once', gatewayOnline: true, now: 2000, send: () => true });
@@ -405,18 +416,32 @@ check('提交后若中途断线或发生 401/403，reconcile 立即回滚恢复�
 
   return changedDrop &&
     !ctrl.inFlightIds.has('rpc-mid-drop') &&
-    /断开/.test(ctrl.errorFor('rpc-mid-drop') ?? '') &&
+    ctrl.isUnconfirmed('rpc-mid-drop') &&
+    blockedRetry.status === 'unconfirmed' &&
+    retryCalls === 0 &&
+    /结果未知/.test(ctrl.errorFor('rpc-mid-drop') ?? '') &&
     changed401 &&
     !ctrl.inFlightIds.has('rpc-mid-401') &&
+    ctrl.isUnconfirmed('rpc-mid-401') &&
     /401/.test(ctrl.errorFor('rpc-mid-401') ?? '')
     ? true
-    : '中途断线或 401 未回滚恢复待审批';
+    : '中途断线或 401 未转入结果未知锁定状态';
 });
 
-check('提交后若超过超时时间服务端仍未确认，reconcile 自动回滚恢复待审批并提示超时', () => {
+check('提交后若超过超时时间服务端仍未确认，reconcile 转入「结果未知（unconfirmed）」并禁止盲目再次允许，直到权威状态确认', () => {
   const ctrl = new ApprovalSubmitController({ commitTimeoutMs: 8000 });
   const item = { id: 'rpc-timeout', sessionId: 'sess-A', toolName: 'read', reason: 'c.ts' };
-  ctrl.submit({ approval: item, outcome: 'allowed-once', gatewayOnline: true, now: 1000, send: () => true });
+  let sendCalls = 0;
+  ctrl.submit({
+    approval: item,
+    outcome: 'allowed-once',
+    gatewayOnline: true,
+    now: 1000,
+    send: () => {
+      sendCalls += 1;
+      return true;
+    },
+  });
 
   const beforeTimeout = ctrl.reconcile({
     serverPendingIds: new Set(['rpc-timeout']),
@@ -428,13 +453,78 @@ check('提交后若超过超时时间服务端仍未确认，reconcile 自动回
     gatewayOnline: true,
     now: 1000 + APPROVAL_COMMIT_TIMEOUT_MS + 1,
   });
+  // 超时后盲目再次点击必须被拦截为 unconfirmed，不能再次调用 send()
+  const blindRetry = ctrl.submit({
+    approval: item,
+    outcome: 'allowed-once',
+    gatewayOnline: true,
+    now: 1000 + APPROVAL_COMMIT_TIMEOUT_MS + 100,
+    send: () => {
+      sendCalls += 1;
+      return true;
+    },
+  });
 
   return !beforeTimeout &&
     atTimeout &&
     !ctrl.inFlightIds.has('rpc-timeout') &&
-    /超时/.test(ctrl.errorFor('rpc-timeout') ?? '')
+    ctrl.isUnconfirmed('rpc-timeout') &&
+    blindRetry.status === 'unconfirmed' &&
+    sendCalls === 1 &&
+    /结果未知/.test(ctrl.errorFor('rpc-timeout') ?? '')
     ? true
-    : '超时未自动回滚恢复待审批';
+    : '超时未转入结果未知或未拦截盲目再次允许';
+});
+
+check('结果未知（unconfirmed）在收到迟到权威确认或重连权威重放后可正确收敛', () => {
+  const ctrl = new ApprovalSubmitController({ commitTimeoutMs: 8000 });
+  const itemLate = { id: 'rpc-late', sessionId: 'sess-A', toolName: 'read', reason: 'late.ts' };
+  const itemReplay = { id: 'rpc-replay', sessionId: 'sess-A', toolName: 'read', reason: 'replay.ts' };
+
+  ctrl.submit({ approval: itemLate, outcome: 'allowed-once', gatewayOnline: true, now: 1000, send: () => true });
+  ctrl.submit({ approval: itemReplay, outcome: 'allowed-once', gatewayOnline: true, now: 1000, send: () => true });
+  ctrl.reconcile({
+    serverPendingIds: new Set(['rpc-late', 'rpc-replay']),
+    gatewayOnline: true,
+    now: 9500,
+  });
+
+  // 1) 迟到的 approval-resolved 到达 -> 清除 unconfirmed 与报错
+  const lateCleared = ctrl.reconcile({
+    serverPendingIds: new Set(['rpc-replay']),
+    serverResolvedIds: new Set(['rpc-late']),
+    gatewayOnline: true,
+    now: 9600,
+  });
+
+  // 2) 重连后服务端在 t=9700 (> sentAt=1000) 权威重放 rpc-replay -> 证明服务端尚未执行，解除锁定允许重新提交
+  const replayUnlocked = ctrl.reconcile({
+    serverPendingIds: new Set(['rpc-replay']),
+    authoritativePendingAt: new Map([['rpc-replay', 9700]]),
+    gatewayOnline: true,
+    now: 9750,
+  });
+  let resent = 0;
+  const retryAfterReplay = ctrl.submit({
+    approval: itemReplay,
+    outcome: 'allowed-once',
+    gatewayOnline: true,
+    now: 9800,
+    send: () => {
+      resent += 1;
+      return true;
+    },
+  });
+
+  return lateCleared &&
+    !ctrl.isUnconfirmed('rpc-late') &&
+    ctrl.errorFor('rpc-late') === null &&
+    replayUnlocked &&
+    !ctrl.isUnconfirmed('rpc-replay') &&
+    retryAfterReplay.status === 'sent' &&
+    resent === 1
+    ? true
+    : JSON.stringify({ lateCleared, replayUnlocked, retryAfterReplay, resent });
 });
 
 check('权威 pendingIds 暂时缺失时不再仅凭本地列表缺失认定已处理，保持等待而非误清', () => {
@@ -556,11 +646,12 @@ check('ApprovalBanner 对缺少 sessionId 的来源不明审批明确禁用「�
     : '缺少来源不明审批的安全禁用提示或按钮隐藏逻辑',
 );
 check('ApprovalBanner 8 秒超时回调始终使用 latestStateRef 的最新权威状态对账（不捕获旧值）', () =>
-  /latestStateRef\.current = \{ approvals, gatewayOnline, authInvalidated, serverResolvedIds \}/.test(bannerSrc) &&
+  /latestStateRef\.current = \{[\s\S]{0,160}serverResolvedIds[\s\S]{0,80}authoritativePendingAt/.test(bannerSrc) &&
   /serverPendingIds: new Set\(latest\.approvals\.map/.test(bannerSrc) &&
-  /serverResolvedIds: latest\.serverResolvedIds/.test(bannerSrc)
+  /serverResolvedIds: latest\.serverResolvedIds/.test(bannerSrc) &&
+  /authoritativePendingAt: latest\.authoritativePendingAt/.test(bannerSrc)
     ? true
-    : '超时回调仍捕获旧的 approvals/gatewayOnline/authInvalidated 或未带最新 resolved 信号',
+    : '超时回调仍捕获旧的 approvals/gatewayOnline/authInvalidated 或未带最新 resolved/replay 信号',
 );
 check('ApprovalBanner 对 403（trustedHosts）给出不同于 401 的提示且不要求重新获取 Cookie', () =>
   /authInvalidated === 'forbidden'/.test(bannerSrc) &&

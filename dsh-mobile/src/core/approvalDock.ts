@@ -279,20 +279,24 @@ export type SubmitActionResult =
   | { status: 'armed'; rpcId: string; expiresAt: number }
   | { status: 'sent'; rpcId: string; outcome: ApprovalDecision }
   | { status: 'duplicate'; rpcId: string }
+  | { status: 'unconfirmed'; rpcId: string; error: string }
   | { status: 'failed'; rpcId: string; error: string };
 
 /**
  * 审批提交与回滚状态机（可独立在 Node 单测中验证）：
  *   - 高危操作「允许一次」必须先 arm，有效期内第二次点击才真正发送；
  *   - 同一 `rpcId` 在途期间（`inFlightIds`）拒绝重复点击；
- *   - 断线 / 401 / 403 / `send` 返回 `false` 时，不进入 `inFlightIds`，保持待审批并写入明确错误；
- *   - 发送成功后若超时未收到服务端 `approval-resolved`，或中途网关断线 / 401 / 403，
- *     立即从 `inFlightIds` 移除恢复待审批状态，并记录明确错误提示。
+ *   - 发送前断线 / 401 / 403 / `send` 返回 `false` 时，帧尚未发出，保留待审批并写入明确错误；
+ *   - 一旦 `send` 返回 `true`（帧已写入 WebSocket），不得将「未收到确认」等同于「服务端尚未执行」：
+ *     若超时或中途断线/401/403 仍未收到权威 `approval-resolved`，则转入 `unconfirmed`（结果未知）状态，
+ *     恢复显示卡片但**禁止盲目再次提交**，直到收到迟到的权威 `approval-resolved`，
+ *     或重连后服务端再次权威重放该 `rpcId`（`authoritativePendingAt > sentAt`）证明其确实仍未决。
  */
 export class ApprovalSubmitController {
   private armedRpcId: string | null = null;
   private armedUntil = 0;
   private readonly inFlight = new Map<string, { outcome: ApprovalDecision; sentAt: number }>();
+  private readonly unconfirmed = new Map<string, { outcome: ApprovalDecision; sentAt: number }>();
   private readonly errors = new Map<string, string>();
   private readonly armTimeoutMs: number;
   private readonly commitTimeoutMs: number;
@@ -304,6 +308,14 @@ export class ApprovalSubmitController {
 
   get inFlightIds(): ReadonlySet<string> {
     return new Set(this.inFlight.keys());
+  }
+
+  get unconfirmedIds(): ReadonlySet<string> {
+    return new Set(this.unconfirmed.keys());
+  }
+
+  isUnconfirmed(rpcId: string): boolean {
+    return this.unconfirmed.has(rpcId);
   }
 
   isArmed(rpcId: string, now = Date.now()): boolean {
@@ -347,6 +359,15 @@ export class ApprovalSubmitController {
 
     if (this.inFlight.has(rpcId)) {
       return { status: 'duplicate', rpcId };
+    }
+
+    // 已经发送过响应但未收到权威确认（结果未知）：严禁盲目再次提交，直到服务端权威状态确认
+    if (this.unconfirmed.has(rpcId)) {
+      const error =
+        this.errors.get(rpcId) ??
+        '审批响应已发送但结果未知：无法排除电脑端已执行，已禁止盲目再次提交，请等待服务端权威状态确认';
+      this.errors.set(rpcId, error);
+      return { status: 'unconfirmed', rpcId, error };
     }
 
     // 来源不明的审批永远不可提交（即使未来 UI 误传，也在状态机层 fail-closed）
@@ -418,16 +439,25 @@ export class ApprovalSubmitController {
     authInvalidated?: boolean | 'forbidden';
     /** 已收到服务端权威 approval-resolved 帧的 rpcId 集合（Store.onResolved 提供） */
     serverResolvedIds?: ReadonlySet<string>;
+    /** 服务端最近一次权威下发/重放（approval-requested）每条 rpcId 的时间戳 */
+    authoritativePendingAt?: ReadonlyMap<string, number>;
     now?: number;
   }): boolean {
-    const { serverPendingIds, gatewayOnline, authInvalidated = false, serverResolvedIds } = params;
+    const {
+      serverPendingIds,
+      gatewayOnline,
+      authInvalidated = false,
+      serverResolvedIds,
+      authoritativePendingAt,
+    } = params;
     const now = params.now ?? Date.now();
     let changed = false;
 
     for (const [rpcId, meta] of [...this.inFlight.entries()]) {
       if (serverResolvedIds?.has(rpcId)) {
-        // 只有收到权威的 approval-resolved 帧，才确认服务端已处理
+        // 只有收到权威的 approval-resolved / approval-response 确认帧，才确认服务端已处理
         this.inFlight.delete(rpcId);
+        this.unconfirmed.delete(rpcId);
         this.errors.delete(rpcId);
         changed = true;
         continue;
@@ -435,11 +465,12 @@ export class ApprovalSubmitController {
 
       if (authInvalidated) {
         this.inFlight.delete(rpcId);
+        this.unconfirmed.set(rpcId, meta);
         this.errors.set(
           rpcId,
           authInvalidated === 'forbidden'
-            ? '审批提交未完成：服务地址未被允许访问（HTTP 403：Host 未受信任），已恢复待审批状态并保留现有凭据，请在电脑端将 Host 加入 trustedHosts 后重试'
-            : '审批提交未完成：登录状态已失效（401），已恢复待审批状态，请重新连接后再试',
+            ? '审批响应已发送但访问受限（HTTP 403：Host 未受信任，结果未知）：已保留现有凭据并锁定再次提交，请在电脑端将 Host 加入 trustedHosts 后确认状态'
+            : '审批响应已发送但登录状态已失效（401，结果未知）：为防重复执行已锁定再次提交，请重新连接以同步权威状态',
         );
         changed = true;
         continue;
@@ -447,9 +478,10 @@ export class ApprovalSubmitController {
 
       if (!gatewayOnline) {
         this.inFlight.delete(rpcId);
+        this.unconfirmed.set(rpcId, meta);
         this.errors.set(
           rpcId,
-          '审批通道在确认前断开，未收到电脑确认，已恢复待审批状态，请重连后重试',
+          '审批响应已发送但通道在确认前断开（结果未知）：无法排除电脑端已执行，已锁定再次允许，等待重连后服务端权威确认',
         );
         changed = true;
         continue;
@@ -457,9 +489,10 @@ export class ApprovalSubmitController {
 
       if (now - meta.sentAt >= this.commitTimeoutMs) {
         this.inFlight.delete(rpcId);
+        this.unconfirmed.set(rpcId, meta);
         this.errors.set(
           rpcId,
-          '审批响应超时（电脑未确认），已恢复待审批状态，请检查电脑端状态后重试',
+          '审批响应超时（电脑未确认，结果未知）：无法排除电脑端已执行，已禁止盲目再次允许，等待服务端权威状态确认',
         );
         changed = true;
         continue;
@@ -468,6 +501,30 @@ export class ApprovalSubmitController {
       if (serverPendingIds.has(rpcId)) {
         // 网关在线且该 rpcId 仍处于服务端权威待审批列表中：继续等待权威 resolved 或超时。
         continue;
+      }
+    }
+
+    // 处理处于「结果未知（unconfirmed）」的条目：
+    //   1. 迟到的权威 approval-resolved 到达 → 确认完成并清除锁定；
+    //   2. 重连后服务端再次权威重放该 rpcId（replayAt > sentAt）→ 权威证明服务端尚未执行，解除锁定允许重新提交。
+    for (const [rpcId, meta] of [...this.unconfirmed.entries()]) {
+      if (serverResolvedIds?.has(rpcId)) {
+        this.unconfirmed.delete(rpcId);
+        this.errors.delete(rpcId);
+        changed = true;
+        continue;
+      }
+
+      if (gatewayOnline && !authInvalidated && serverPendingIds.has(rpcId)) {
+        const replayAt = authoritativePendingAt?.get(rpcId) ?? 0;
+        if (replayAt > meta.sentAt) {
+          this.unconfirmed.delete(rpcId);
+          this.errors.set(
+            rpcId,
+            '服务端重连后已权威重放该待审批（确认上次响应未执行），现可重新提交',
+          );
+          changed = true;
+        }
       }
     }
 
