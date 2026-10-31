@@ -119,7 +119,9 @@ check('store 暴露连接状态', () =>
   storeSrc.includes('gatewayStatus') ? true : '缺少状态',
 );
 check('审批到达时震一下', () =>
-  /onApproval[\s\S]{0,400}notifyDone/.test(storeSrc) ? true : '没有提醒',
+  /onApproval[\s\S]{0,1200}notifyDone\([\s\S]{0,120}kind:\s*'approval'/.test(storeSrc)
+    ? true
+    : '没有提醒',
 );
 check('断线重连有退避', () =>
   src.includes('scheduleRetry') && src.includes('Math.min(30_000') ? true : '没有退避',

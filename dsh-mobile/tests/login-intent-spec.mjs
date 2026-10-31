@@ -375,7 +375,7 @@ await check('resumePairing 会把意图置回 active', () => {
 await check('clearAuthorization 不会用 clearLoginIntent 绕过安全检查', () => {
   const i = appSrc.indexOf('const clearAuthorization');
   if (i < 0) return '找不到 clearAuthorization';
-  const body = appSrc.slice(i, i + 6000);
+  const body = appSrc.slice(i, i + 12000);
   // 只看**代码**，不看注释 —— 注释里解释「为什么不能用它」是正常的，
   // 一开始没排除注释，这条测试误报了。
   const codeOnly = body
