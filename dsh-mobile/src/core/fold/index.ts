@@ -312,10 +312,11 @@ export function foldEvents(records: EventRecord[]): Turn[] {
       case 'user/message': {
         // 管家初始化提示 / 系统通知都是「假的用户消息」，界面上不显示
         if (isInjectedMessage(textOf(d.content))) break;
-        // 剥掉尾部的模式标记（〔模式:计划〕），用户不该看到它
+        // 纯附件消息（无文字）也必须保留：UserBubble 支持只有 image/file parts 的气泡。
         const raw = textOf(d.content);
         const body = stripModeTag(raw);
-        if (!body) break;
+        const parts = attachPartsOf(d.content);
+        if (!body && parts.length === 0) break;
         // turn 号有时缺失，挂到当前 turn；否则按 seq 造一个
         const turnNo = num(d.turn) ?? current?.turn.turn ?? ev.seq;
         const b = ensureTurn(turnNo);
@@ -339,7 +340,7 @@ export function foldEvents(records: EventRecord[]): Turn[] {
             id: typeof d.id === 'string' ? d.id : undefined,
             text: body,
             time: ev.time,
-            parts: attachPartsOf(d.content),
+            parts,
           };
         }        if (b.turn.startedAt === undefined) b.turn.startedAt = ev.time;
         current = b;
