@@ -151,3 +151,20 @@ _m*.txt
 
 # 真机验收构建产物（含签名 APK，不应入库）
 _acceptance-apk/
+
+# v0.18 内部研究、验收报告、原始日志、截图与交付包（仅本地私有保存）
+/docs/v0.17/
+/docs/v0.18/
+/docs/P1-1-SIGNING-VERIFICATION.md
+/docs/github-release-upload.md
+/ANDROID-BUILD-RESULT.md
+/ANDROID-TEST-RESULT.md
+/DSH-OUTPOST-*.md
+/FINAL-SECURITY-FIX-REPORT.md
+/GIT-PUSH-READINESS.md
+/RELEASE-ACCEPTANCE-CHECKLIST.md
+/RELEASE-READINESS-REPORT.md
+/dsh-mobile/APK-BUILD-REPORT.md
+/dsh-mobile/FIX-REPORT.md
+/_st.mjs
+

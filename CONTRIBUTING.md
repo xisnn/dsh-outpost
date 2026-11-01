@@ -1,7 +1,6 @@
 # 参与开发
 
-欢迎提 Issue 和 PR。改动前建议先看一遍 [开发记录](dsh-mobile/DEVELOPMENT.md)——
-里面记了每个功能的设计取舍和踩过的坑，能省不少时间。
+欢迎提 Issue 和 PR。改动前建议先看 [dsh-mobile/README.md](dsh-mobile/README.md) 和 [测试说明](dsh-mobile/tests/README.md)，了解项目结构、运行方式和测试约定。
 
 ## 环境
 
@@ -44,7 +43,7 @@ src/
 ## 提 PR 前
 
 - `npm test` 通过
-- 改动涉及协议层的话，在 `dsh-mobile/DEVELOPMENT.md` 里补一段说明
+- 改动涉及协议层的话，同步更新相关说明和测试
 - 截图请不要带真实会话数据
 
 ## 关于 DSH 协议
