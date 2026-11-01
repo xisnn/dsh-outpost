@@ -244,11 +244,9 @@ test('仓库水位线 >= 16200（已交付的验收包 versionCode）', () => {
   );
 });
 
-test('仓库水位线能推出 v0.16.3 且通过门禁', () => {
-  const r = deriveVersion('v0.16.3');
-  assert.equal(r.version, '0.16.3');
-  assert.equal(r.code, 160300);
-  assert.ok(r.code > r.floor);
+test('仓库已发布版本不能再次作为更高版本发布', () => {
+  const published = parseTag(`v${readFloor().publishedVersion}`);
+  assert.throws(() => deriveVersion(published.tag), VersionError);
 });
 
 test('未来版本号示例可预测（长期稳定）', () => {
