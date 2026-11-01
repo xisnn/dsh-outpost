@@ -23,12 +23,9 @@ import net from 'node:net';
 import os from 'node:os';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { execFile } from 'node:child_process';
+import { spawn } from 'node:child_process';
 import { readFile } from 'node:fs/promises';
 import { mkdirSync, existsSync } from 'node:fs';
-import { promisify } from 'node:util';
-
-const execFileAsync = promisify(execFile);
 
 const PORT = Number(process.env.DSH_TUNNEL_PORT || 3199);
 
@@ -363,23 +360,78 @@ export function stripTokenFromUrl(raw) {
   }
 }
 
-/** 跑 PowerShell 脚本 */
-async function runScript(script, args, timeoutMs) {
-  try {
-    const { stdout, stderr } = await execFileAsync(
-      'powershell.exe',
-      ['-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', script, ...args],
-      { timeout: timeoutMs, windowsHide: true, maxBuffer: 2 * 1024 * 1024 },
-    );
-    return { ok: true, stdout, stderr };
-  } catch (e) {
-    return {
-      ok: false,
-      stdout: e.stdout || '',
-      stderr: e.stderr || '',
-      error: e.message,
+function redactLog(text) {
+  return String(text || '').replace(/([?&](?:token|key|secret|password|auth|code)=)[^&\s]+/gi, '$1***');
+}
+
+/** 子服务可能继承管道；以启动脚本退出为准，不能等所有后代关闭 stdout。 */
+export function runScript(script, args, timeoutMs) {
+  return new Promise((resolve) => {
+    const quote = (value) => `'${String(value).replace(/'/g, "''")}'`;
+    // PowerShell 将带引号的 '-Bind' 当作位置参数；参数名必须保留为语法标记。
+    const psArgs = args.map((value) => /^-[A-Za-z][A-Za-z0-9_]*$/.test(value) ? value : quote(value));
+    const command = '[Console]::OutputEncoding = [System.Text.UTF8Encoding]::new($false); ' +
+      '$OutputEncoding = [Console]::OutputEncoding; ' +
+      `& ${quote(script)} ${psArgs.join(' ')}; ` +
+      'if (-not $?) { exit 1 }; if ($null -ne $LASTEXITCODE) { exit $LASTEXITCODE }';
+    const child = spawn('powershell.exe', [
+      '-NoProfile', '-NonInteractive', '-ExecutionPolicy', 'Bypass', '-Command', command,
+    ], { windowsHide: true, stdio: ['ignore', 'pipe', 'pipe'] });
+    let stdout = '';
+    let stderr = '';
+    let settled = false;
+    const finish = (code, reason = '') => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timer);
+      child.stdout.destroy();
+      child.stderr.destroy();
+      const out = redactLog(stdout);
+      const err = redactLog(stderr);
+      const ok = code === 0 && !reason;
+      resolve({ ok, stdout: out, stderr: err,
+        error: ok ? undefined : (redactLog(reason) || err.trim() || out.trim() || `脚本退出码 ${code}`).slice(-1500),
+      });
+    };
+    child.stdout.setEncoding('utf8').on('data', (data) => { stdout = (stdout + data).slice(-65536); });
+    child.stderr.setEncoding('utf8').on('data', (data) => { stderr = (stderr + data).slice(-65536); });
+    const timer = setTimeout(() => {
+      child.kill();
+      finish(null, `操作超时（${Math.round(timeoutMs / 1000)} 秒），请查看 DSH 日志`);
+    }, timeoutMs);
+    child.once('error', (error) => finish(null, error.message));
+    child.once('exit', (code) => {
+      clearTimeout(timer);
+      // 留出一次管道读取机会；不等待仍在后台运行的 DSH 关闭继承的句柄。
+      setTimeout(() => finish(code), 50);
+    });
+  });
+}
+
+// 合并连点产生的请求，防止多个修复同时停止/启动同一个服务。
+let repairPromise = null;
+export async function repairNetwork(status = getStatus, run = runScript) {
+  const before = await status();
+  const hadTunnel = before.running;
+  const dshRun = await run(DSH_SCRIPT, [
+    '-Bind', 'lan', '-Port', String(DSH_PORT), '-NoQr', '-Restart',
+  ], 180000);
+  let after = await status();
+  if (!dshRun.ok || !after.dshRunning || after.ipChanged) {
+    return { ...after, ok: false, hadTunnel, log: dshRun.stdout?.slice(-1200),
+      error: dshRun.error || 'DSH 未能在当前网络地址启动，请查看启动日志',
     };
   }
+  if (hadTunnel) {
+    const tunRun = await run(TUNNEL_SCRIPT, ['-Port', String(DSH_PORT)], 200000);
+    after = await status();
+    if (!tunRun.ok || !after.running || after.tunnelStale || !after.dshRunning || after.ipChanged) {
+      return { ...after, ok: false, hadTunnel, log: tunRun.stdout?.slice(-1200),
+        error: tunRun.error || 'DSH 已重启，但隧道未能恢复',
+      };
+    }
+  }
+  return { ...after, ok: true, hadTunnel, log: dshRun.stdout?.slice(-1200) };
 }
 
 const server = http.createServer(async (req, res) => {
@@ -456,29 +508,12 @@ const server = http.createServer(async (req, res) => {
     // 做两件事：用当前 IP 重启 DSH，如果隧道之前开着就重新拉起来。
     // 顺序必须是先 DSH 后隧道 —— 隧道要指向一个真的在监听的地址。
     if (url.pathname === '/tunnel/repair' && req.method === 'POST') {
-      const before = await getStatus();
-      const hadTunnel = before.running;
-
-      // 1. 重启 DSH（脚本自己会挑当前 WLAN 地址）
-      const dshRun = await runScript(DSH_SCRIPT, ['-Bind', 'lan', '-Port', String(DSH_PORT), '-NoQr'], 180000);
-
-      // 2. 如果之前有隧道，重新拉起来
-      let tunRun = { ok: true, skipped: true };
-      if (hadTunnel) {
-        tunRun = await runScript(TUNNEL_SCRIPT, [], 200000);
+      if (!repairPromise) {
+        repairPromise = repairNetwork().finally(() => { repairPromise = null; });
       }
-
-      const after = await getStatus();
+      const result = await repairPromise;
       res.writeHead(200, headers);
-      res.end(
-        JSON.stringify({
-          ok: dshRun.ok && after.dshRunning,
-          hadTunnel,
-          ...after,
-          log: (dshRun.stdout || '').slice(-1200),
-          error: dshRun.ok ? undefined : dshRun.error || dshRun.stderr,
-        }),
-      );
+      res.end(JSON.stringify(result));
       return;
     }
 
@@ -490,7 +525,7 @@ const server = http.createServer(async (req, res) => {
   }
 });
 
-server.listen(PORT, '127.0.0.1', () => {
+if (process.argv[1] && path.resolve(process.argv[1]) === fileURLToPath(import.meta.url)) server.listen(PORT, '127.0.0.1', () => {
   console.log(`[dsh-tunnel] listening on 127.0.0.1:${PORT}`);
   console.log(`[dsh-tunnel] lan ip: ${primaryLanIp() || '(none)'}`);
   console.log(

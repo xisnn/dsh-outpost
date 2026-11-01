@@ -504,20 +504,23 @@ async function getStatus() {
 async function tunnelAction(action) {
   const ok = await ensureService();
   if (!ok) return { ok: false, error: '隧道服务没能启动' };
+  const ctrl = new AbortController();
+  // 修复可能顺序执行 DSH（180 秒）和隧道（200 秒）。
+  const timeoutMs = { start: 220000, stop: 45000, repair: 420000 }[action];
+  const t = setTimeout(() => ctrl.abort(), timeoutMs);
   try {
-    const ctrl = new AbortController();
-    const t = setTimeout(() => ctrl.abort(), action === 'start' ? 120000 : 15000);
     const res = await fetch(`${SERVICE_BASE}/tunnel/${action}`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: '{}',
       signal: ctrl.signal,
     });
-    clearTimeout(t);
     const json = await res.json().catch(() => ({}));
     return { ok: res.ok, ...json };
   } catch (e) {
     return { ok: false, error: e instanceof Error ? e.message : String(e) };
+  } finally {
+    clearTimeout(t);
   }
 }
 
@@ -550,6 +553,7 @@ function primaryLanIp() {
   const nets = os.networkInterfaces();
   const candidates = [];
   for (const [name, addrs] of Object.entries(nets)) {
+    if (/vEthernet|VMware|VirtualBox|Hyper-V|Loopback|Mihomo|Clash|TUN|TAP|Tailscale|ZeroTier|WSL|Bluetooth|蓝牙|Npcap/i.test(name)) continue;
     for (const a of addrs || []) {
       if (a.family !== 'IPv4' || a.internal) continue;
       if (a.address.startsWith('169.254.')) continue;
@@ -575,7 +579,11 @@ ipcMain.handle('status:get', async () => {
   // 隧道服务那边原来用 PowerShell 查端口，慢且会超时，导致
   // 「DSH 明明在跑」被报成「服务未启动」。这里用 net 直接探，
   // 毫秒级且可信。两个结果都带上，renderer 优先用自己的这个。
-  const portListening = await probePort(port);
+  const portListening = await probePort(port, lanIp || '127.0.0.1');
+  const dshRunning = portListening || status?.dshRunning === true;
+  // 未启动或地址已失效时，不把旧 token 拼成一个看似可用的新二维码。
+  const lanUrl = dshRunning && !status.ipChanged && token && lanIp
+    ? `http://${lanIp}:${port}/?token=${token}` : '';
 
   return {
     ...status,
@@ -585,10 +593,10 @@ ipcMain.handle('status:get', async () => {
     /** 我们自己探测的结果（比隧道服务的更可靠） */
     portListening,
     /** DSH 是否在跑：优先用本进程的探测 */
-    dshRunning: portListening || status?.dshRunning === true,
+    dshRunning,
     // 现算的局域网二维码内容（pairing.json 里的可能是旧 IP）
-    lanUrl: token && lanIp ? `http://${lanIp}:${port}/?token=${token}` : pairing?.url || '',
-    pairUrl: token && lanIp ? `http://${lanIp}:${port}/?token=${token}` : pairing?.url || '',
+    lanUrl,
+    pairUrl: lanUrl,
     autoLaunch: isAutoLaunchEnabled(),
   };
 });
@@ -664,7 +672,7 @@ ipcMain.handle('dsh:action', async (_e, action) => {
 
   // 已在跑就不再启动，避免端口冲突
   if (action === 'start') {
-    if (await probePort(port)) {
+    if (await probePort(port, primaryLanIp() || '127.0.0.1')) {
       return { ok: true, already: true, message: 'DSH 已经在运行了' };
     }
   }
@@ -702,7 +710,7 @@ ipcMain.handle('dsh:action', async (_e, action) => {
       // 等端口释放（最多 5 秒）
       for (let i = 0; i < 25; i += 1) {
         await new Promise((r) => setTimeout(r, 200));
-        if (!(await probePort(port))) {
+        if (!(await probePort(port, primaryLanIp() || '127.0.0.1'))) {
           return { ok: true, message: `已停止（PID ${pids.join(', ')}）` };
         }
       }
@@ -759,13 +767,13 @@ ipcMain.handle('dsh:action', async (_e, action) => {
     // 等端口起来（最多 90 秒 —— DSH 启动确实要一会儿）
     for (let i = 0; i < 90; i += 1) {
       await new Promise((r) => setTimeout(r, 1000));
-      if (await probePort(port)) {
+      if (await probePort(port, primaryLanIp() || '127.0.0.1')) {
         return { ok: true, message: `DSH 已启动（端口 ${port}）` };
       }
     }
     return {
       ok: false,
-      error: `等了 90 秒还没起来。看看日志：%TEMP%\\dsh-web-${port}.log`,
+      error: `等了 90 秒还没起来。日志：${path.join(STATE_DIR, 'logs', `dsh-web-${port}.log`)}`,
     };
   } catch (e) {
     return { ok: false, error: e instanceof Error ? e.message : String(e) };

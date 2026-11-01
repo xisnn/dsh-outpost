@@ -11,11 +11,11 @@ const $ = (id) => document.getElementById(id);
 let last = null;
 /** 上次生成的二维码对应的 URL，避免重复生成 */
 let lastQr = { lan: '', tunnel: '' };
+let repairing = false;
 
 // ── 状态刷新 ────────────────────────────────────────────────────
 
 async function refresh() {
-  setHint('正在读取状态…');
   let st;
   try {
     st = await window.dsh.getStatus();
@@ -71,7 +71,8 @@ async function refresh() {
   // 设置
   $('chkAutoLaunch').checked = Boolean(st.autoLaunch);
 
-  setHint(st.serviceDown ? '隧道服务未启动，点「刷新」重试' : '');
+  // 自动刷新只更新状态，保留操作结果，避免修复失败提示刚出现就消失。
+  if (st.serviceDown && !repairing) setHint('隧道服务未启动，点「刷新」重试', true);
 }
 
 /**
@@ -84,8 +85,8 @@ function syncServiceButtons(running) {
   const start = $('btnStartDsh');
   const stop = $('btnStopDsh');
   if (!start || !stop) return;
-  start.disabled = running;
-  stop.disabled = !running;
+  start.disabled = repairing || running;
+  stop.disabled = repairing || !running;
   start.className = running ? 'btn' : 'btn primary';
   stop.className = running ? 'btn' : 'btn ghost';
 }
@@ -267,16 +268,23 @@ $('btnStopTunnel').addEventListener('click', async () => {
 });
 
 $('btnRepair').addEventListener('click', async () => {
+  if (repairing) return;
+  repairing = true;
   const btn = $('btnRepair');
-  btn.disabled = true;
+  const actionIds = ['btnRepair', 'btnStartDsh', 'btnStopDsh', 'btnStartTunnel', 'btnStopTunnel'];
+  actionIds.forEach((id) => { $(id).disabled = true; });
   btn.textContent = '修复中…';
   setHint('正在用新地址重启 DSH 和隧道…');
   try {
     const r = await window.dsh.tunnel('repair');
     setHint(r?.ok ? '已修复' : '修复失败：' + (r?.error || '未知错误'), !r?.ok);
     await refresh();
+  } catch (e) {
+    setHint('修复失败：' + (e?.message || e), true);
   } finally {
-    btn.disabled = false;
+    repairing = false;
+    actionIds.forEach((id) => { $(id).disabled = false; });
+    syncServiceButtons(last?.dshRunning === true);
     btn.textContent = '一键修复';
   }
 });

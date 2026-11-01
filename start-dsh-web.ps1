@@ -45,6 +45,7 @@
 #>
 [CmdletBinding()]
 param(
+  [ValidateRange(1, 65535)]
   [int]$Port = 3095,
   [ValidateSet('auto', 'lan', 'tailscale')]
   [string]$Bind = 'auto',
@@ -59,7 +60,9 @@ param(
 # 默认会检查：插件已安装时，补丁必须处于已应用状态，否则拒绝启动。
 # 只有在你确认不用手机审批（不需要 /mgw/* 管理接口）时才该跳过。
 [switch]$SkipGatewayPatchCheck,
-[switch]$Foreground
+[switch]$Foreground,
+# 换网后先释放旧地址上的 DSH 监听，再用当前地址启动。
+[switch]$Restart
 )
 
 # dsh 可执行文件：环境变量 → PATH → 常见安装位置
@@ -165,14 +168,24 @@ function Get-LanIp {
   # 光看 IP 段会挑到 198.18.x（Mihomo 的假地址）之类，必须按网卡类型和名字排掉。
   $virtualPattern = 'vEthernet|VMware|VirtualBox|Hyper-V|Loopback|Mihomo|Clash|TUN|TAP|Tailscale|ZeroTier|WSL|Bluetooth|蓝牙|Npcap'
   try {
+    $activeAdapters = @(Get-NetAdapter -ErrorAction Stop |
+      Where-Object { $_.Status -eq 'Up' } | Select-Object -ExpandProperty ifIndex)
     $candidates = Get-NetIPAddress -AddressFamily IPv4 -ErrorAction Stop |
       Where-Object {
+        $_.AddressState -eq 'Preferred' -and
+        -not $_.SkipAsSource -and
+        $_.InterfaceIndex -in $activeAdapters -and
         $_.IPAddress -ne '127.0.0.1' -and
         $_.IPAddress -notlike '169.254.*' -and
         $_.IPAddress -notlike '100.*' -and
         $_.InterfaceAlias -notmatch $virtualPattern
       } |
       Sort-Object -Property InterfaceMetric
+
+    # 和桌面面板保持一致：手机通常连 Wi-Fi，不能选断开的以太网地址。
+    $wifi = $candidates | Where-Object { $_.InterfaceAlias -match 'WLAN|Wi-?Fi|无线|Wireless' } |
+      Select-Object -First 1
+    if ($wifi) { return $wifi.IPAddress }
 
     # 优先真正的内网段（192.168 / 10 / 172.16-31），其它网段放后面
     foreach ($wantPrivate in @($true, $false)) {
@@ -194,7 +207,9 @@ $lanIp = Get-LanIp
 
 $bindIp = $null
 $via = ''
-switch ($Bind) {
+if ($Host_) {
+  $bindIp = $Host_; $via = '指定地址'
+} else { switch ($Bind) {
   'tailscale' {
     if (-not $tailnetIp) {
       Write-Host '[X] -Bind tailscale 但没读到 Tailscale IP，先确认 tailscale 已登录。' -ForegroundColor Red
@@ -214,7 +229,7 @@ switch ($Bind) {
     elseif ($tailnetIp) { $bindIp = $tailnetIp; $via = 'Tailscale（装了就用它，外网也能连）' }
     elseif ($lanIp) { $bindIp = $lanIp; $via = '局域网（同一 WiFi 可用）' }
   }
-}
+} }
 if (-not $bindIp) {
   Write-Host '[X] 没找到可用地址，用 -Host 手动指定。' -ForegroundColor Red
   exit 1
@@ -226,6 +241,28 @@ if ($lanIp -and $bindIp -ne $lanIp) {
 
 # ---- 端口检查 ----
 $busy = Get-NetTCPConnection -LocalPort $Port -State Listen -ErrorAction SilentlyContinue
+if ($busy -and $Restart) {
+  # 地址失效时 TCP 连接探测会失败，但旧监听仍可能占着端口。
+  # 从监听表定位 PID，并核实确实是 DSH web，避免结束其它程序。
+  $owners = @($busy.OwningProcess | Sort-Object -Unique)
+  foreach ($ownerId in $owners) {
+    $owner = Get-CimInstance Win32_Process -Filter "ProcessId = $ownerId" -ErrorAction Stop
+    if (-not $owner -or
+        $owner.CommandLine -notmatch 'dsh-desktop-host[\\/]lib[\\/]cli\.js' -or
+        $owner.CommandLine -notmatch '(?:^|\s)--profile(?:\s+|=)"?web"?(?:\s|$)') {
+      throw "端口 $Port 被非 DSH web 进程占用（PID $ownerId），未结束该进程。"
+    }
+  }
+  foreach ($ownerId in $owners) {
+    Write-Host "停止旧 DSH web（PID $ownerId）..." -ForegroundColor DarkGray
+    Stop-Process -Id $ownerId -Force -ErrorAction Stop
+  }
+  $releaseDeadline = (Get-Date).AddSeconds(10)
+  do {
+    Start-Sleep -Milliseconds 200
+    $busy = Get-NetTCPConnection -LocalPort $Port -State Listen -ErrorAction SilentlyContinue
+  } while ($busy -and (Get-Date) -lt $releaseDeadline)
+}
 if ($busy) {
   Write-Host "[X] 端口 $Port 已被占用 (PID $($busy.OwningProcess))，换一个：-Port $($Port + 1)" -ForegroundColor Red
   exit 1
@@ -368,21 +405,23 @@ if (-not $proc) { Write-Host "[X] 启动 dsh 失败" -ForegroundColor Red; exit 
 $url = $null
 $deadline = (Get-Date).AddSeconds(120)
 while ((Get-Date) -lt $deadline) {
-  if ($proc.HasExited) { break }
+  $proc.Refresh()
   if (Test-Path $logFile) {
-    $text = Get-Content -Raw -Path $logFile -ErrorAction SilentlyContinue
+    $text = Get-Content -Raw -Path $logFile -Encoding UTF8 -ErrorAction SilentlyContinue
     if ($text) {
       $m = [regex]::Match($text, 'https?://\S+\?token=\S+')
       if ($m.Success) { $url = $m.Value.Trim(); break }
     }
   }
+  if ($proc.HasExited) { break }
   Start-Sleep -Milliseconds 400
 }
 
 if (-not $url) {
   Write-Host ''
-  Write-Host "[X] 120 秒内没等到 token URL。日志：$logFile" -ForegroundColor Red
+  Write-Host "[X] DSH 启动失败或超时。日志：$logFile" -ForegroundColor Red
   Get-Content $logFile -ErrorAction SilentlyContinue | Select-Object -Last 25 | ForEach-Object { Write-Host "  $_" -ForegroundColor DarkYellow }
+  Get-Content "$logFile.err" -ErrorAction SilentlyContinue | Select-Object -Last 15 | ForEach-Object { Write-Host "  $_" -ForegroundColor DarkYellow }
   if (-not $proc.HasExited) { $proc.Kill() }
   exit 1
 }

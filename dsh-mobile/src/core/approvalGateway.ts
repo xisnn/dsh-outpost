@@ -41,6 +41,10 @@
  *    否则「旧连接迟到的 onclose」会把刚建好的新连接状态踩掉。
  */
 
+// RN 0.81's global URL has read-only fields and cannot parse ws(s) hosts.
+// Use the same standards-compatible implementation on device and in tests.
+import { URL } from 'whatwg-url-without-unicode';
+
 import {
   CredentialKey,
   clearCredential,
@@ -57,9 +61,6 @@ import {
 import { readGatewayId, readServerDeviceId, saveServerBinding } from './serverIdentity';
 
 import { assertSecureUrl, redactUrl } from './net-security';
-
-/** 网关默认端口（插件配置 lanPort） */
-const GATEWAY_PORT = 3081;
 
 /**
  * 服务端「设备被撤销」的关闭码。
@@ -170,12 +171,18 @@ export interface GatewayEvents {
   onResolved?: (rpcId: string, outcome: string) => void;
 }
 
-/** 从 baseUrl 里取出主机名，拼出网关地址 */
+/** 审批复用已登录的 Web 入口，保留 HTTPS 和隧道端口。 */
 export function gatewayUrlFrom(baseUrl: string): string {
   try {
     const u = new URL(baseUrl);
-    const scheme = u.protocol === 'https:' ? 'wss' : 'ws';
-    return `${scheme}://${u.hostname}:${GATEWAY_PORT}/ws/mobile`;
+    if (u.protocol !== 'http:' && u.protocol !== 'https:') return '';
+    u.protocol = u.protocol === 'https:' ? 'wss:' : 'ws:';
+    u.pathname = '/ws/mobile';
+    u.search = '';
+    u.hash = '';
+    u.username = '';
+    u.password = '';
+    return u.toString();
   } catch {
     return '';
   }
@@ -356,47 +363,35 @@ export class ApprovalGateway {
    *   ws://<host>:3081/ws/mobile   ← 网关直连
    * 还有几条是虚拟网卡地址（VMware 之类），手机根本连不到。
    *
-   * 所以顺序是：
-   *   1. 和 baseUrl 完全同源（host + port 都一致）的 endpoint —— 这是
-   *      已经被验证可达的地址，最可靠；
-   *   2. publicUrl；
-   *   3. 和 baseUrl 同 host 的 endpoint（端口可能不同）；
-   *   4. 退回硬编码 3081。
+   * 使用与 baseUrl 同源、同安全级别的 endpoint/publicUrl；没有时从
+   * baseUrl 推导 /ws/mobile。保存 token 后重开 App 不会再申请配对码，
+   * 此时没有 endpoints，也必须复用 Web 端口，不能回退到 3081。
    */
   private pickUrl(): string {
-    const eps = this.endpoints ?? [];
+    const eps = [...(this.endpoints ?? []), ...(this.publicUrl ? [this.publicUrl] : [])];
     try {
       const base = new URL(this.baseUrl);
       const wantHost = base.hostname;
       const wantPort = base.port || (base.protocol === 'https:' ? '443' : '80');
+      const wantProtocol = base.protocol === 'https:' ? 'wss:' : 'ws:';
 
-      // 1. 完全同源
+      // 完全同源；不把隧道内的明文 HTTP 误当成手机应该使用的 ws://。
       for (const e of eps) {
         try {
           const u = new URL(e);
           const port = u.port || (u.protocol === 'wss:' ? '443' : '80');
-          if (u.hostname === wantHost && port === wantPort) return e;
+          if (u.hostname === wantHost && port === wantPort && u.protocol === wantProtocol &&
+              !u.username && !u.password && !u.search && !u.hash) return e;
         } catch {
           /* 跳过坏地址 */
         }
       }
 
-      // 2. publicUrl
-      if (this.publicUrl) return this.publicUrl;
-
-      // 3. 同 host，端口不同
-      for (const e of eps) {
-        try {
-          if (new URL(e).hostname === wantHost) return e;
-        } catch {
-          /* 跳过 */
-        }
-      }
     } catch {
       /* baseUrl 不合法，走兜底 */
     }
 
-    // 4. 兜底：老的硬编码行为
+    // 新配对和已有凭据重连都走同一个已验证的入口。
     return gatewayUrlFrom(this.baseUrl);
   }
 
@@ -850,7 +845,8 @@ export class ApprovalGateway {
             Origin: base,
             Referer: `${base}/`,
           },
-          body: '{}',
+          // Cloudflare 到本机是 HTTP；插件无法据此推断手机端的 TLS。
+          body: JSON.stringify({ publicUrl: gatewayUrlFrom(this.baseUrl) }),
           signal: ctrl.signal,
         });
       } finally {

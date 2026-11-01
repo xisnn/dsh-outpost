@@ -6,7 +6,7 @@
  *   - 帧格式（approval-requested / approval-response / approval-resolved）
  *   - outcome 只能两个值（cancelled/unavailable 是宿主态，客户端不能发）
  *   - 去重（重连时服务端会重放，必须按 rpcId 去重）
- *   - 地址推导（baseUrl → ws://host:3081/ws/mobile）
+ *   - 地址推导（复用已登录 Web 入口的端口和 TLS）
  *
  * 协议来源：dsh-plugin-mobile-gateway 自带的 PROTOCOL.md。
  */
@@ -39,8 +39,8 @@ const storeSrc = readFileSync('src/core/store.ts', 'utf8');
 const bannerSrc = readFileSync('src/components/ApprovalBanner.tsx', 'utf8');
 
 // ── 地址推导 ──────────────────────────────────────────────────────
-check('网关端口是 3081', () => (src.includes('GATEWAY_PORT = 3081') ? true : '端口不对'));
-check('地址格式 ws://host:3081/ws/mobile', () =>
+check('网关不会回退到硬编码 3081', () => (!src.includes('GATEWAY_PORT = 3081') ? true : '仍然硬编码直连端口'));
+check('网关使用 /ws/mobile', () =>
   src.includes('/ws/mobile') ? true : '路径不对',
 );
 check('从 baseUrl 推出网关地址', () =>

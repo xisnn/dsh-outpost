@@ -15,6 +15,7 @@
 import { readFileSync, existsSync } from 'node:fs';
 import path from 'node:path';
 import os from 'node:os';
+import vm from 'node:vm';
 
 let pass = 0;
 let fail = 0;
@@ -290,9 +291,19 @@ check('界面有启动/停止按钮', () => {
 check('按钮状态跟随服务状态（没跑时启动最显眼）', () => {
   if (!rendererApp.includes('syncServiceButtons')) return '没有状态同步';
   const i = rendererApp.indexOf('function syncServiceButtons');
-  const body = rendererApp.slice(i, i + 700);
-  if (!/start\.disabled\s*=\s*running/.test(body)) return '启动按钮没跟着禁用';
-  return /start\.className\s*=/.test(body) ? true : '启动按钮没做视觉强调';
+  const body = rendererApp.slice(i, rendererApp.indexOf('function shortUrl', i));
+  for (const running of [false, true]) {
+    for (const repairing of [false, true]) {
+      const buttons = { btnStartDsh: {}, btnStopDsh: {} };
+      vm.runInNewContext(`${body}; syncServiceButtons(running);`, {
+        running, repairing, $: (id) => buttons[id],
+      });
+      if (buttons.btnStartDsh.disabled !== (repairing || running)) return '启动按钮禁用状态错误';
+      if (buttons.btnStopDsh.disabled !== (repairing || !running)) return '停止按钮禁用状态错误';
+      if (!running && !buttons.btnStartDsh.className.includes('primary')) return '启动按钮没做视觉强调';
+    }
+  }
+  return true;
 });
 
 check('渲染层优先用 portListening 判断（不用隧道服务的旧值）', () => {

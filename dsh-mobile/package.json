@@ -1,6 +1,6 @@
 {
   "name": "dsh-outpost",
-  "version": "0.18.0",
+  "version": "0.18.1",
   "private": true,
   "description": "DSH 原生移动客户端：工作区 / 会话 / 聊天",
   "scripts": {
@@ -50,7 +50,7 @@
     "test:pendingSendBubble": "tsx tests/pending-send-bubble-ux-spec.mjs",
     "test:pendingSendRemovalSafety": "tsx tests/pending-send-removal-safety-spec.mjs",
     "test:imgrender": "tsx tests/image-render-regression-spec.mjs",
-    "test:gwconnect": "tsx tests/gateway-connect-spec.mjs",
+    "test:gwconnect": "tsx tests/gateway-connect-spec.mjs && tsx --test tests/gateway-tunnel-spec.mjs",
     "test:docview": "tsx tests/docview-spec.mjs",
     "test:searchrename": "tsx tests/search-rename-spec.mjs",
     "test:wsfilter": "tsx tests/workspace-filter-spec.mjs",
@@ -110,6 +110,7 @@
     "react-native-keychain": "^10.0.0",
     "react-native-notify-kit": "^10.9.0",
     "react-native-safe-area-context": "^5.5.2",
+    "whatwg-url-without-unicode": "8.0.0-3",
     "xlsx": "^0.18.5"
   },
   "devDependencies": {
@@ -124,6 +125,7 @@
     "@react-native/metro-config": "0.81.4",
     "@react-native/typescript-config": "0.81.4",
     "@types/react": "^19.1.0",
+    "dsh-plugin-mobile-gateway": "0.10.3",
     "tsx": "^4.23.15",
     "typescript": "^5.8.3",
     "ws": "^8.22.0"
