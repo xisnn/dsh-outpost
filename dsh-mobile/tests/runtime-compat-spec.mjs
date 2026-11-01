@@ -74,8 +74,9 @@ await check('用 WS 的测试都装了兼容层', () => {
   const offenders = [];
   for (const f of testFiles) {
     const src = readFileSync(f, 'utf8');
-    // 用了 new WebSocket( 但没 import 兼容层
-    const usesWs = /new WebSocket\(/.test(src);
+    // DshConnection 构造期也要求 WebSocket；未注入替身时同样需要兼容层。
+    const usesWs = /new WebSocket\(/.test(src) ||
+      (/new DshConnection\(/.test(src) && !/WebSocketImpl\s*:/.test(src));
     const hasCompat =
       src.includes('ws-compat') || src.includes('ws-with-headers') || src.includes("from 'ws'");
     if (usesWs && !hasCompat) {
@@ -84,7 +85,7 @@ await check('用 WS 的测试都装了兼容层', () => {
   }
   if (offenders.length === 0) return true;
   return (
-    `这些文件用了 new WebSocket 但没有兼容层（Node 20 会崩）：` + offenders.join('、')
+    `这些文件依赖 WebSocket 但没有兼容层（Node 20 会崩）：` + offenders.join('、')
   );
 });
 

@@ -6,7 +6,9 @@ import { fileURLToPath, pathToFileURL } from 'node:url';
 import path from 'node:path';
 import os from 'node:os';
 import { mkdtempSync, writeFileSync, existsSync, readFileSync } from 'node:fs';
+import { ensureWebSocket } from './support/ws-compat.mjs';
 
+ensureWebSocket();
 register('./support/rn-module-hook.mjs', import.meta.url);
 const testDir = path.dirname(fileURLToPath(import.meta.url));
 const require = createRequire(import.meta.url);

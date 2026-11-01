@@ -9,7 +9,9 @@ import Module from 'node:module';
 import { pathToFileURL } from 'node:url';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { ensureWebSocket } from './support/ws-compat.mjs';
 
+ensureWebSocket();
 globalThis.__DEV__ = true;
 
 register('./support/rn-module-hook.mjs', import.meta.url);

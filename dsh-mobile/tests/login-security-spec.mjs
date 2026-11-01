@@ -32,7 +32,9 @@ import Module from 'node:module';
 import { pathToFileURL, fileURLToPath } from 'node:url';
 import path from 'node:path';
 import http from 'node:http';
+import { ensureWebSocket } from './support/ws-compat.mjs';
 
+ensureWebSocket();
 register('./support/rn-module-hook.mjs', import.meta.url);
 
 const require = createRequire(import.meta.url);
