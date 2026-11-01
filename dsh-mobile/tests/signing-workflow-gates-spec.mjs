@@ -50,7 +50,7 @@ const check = (c, n, d) => (c ? ok(n) : bad(n, d));
 const repo = path.resolve(import.meta.dirname, '..', '..');
 const wfPath = path.join(repo, '.github', 'workflows', 'signing-verify.yml');
 const wf = readFileSync(wfPath, 'utf8');
-const report = readFileSync(path.join(repo, 'DSH-OUTPOST-FINAL-RELEASE-ACCEPTANCE.md'), 'utf8');
+const report = readFileSync(path.join(repo, 'docs', 'release-verification.md'), 'utf8');
 
 console.log('');
 console.log('── 1. v2/v3 必须按 : true / : false 判定 ──');

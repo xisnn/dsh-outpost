@@ -474,4 +474,4 @@ jobs:
 
             下载后可用 `SHA256SUMS.txt` 复核完整性。
 
-            详细说明见仓库中的 `DSH-OUTPOST-RELEASE-REPORT.md`。
+            签名与升级验证说明见仓库中的 `docs/release-verification.md`。
