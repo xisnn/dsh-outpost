@@ -121,6 +121,7 @@ const thinking = readFileSync('src/components/Thinking.tsx', 'utf8');
 const toolCard = readFileSync('src/components/ToolCard.tsx', 'utf8');
 const scan = readFileSync('src/components/ScanSheet.tsx', 'utf8');
 const chat = readFileSync('src/screens/ChatScreen.tsx', 'utf8');
+const composer = readFileSync('src/components/ChatComposer.tsx', 'utf8');
 const profile = readFileSync('src/screens/ProfileScreen.tsx', 'utf8');
 const reduce = readFileSync('src/design/useReduceMotion.ts', 'utf8');
 
@@ -162,7 +163,9 @@ check('ToolCard / WorkGroupCard 折叠头保留展开状态无障碍属性', () 
     : '工具/执行组折叠头无障碍缺失',
 );
 check('发送按钮提供无障碍角色、标签与禁用状态', () =>
-  /accessibilityLabel="发送消息"/.test(chat) && /accessibilityState=\{\{/.test(chat) ? true : '发送按钮无障碍缺失',
+  /<ChatComposer/.test(chat) && /onSend=\{\(\) => void send\(\)\}/.test(chat) &&
+  /accessibilityRole="button"\s+accessibilityLabel="发送消息"\s+accessibilityState=\{\{ disabled: !canSend, busy: sending \}\}/.test(composer)
+    ? true : '发送按钮无障碍缺失',
 );
 check('useReduceMotion 监听系统减少动态效果设置', () =>
   /isReduceMotionEnabled/.test(reduce) && /reduceMotionChanged/.test(reduce)

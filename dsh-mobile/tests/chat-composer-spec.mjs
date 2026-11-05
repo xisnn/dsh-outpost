@@ -50,6 +50,8 @@ function harness(patch = {}) {
 test('composer forwards CJK multiline drafts without sending and respects empty/attachment send states', () => {
   const h = harness();
   assert.equal(h.button('发送消息').props.disabled, true);
+  assert.equal(h.button('发送消息').props.accessibilityRole, 'button');
+  assert.equal(h.button('发送消息').props.accessibilityState.disabled, true);
   const input = h.find(node => node.type === 'TextInput');
   input.props.onChangeText('中文输入\n第二行');
   assert.deepEqual(h.calls, [['onChangeText', '中文输入\n第二行']]);

@@ -379,6 +379,7 @@ await run();
 console.log('\n── UI 接线静态检查 ─────────────────────────────────');
 
 const chatSrc = readFileSync('src/screens/ChatScreen.tsx', 'utf8');
+const composerSrc = readFileSync('src/components/ChatComposer.tsx', 'utf8');
 const sessionsSrc = readFileSync('src/screens/SessionsScreen.tsx', 'utf8');
 const workspacesSrc = readFileSync('src/screens/WorkspacesScreen.tsx', 'utf8');
 const appSrc = readFileSync('src/App.tsx', 'utf8');
@@ -390,7 +391,8 @@ check('ChatScreen 进入会话时恢复草稿', () =>
     : '没有恢复草稿',
 );
 check('ChatScreen 输入变化写入草稿', () =>
-  /draftStore\.set\(sessionId, t\)/.test(chatSrc) ? true : '输入没有接草稿存储',
+  /onChangeText=\{\(text\) => \{[\s\S]{0,200}setDraft\(text\);[\s\S]{0,200}draftStore\.set\(sessionId, text\)/.test(chatSrc) &&
+  /onChangeText=\{onChangeText\}/.test(composerSrc) ? true : '输入没有接草稿存储',
 );
 check('ChatScreen 发送成功后清除草稿', () =>
   /await store\.sendPending[\s\S]{0,240}await draftStore\.clear\(sessionId\)/.test(chatSrc)
@@ -414,7 +416,9 @@ check('切后台时 flush 缩小强制停止丢字窗口', () =>
     : '缺少 AppState flush',
 );
 check('输入框达到上限时有可见提示（不静默丢字）', () =>
-  /maxLength=\{MAX_DRAFT_CHARS\}/.test(chatSrc) && /已达 \{MAX_DRAFT_CHARS\} 字草稿上限/.test(chatSrc)
+  /maxLength=\{MAX_DRAFT_CHARS\}/.test(chatSrc) &&
+  /maxLength=\{maxLength\}/.test(composerSrc) &&
+  /已达 \{maxLength\} 字草稿上限/.test(composerSrc)
     ? true
     : '缺少草稿上限提示或 maxLength', 
 );
