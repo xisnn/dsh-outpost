@@ -210,7 +210,7 @@ export function ToolCard({ block }: { block: ToolBlock }) {
             </Text> : <Text style={styles.sectionHint}>{inputPreview.totalLines} 行</Text>}>
             {diff ? (
               <>
-                {diff.path ? <Text style={styles.diffPath} numberOfLines={1} ellipsizeMode="middle">{diff.path}</Text> : null}
+                {diff.path ? <Text style={styles.diffPath} numberOfLines={1} ellipsizeMode="middle" selectable>{diff.path}</Text> : null}
                 <View style={styles.diffBox}>
                   {diff.preview.map((line, i) => <DiffPreviewRow key={`${line.kind}-${i}`} line={line} styles={styles} />)}
                 </View>

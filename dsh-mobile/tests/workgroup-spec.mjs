@@ -220,7 +220,7 @@ check('展开后所有子块（思考、工具参数/输出/Diff、中间说明�
   const toolOk =
     /<Text style=\{styles\.code\} selectable>/.test(toolSrc) &&
     /<Text style=\{styles\.diffText\} numberOfLines=\{2\} selectable>/.test(toolSrc) &&
-    /<Text style=\{styles\.diffPath\} numberOfLines=\{1\} selectable>/.test(toolSrc);
+    /<Text style=\{styles\.diffPath\} numberOfLines=\{1\}[^>]*\bselectable>/.test(toolSrc);
   const mdOk = /selectable: true/.test(mdSrc);
   return thinkingOk && toolOk && mdOk ? true : '展开后存在不可选择的可见文本';
 });

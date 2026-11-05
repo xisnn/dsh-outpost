@@ -37,6 +37,7 @@ test('edit keeps diff preview, full diff and original optional parameters', () =
   const input = { file_path: 'src/a.ts', old_string: 'before', new_string: Array.from({ length: 20 }, (_, i) => `after ${i}`).join('\n'), replace_all: true };
   const h = harness({ name: 'edit', input, output: 'updated' });openCard(h);toggle(h, '工具参数与变更');
   assert.match(h.text(), /src\/a.ts|after 0/);
+  assert.equal(h.find(n => n.type === 'Text' && n.props.ellipsizeMode === 'middle' && n.children.includes(input.file_path)).props.selectable, true);
   h.button('查看完整差异').props.onPress();h.render();assert.equal(viewer(h).diff.path, input.file_path);
   assert.ok(viewer(h).diff.lines.some(line => line.text === 'after 19'));
   h.button('查看完整参数').props.onPress();h.render();assert.equal(viewer(h).content, JSON.stringify(input, null, 2));
