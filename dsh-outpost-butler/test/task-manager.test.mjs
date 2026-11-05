@@ -1,7 +1,11 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
+import path from 'node:path';
 import { TaskStore } from '../lib/task-store.js';
 import { TaskManager } from '../lib/task-manager.js';
+
+// Manager validation uses the Host platform's native absolute-path semantics.
+const WORKSPACE = path.resolve('test-workspace');
 
 class FakeTable {
   constructor() {
@@ -138,7 +142,7 @@ async function setup({ approvalTimeoutMs = 10000 } = {}) {
 
 test('create starts a session, resolves an agent and creates a goal', async () => {
   const { manager, store, goals } = await setup();
-  const created = await manager.create({ objective: 'do the thing', cwd: 'C:/work', maxGoalRounds: 4 });
+  const created = await manager.create({ objective: 'do the thing', cwd: WORKSPACE, maxGoalRounds: 4 });
   await waitFor(() => store.get(created.id).status === 'running');
   const task = store.get(created.id);
   assert.equal(task.sessionId, 'session-1');
@@ -148,7 +152,7 @@ test('create starts a session, resolves an agent and creates a goal', async () =
 
 test('goal complete maps the task to completed', async () => {
   const { manager, store, goals, sessions } = await setup();
-  const created = await manager.create({ objective: 'o', cwd: 'C:/work' });
+  const created = await manager.create({ objective: 'o', cwd: WORKSPACE });
   await waitFor(() => store.get(created.id).status === 'running');
 
   const agent = sessions.byId.get('session-1');
@@ -167,7 +171,7 @@ test('goal complete maps the task to completed', async () => {
 
 test('completion during a running turn waits for turn/end to capture the final text', async () => {
   const { manager, store, goals, sessions } = await setup();
-  const created = await manager.create({ objective: 'o', cwd: 'C:/work' });
+  const created = await manager.create({ objective: 'o', cwd: WORKSPACE });
   await waitFor(() => store.get(created.id).status === 'running');
 
   const agent = sessions.byId.get('session-1');
@@ -199,7 +203,7 @@ test('completion during a running turn waits for turn/end to capture the final t
 
 test('human interjection pauses the goal and waits for the user', async () => {
   const { manager, store, goals } = await setup();
-  const created = await manager.create({ objective: 'o', cwd: 'C:/work' });
+  const created = await manager.create({ objective: 'o', cwd: WORKSPACE });
   await waitFor(() => store.get(created.id).status === 'running');
 
   await manager.handleSessionEvent(created.id, {
@@ -217,7 +221,7 @@ test('human interjection pauses the goal and waits for the user', async () => {
 
 test('approval timeout pauses the goal and releases the lane', async () => {
   const { manager, store, goals, sessions } = await setup({ approvalTimeoutMs: 20 });
-  const created = await manager.create({ objective: 'o', cwd: 'C:/work' });
+  const created = await manager.create({ objective: 'o', cwd: WORKSPACE });
   await waitFor(() => store.get(created.id).status === 'running');
 
   await manager.handleSessionEvent(created.id, {
@@ -232,7 +236,7 @@ test('approval timeout pauses the goal and releases the lane', async () => {
 
 test('restart turns a running task into waiting_user, not a silent resume', async () => {
   const first = await setup();
-  const created = await first.manager.create({ objective: 'o', cwd: 'C:/work' });
+  const created = await first.manager.create({ objective: 'o', cwd: WORKSPACE });
   await waitFor(() => first.store.get(created.id).status === 'running');
 
   const second = new TaskManager({
@@ -253,7 +257,7 @@ test('autoResume explicitly resumes a disarmed goal after restart', async () => 
   const first = await setup();
   const created = await first.manager.create({
     objective: 'o',
-    cwd: 'C:/work',
+    cwd: WORKSPACE,
     autoResume: true,
   });
   await waitFor(() => first.store.get(created.id).status === 'running');
@@ -279,7 +283,7 @@ test('autoResume explicitly resumes a disarmed goal after restart', async () => 
 
 test('cancel pauses the goal, cancels the agent and marks the task cancelled', async () => {
   const { manager, store, goals, sessions } = await setup();
-  const created = await manager.create({ objective: 'o', cwd: 'C:/work' });
+  const created = await manager.create({ objective: 'o', cwd: WORKSPACE });
   await waitFor(() => store.get(created.id).status === 'running');
 
   const cancelled = await manager.cancel(created.id);
@@ -291,7 +295,7 @@ test('cancel pauses the goal, cancels the agent and marks the task cancelled', a
 test('allowed approval clears only the matching item and keeps executing', async (t) => {
   const { manager, store } = await setup();
   t.after(() => manager.dispose());
-  const created = await manager.create({ objective: 'o', cwd: 'C:/work' });
+  const created = await manager.create({ objective: 'o', cwd: WORKSPACE });
   await waitFor(() => store.get(created.id).status === 'running');
   for (const id of ['a1', 'a2', 'a1']) {
     await manager.handleSessionEvent(created.id, { type: 'approval/asked', data: { id, toolName: 'safe-probe' } });
@@ -312,7 +316,7 @@ for (const outcome of ['rejected', 'cancelled', 'unavailable']) {
   test(`approval ${outcome} pauses until explicit resume and survives turn/end`, async (t) => {
     const { manager, store, goals, sessions } = await setup();
     t.after(() => manager.dispose());
-    const created = await manager.create({ objective: 'o', cwd: 'C:/work', autoResume: true });
+    const created = await manager.create({ objective: 'o', cwd: WORKSPACE, autoResume: true });
     await waitFor(() => store.get(created.id).status === 'running');
     await manager.handleSessionEvent(created.id, { type: 'approval/asked', data: { id: 'a1', toolName: 'safe-probe' } });
     await manager.handleSessionEvent(created.id, { type: 'approval/decided', data: { id: 'a1', outcome } });
@@ -336,11 +340,11 @@ for (const outcome of ['rejected', 'cancelled', 'unavailable']) {
 test('timeout keeps the lane until cancellation settles; late approval cannot resume', async (t) => {
   const { manager, store, goals, sessions } = await setup();
   t.after(() => manager.dispose());
-  const first = await manager.create({ objective: 'first', cwd: 'C:/work' });
+  const first = await manager.create({ objective: 'first', cwd: WORKSPACE });
   await waitFor(() => store.get(first.id).status === 'running');
   const agent = sessions.byId.get('session-1');
   agent.status = 'running';
-  const second = await manager.create({ objective: 'second', cwd: 'C:/work' });
+  const second = await manager.create({ objective: 'second', cwd: WORKSPACE });
   await manager.handleSessionEvent(first.id, { type: 'approval/asked', data: { id: 'a1', toolName: 'safe-probe' } });
   await manager.onApprovalTimeout(first.id, 'a1');
   await waitFor(() => sessions.cancelled.length === 1);
@@ -363,7 +367,7 @@ test('timeout keeps the lane until cancellation settles; late approval cannot re
 test('restart with pending approval never auto-resumes or keeps a stale approval', async (t) => {
   const { manager, store, goals, sessions } = await setup();
   t.after(() => manager.dispose());
-  const task = await manager.create({ objective: 'o', cwd: 'C:/work', autoResume: true });
+  const task = await manager.create({ objective: 'o', cwd: WORKSPACE, autoResume: true });
   await waitFor(() => store.get(task.id).status === 'running');
   await manager.handleSessionEvent(task.id, { type: 'approval/asked', data: { id: 'a1', toolName: 'safe-probe' } });
   manager.dispose();
@@ -379,7 +383,7 @@ test('restart with pending approval never auto-resumes or keeps a stale approval
 test('restart clears stale approval IDs when shutdown happened during timeout cancellation', async (t) => {
   const { manager, store, goals, sessions } = await setup();
   t.after(() => manager.dispose());
-  const task = await manager.create({ objective: 'o', cwd: 'C:/work', autoResume: true });
+  const task = await manager.create({ objective: 'o', cwd: WORKSPACE, autoResume: true });
   await waitFor(() => store.get(task.id).status === 'running');
   await manager.handleSessionEvent(task.id, { type: 'approval/asked', data: { id: 'old-process', toolName: 'safe-probe' } });
   await manager.persist(task.id, { status: 'waiting_user', lastError: 'approval-timeout' });
@@ -397,7 +401,7 @@ test('restart clears stale approval IDs when shutdown happened during timeout ca
 test('a goal completion event cannot overwrite an approval refusal', async (t) => {
   const { manager, store, goals, sessions } = await setup();
   t.after(() => manager.dispose());
-  const task = await manager.create({ objective: 'o', cwd: 'C:/work' });
+  const task = await manager.create({ objective: 'o', cwd: WORKSPACE });
   await waitFor(() => store.get(task.id).status === 'running');
   await manager.handleSessionEvent(task.id, { type: 'approval/asked', data: { id: 'a1', toolName: 'safe-probe' } });
   await manager.handleSessionEvent(task.id, { type: 'approval/decided', data: { id: 'a1', outcome: 'rejected' } });
@@ -411,7 +415,7 @@ test('a goal completion event cannot overwrite an approval refusal', async (t) =
 test('pausing failure still aborts the pending tool', async (t) => {
   const { manager, store, goals, sessions } = await setup();
   t.after(() => manager.dispose());
-  const task = await manager.create({ objective: 'o', cwd: 'C:/work' });
+  const task = await manager.create({ objective: 'o', cwd: WORKSPACE });
   await waitFor(() => store.get(task.id).status === 'running');
   goals.pause = () => { throw new Error('pause failed'); };
   await manager.handleSessionEvent(task.id, { type: 'approval/asked', data: { id: 'a1', toolName: 'safe-probe' } });
@@ -424,7 +428,7 @@ test('pausing failure still aborts the pending tool', async (t) => {
 test('completion fallback waits while the final turn is still running', async (t) => {
   const { manager, store, sessions } = await setup();
   t.after(() => manager.dispose());
-  const task = await manager.create({ objective: 'o', cwd: 'C:/work' });
+  const task = await manager.create({ objective: 'o', cwd: WORKSPACE });
   await waitFor(() => store.get(task.id).status === 'running');
   const agent = sessions.byId.get('session-1');
   agent.status = 'running';
@@ -441,8 +445,8 @@ test('completion fallback waits while the final turn is still running', async (t
 
 test('idempotent create returns the existing task', async () => {
   const { manager, store } = await setup();
-  const first = await manager.create({ objective: 'o', cwd: 'C:/work', idempotencyKey: 'k-1' });
-  const second = await manager.create({ objective: 'o', cwd: 'C:/work', idempotencyKey: 'k-1' });
+  const first = await manager.create({ objective: 'o', cwd: WORKSPACE, idempotencyKey: 'k-1' });
+  const second = await manager.create({ objective: 'o', cwd: WORKSPACE, idempotencyKey: 'k-1' });
   assert.equal(first.id, second.id);
   assert.equal(store.list().length, 1);
 });
