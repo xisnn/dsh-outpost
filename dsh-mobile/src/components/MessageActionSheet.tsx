@@ -16,10 +16,13 @@
  * 同一手势里抢触发），面板关闭后正文的双击选词、拖手柄选择都是原生的。
  */
 import React, { useEffect, useMemo, useRef, useState } from 'react';
-import { Animated, Modal, Pressable, StyleSheet, Text, View } from 'react-native';
+import { StyleSheet, Text, View } from 'react-native';
+import { MotionModal as Modal } from './MotionModal';
+import { MotionPressable as Pressable } from './MotionPressable';
 
 import { useTheme } from '../design/theme';
 import { copyTextToClipboard } from './clipboard';
+import { maskCredentials } from '../core/credentialDisplay';
 
 /** 复制成功后的反馈时长：够看到，又不至于让面板卡在那里 */
 const COPIED_MS = 700;
@@ -36,16 +39,17 @@ export function MessageActionSheet({
 }) {
   const tv = useTheme();
   const styles = useMemo(() => makeStyles(tv), [tv]);
-  const [copied, setCopied] = useState(false);
+  const [copied, setCopied] = useState<'original' | 'hidden' | null>(null);
+  const maskedText = useMemo(() => maskCredentials(text), [text]);
+  const protectedText = maskedText !== text;
+  const originalLabel = protectedText ? '复制原文（含凭据）' : '复制全文';
   const timer = useRef<ReturnType<typeof setTimeout> | null>(null);
-  const opacity = useRef(new Animated.Value(0)).current;
 
   useEffect(() => {
-    if (!visible) return;
-    setCopied(false);
-    opacity.setValue(0);
-    Animated.timing(opacity, { toValue: 1, duration: 140, useNativeDriver: true }).start();
-  }, [visible, opacity]);
+    setCopied(null);
+    if (timer.current) clearTimeout(timer.current);
+    timer.current = null;
+  }, [visible, text]);
 
   useEffect(
     () => () => {
@@ -57,15 +61,23 @@ export function MessageActionSheet({
 
   /** 预览：压成一行、截断，避免长消息把面板撑高 */
   const preview = useMemo(() => {
-    const flat = text.replace(/\s+/g, ' ').trim();
+    // Detect before truncation; a token cut at the preview edge must not leak its prefix.
+    const flat = maskedText.replace(/\s+/g, ' ').trim();
     return flat.length > 90 ? `${flat.slice(0, 90)}…` : flat;
-  }, [text]);
+  }, [maskedText]);
 
-  const doCopy = () => {
-    if (!copyTextToClipboard(text)) return;
-    setCopied(true);
+  const finishCopy = (kind: 'original' | 'hidden') => {
+    setCopied(kind);
     if (timer.current) clearTimeout(timer.current);
     timer.current = setTimeout(onClose, COPIED_MS);
+  };
+  const doCopy = () => {
+    if (!copyTextToClipboard(text)) return;
+    finishCopy('original');
+  };
+  const doCopyHidden = () => {
+    if (!copyTextToClipboard(maskedText)) return;
+    finishCopy('hidden');
   };
 
   return (
@@ -78,8 +90,8 @@ export function MessageActionSheet({
         行按钮的点击不会被任何东西截胡。
       */}
       <View style={styles.backdrop}>
-        <Pressable style={StyleSheet.absoluteFill} onPress={onClose} accessible={false} />
-        <Animated.View style={[styles.sheet, { opacity }]}>
+        <Pressable feedback="none" style={StyleSheet.absoluteFill} onPress={onClose} accessible={false} />
+        <View style={styles.sheet}>
           <View style={styles.handle} />
           {preview ? (
             <Text style={styles.preview} numberOfLines={2}>
@@ -87,6 +99,14 @@ export function MessageActionSheet({
             </Text>
           ) : null}
 
+          {protectedText ? <>
+            <Text style={styles.preview}>预览已隐藏可识别的凭据，复制原文仍包含凭据。</Text>
+            <Pressable onPress={doCopyHidden}
+              style={({ pressed }: { pressed: boolean }) => [styles.row, pressed ? { backgroundColor: tv.colors.bgCard } : null]}
+              accessibilityRole="button" accessibilityLabel="复制隐藏后文本">
+              <Text style={[styles.rowText, { color: tv.colors.accentBright }]}>{copied === 'hidden' ? '✓ 已复制隐藏后文本' : '复制隐藏后文本'}</Text>
+            </Pressable>
+          </> : null}
           <Pressable
             onPress={doCopy}
             style={({ pressed }: { pressed: boolean }) => [
@@ -94,10 +114,10 @@ export function MessageActionSheet({
               pressed ? { backgroundColor: tv.colors.bgCard } : null,
             ]}
             accessibilityRole="button"
-            accessibilityLabel="复制全文"
+            accessibilityLabel={originalLabel}
           >
-            <Text style={[styles.rowText, copied ? { color: tv.colors.accentBright } : null]}>
-              {copied ? '✓ 已复制' : '复制全文'}
+            <Text style={[styles.rowText, copied === 'original' ? { color: tv.colors.accentBright } : null]}>
+              {copied === 'original' ? '✓ 已复制原文' : originalLabel}
             </Text>
           </Pressable>
 
@@ -114,7 +134,7 @@ export function MessageActionSheet({
           >
             <Text style={[styles.rowText, { color: tv.colors.textSecondary }]}>取消</Text>
           </Pressable>
-        </Animated.View>
+        </View>
       </View>
     </Modal>
   );
@@ -154,6 +174,8 @@ function makeStyles(tv: ReturnType<typeof useTheme>) {
       paddingBottom: tv.space.sm,
     },
     row: {
+      minHeight: 44,
+      justifyContent: 'center',
       paddingHorizontal: tv.space.lg,
       paddingVertical: tv.space.md,
     },

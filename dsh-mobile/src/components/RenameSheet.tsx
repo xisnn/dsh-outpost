@@ -6,17 +6,9 @@
  */
 
 import React, { useEffect, useMemo, useState } from 'react';
-import {
-  ActivityIndicator,
-  KeyboardAvoidingView,
-  Modal,
-  Platform,
-  Pressable,
-  StyleSheet,
-  Text,
-  TextInput,
-  View,
-} from 'react-native';
+import { ActivityIndicator, KeyboardAvoidingView, Platform, StyleSheet, Text, TextInput, View } from 'react-native';
+import { MotionModal as Modal } from './MotionModal';
+import { MotionPressable as Pressable } from './MotionPressable';
 
 import { useTheme } from '../design/theme';
 
@@ -54,7 +46,7 @@ export function RenameSheet({
         style={styles.backdrop}
         behavior={Platform.OS === 'ios' ? 'padding' : undefined}
       >
-        <Pressable style={StyleSheet.absoluteFill} onPress={onCancel} />
+        <Pressable feedback="none" style={StyleSheet.absoluteFill} onPress={onCancel} />
         <View style={styles.sheet}>
           <Text style={styles.title}>重命名会话</Text>
           <Text style={styles.hint}>改完只影响这个会话显示的名字，不影响内容</Text>

@@ -4,43 +4,12 @@
  * RN 没有 CSS gradient，用多层半透明 View 叠加模拟。
  * 所有颜色都来自 useTheme()，随主题切换。
  */
-import React, { useEffect, useRef } from 'react';
-import { Animated, StyleSheet, Text, View } from 'react-native';
+import React from 'react';
+import { StyleSheet, Text, View } from 'react-native';
 import { useTheme } from '../design/theme';
 
-/**
- * 折叠区展开动画：淡入 + 轻微上滑。
- *
- * 为什么不用 LayoutAnimation：RN 0.81 默认开 Fabric（New Architecture），
- * 而 `setLayoutAnimationEnabledExperimental` 在 Fabric 下是 **no-op**，
- * `LayoutAnimation.configureNext()` 不生效（还会在 LogBox 里刷警告）。
- * 所以改用 Animated —— 不测量高度，只做透明度 + 位移，稳定且不吃布局。
- */
-export function Collapse({ children }: { children: React.ReactNode }) {
-  const t = useTheme();
-  const anim = useRef(new Animated.Value(0)).current;
-
-  useEffect(() => {
-    Animated.timing(anim, {
-      toValue: 1,
-      duration: t.motion.enterMs,
-      useNativeDriver: true,
-    }).start();
-  }, [anim, t.motion.enterMs]);
-
-  return (
-    <Animated.View
-      style={{
-        opacity: anim,
-        transform: [
-          { translateY: anim.interpolate({ inputRange: [0, 1], outputRange: [-6, 0] }) },
-        ],
-      }}
-    >
-      {children}
-    </Animated.View>
-  );
-}
+/** Shared measured collapse; omitted `open` preserves initially open callers. */
+export { MotionCollapse as Collapse } from './MotionCollapse';
 
 /** 多层叠加模拟线性渐变（从上到下） */
 export function GradientFill({

@@ -42,7 +42,8 @@
     },
     {
       "from": "../scripts",
-      "to": "scripts"
+      "to": "scripts",
+      "filter": ["gateway-patch-gate.ps1", "butler-installer.ps1"]
     },
     {
       "from": "../patches",

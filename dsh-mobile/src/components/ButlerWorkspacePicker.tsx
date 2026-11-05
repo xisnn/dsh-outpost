@@ -9,7 +9,9 @@
  * 只在「还没绑过工作区」时弹，绑过之后直接复用，不会每次打扰。
  */
 import React, { useMemo, useState } from 'react';
-import { FlatList, Modal, Pressable, StyleSheet, Text, View } from 'react-native';
+import { FlatList, StyleSheet, Text, View } from 'react-native';
+import { MotionModal as Modal } from './MotionModal';
+import { MotionPressable as Pressable } from './MotionPressable';
 
 import { useTheme } from '../design/theme';
 import { space } from '../design/tokens';

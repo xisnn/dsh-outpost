@@ -7,16 +7,10 @@
  * - 底部显示 token 用量明细
  */
 import React, { useEffect, useMemo, useState } from 'react';
-import {
-  ActivityIndicator,
-  FlatList,
-  Modal,
-  Pressable,
-  ScrollView,
-  StyleSheet,
-  Text,
-  View,
-} from 'react-native';
+import { ActivityIndicator, FlatList, ScrollView, StyleSheet, Text, View } from 'react-native';
+import { MotionModal as Modal } from './MotionModal';
+import { LoadingSkeleton } from './LoadingSkeleton';
+import { MotionPressable as Pressable } from './MotionPressable';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 
 import { useApp } from '../App';
@@ -67,6 +61,8 @@ export function ModelSwitcher({
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [switching, setSwitching] = useState<string | null>(null);
+  const [catalogRetry, setCatalogRetry] = useState(0);
+  const [initialLoadSettled, setInitialLoadSettled] = useState(false);
 
   const ratio = contextWindow > 0 ? contextUsed / contextWindow : 0;
   const pct = Math.round(ratio * 100);
@@ -75,19 +71,24 @@ export function ModelSwitcher({
 
   useEffect(() => {
     if (!open || catalog) return;
+    let active = true;
     setLoading(true);
     setError(null);
     void (async () => {
       try {
         const c = await store.modelCatalog();
-        setCatalog(c);
+        if (active) setCatalog(c);
       } catch (e) {
-        setError(e instanceof Error ? e.message : String(e));
+        if (active) setError(e instanceof Error ? e.message : String(e));
       } finally {
-        setLoading(false);
+        if (active) {
+          setLoading(false);
+          setInitialLoadSettled(true);
+        }
       }
     })();
-  }, [open, catalog, store]);
+    return () => { active = false; };
+  }, [open, catalog, store, catalogRetry]);
 
   const pick = async (provider: string, model: CatalogModel) => {
     setSwitching(`${provider}/${model.id}`);
@@ -173,7 +174,7 @@ export function ModelSwitcher({
 
       <Modal visible={open} animationType="slide" transparent onRequestClose={() => setOpen(false)}>
         <View style={styles.backdrop}>
-          <Pressable style={styles.backdropFill} onPress={() => setOpen(false)} />
+          <Pressable feedback="none" style={styles.backdropFill} onPress={() => setOpen(false)} />
           <View style={[styles.sheet, { paddingBottom: Math.max(insets.bottom, space.lg) }]}>
             <View style={styles.sheetHandle} />
             <Text style={styles.sheetTitle}>模型</Text>
@@ -204,13 +205,16 @@ export function ModelSwitcher({
               ) : null}
             </View>
 
-            {loading ? (
+            {error && catalog ? <Text style={styles.error}>{error}</Text> : null}
+            {!catalog && !initialLoadSettled && !error ? (
+              <LoadingSkeleton label="正在加载模型列表" variant="model" />
+            ) : !catalog ? (
               <View style={styles.center}>
-                <ActivityIndicator color={tv.colors.accent} />
-              </View>
-            ) : error ? (
-              <View style={styles.center}>
-                <Text style={styles.error}>{error}</Text>
+                {error ? <Text style={styles.error}>{error}</Text> : null}
+                <Pressable accessibilityRole="button" disabled={loading}
+                  onPress={() => setCatalogRetry(n => n + 1)} style={styles.retry}>
+                  <Text style={styles.retryText}>{loading ? '重新加载中…' : '重新加载'}</Text>
+                </Pressable>
               </View>
             ) : (
               <FlatList
@@ -422,5 +426,7 @@ function makeStyles(tv: ReturnType<typeof useTheme>) {
     check: { color: C.accent, fontSize: type.lg },
     center: { padding: space.xxl, alignItems: 'center' },
     error: { color: C.danger, fontSize: type.sm, textAlign: 'center' },
+    retry: { padding: space.md, minHeight: 44, minWidth: 64, justifyContent: 'center', alignItems: 'center' },
+    retryText: { color: C.accent, fontSize: type.sm },
   });
 }

@@ -259,7 +259,8 @@ check('聊天页给列表配了阅读位置锁定（且首次落底后才启用�
 });
 
 check('聊天页用纯函数判定离底与显隐（没有内联魔数）', () => {
-  const usesHelper = /shouldShowJumpToBottom\(/.test(chatSrc) && /distanceFromBottom\(/.test(chatSrc);
+  const scrollHook = readFileSync('src/components/useChatScroll.ts', 'utf8');
+  const usesHelper = /useChatScroll\(chat.items,/.test(chatSrc) && /shouldShowJumpToBottom\(/.test(scrollHook) && /distanceFromBottom\(/.test(scrollHook);
   return usesHelper ? true : 'ChatScreen 没走 core/scrollFollow 的判定函数';
 });
 
@@ -356,7 +357,7 @@ check('代码块不被外层长按 Pressable 包裹（避免抢复制按钮点�
 check('代码块复制按钮具备清晰对比度与触控热区', () => {
   const btnSrc = readFileSync('src/components/CopyTextButton.tsx', 'utf8');
   return /color:\s*C\.textSecondary/.test(btnSrc) &&
-    /minHeight:\s*28/.test(btnSrc) &&
+    /minHeight:\s*44/.test(btnSrc) &&
     /minWidth:\s*48/.test(btnSrc) &&
     /hitSlop=/.test(btnSrc)
     ? true

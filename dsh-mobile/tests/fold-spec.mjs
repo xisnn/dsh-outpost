@@ -20,11 +20,12 @@ const samples = JSON.parse(fs.readFileSync(SAMPLES, 'utf8'));
 
 // ── 直接复用 src/core/fold 的运行时等价实现 ──────────────────────
 // TS 源码无法直接 import（无构建），这里用 Node 24 的 TS 支持尝试。
-let foldEvents, toChatItems;
+let foldEvents, toChatItems, isInjectedMessage;
 try {
   const mod = await import('../src/core/fold/index.ts');
   foldEvents = mod.foldEvents;
   toChatItems = mod.toChatItems;
+  isInjectedMessage = mod.isInjectedMessage;
   console.log('已加载 src/core/fold/index.ts（原生 TS 支持）\n');
 } catch (e) {
   console.error('无法直接 import TS，请用 node --experimental-strip-types 运行');
@@ -229,6 +230,10 @@ console.log('\n=== 真实 DSH tool-call.id 与 tool/call.callId 合并去重\n')
   check('assistant/message 的 id 与 tool/call 的 callId 合并为 1 个工具块', tools.length === 1, `tools=${tools.length}`);
   check('合并后的工具块已填入结果且 pending=false', tools[0]?.pending === false && tools[0]?.output === 'export const port = 3095;');
 }
+
+// goal-round-driver 的续轮提示是内部执行指令，不能显示成用户气泡。
+check('goal_round 续轮提示被当作注入消息过滤', isInjectedMessage('<goal_round>\nObjective: "x"') === true);
+check('普通用户消息不会被过滤', isInjectedMessage('请继续整理发布记录') === false);
 
 console.log(`\n结果：${pass} 通过，${fail} 失败`);
 process.exit(fail === 0 ? 0 : 1);

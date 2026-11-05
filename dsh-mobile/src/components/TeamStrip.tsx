@@ -5,7 +5,8 @@
  * 点任意位置弹出「成员在干什么」的浮动卡片（TeamSheet）。
  */
 import React, { useMemo } from 'react';
-import { Pressable, ScrollView, StyleSheet, Text, View } from 'react-native';
+import { ScrollView, StyleSheet, Text, View } from 'react-native';
+import { MotionPressable as Pressable } from './MotionPressable';
 
 import { useTheme } from '../design/theme';
 import {

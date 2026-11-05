@@ -10,12 +10,13 @@
  * ## 视觉取舍
  *
  * 复制是一个**次要动作**，不该和正文抢注意力：
- *   · 常态：极小号字 + 最弱的文字色（textFaint），不描边不填充；
+ *   · 常态：次要文字色、无描边填充，标题栏内保留 44dp 触摸高度；
  *   · 点击后：文案换成「已复制」+ 强调色，1.5 秒后回到常态。
  * 不放图标库（本项目不引图标依赖），用纯文本 + 字形，和 Pill / 折叠头一致。
  */
 import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
-import { Pressable, StyleSheet, Text } from 'react-native';
+import { StyleSheet, Text } from 'react-native';
+import { MotionPressable as Pressable } from './MotionPressable';
 
 import { useTheme } from '../design/theme';
 import { copyTextToClipboard } from './clipboard';
@@ -61,8 +62,8 @@ export function CopyTextButton({
     <Pressable
       onPress={onPress}
       disabled={disabled}
-      // 按钮自身已扩到 ≥28px 高，再加外扩热区保证拇指一按即中
-      hitSlop={{ top: 10, bottom: 10, left: 12, right: 12 }}
+      // Keep a full touch target within the code header.
+      hitSlop={{ top: 0, bottom: 0, left: 4, right: 4 }}
       style={({ pressed }: { pressed: boolean }) => [
         styles.inline,
         pressed ? { backgroundColor: tv.colors.border, opacity: tv.motion.pressOpacity } : null,
@@ -85,14 +86,12 @@ function makeStyles(tv: ReturnType<typeof useTheme>) {
     inline: {
       paddingHorizontal: 10,
       paddingVertical: 4,
-      minHeight: 28,
+      minHeight: 44,
       minWidth: 48,
       alignItems: 'center',
       justifyContent: 'center',
       borderRadius: tv.radius.xs,
-      backgroundColor: C.bgRaised,
-      borderWidth: StyleSheet.hairlineWidth,
-      borderColor: C.border,
+      backgroundColor: 'transparent',
     },
     inlineText: {
       color: C.textSecondary,

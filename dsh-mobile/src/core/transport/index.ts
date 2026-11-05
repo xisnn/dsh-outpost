@@ -457,6 +457,87 @@ export class DshConnection {
     return result.value as T;
   }
 
+  /**
+   * 请求 `/api/*` 下的非 typed-RPC Fetch 路由（例如 Outpost TaskApi）。
+   *
+   * 与 `call` 共用当前 Cookie、超时和 Set-Cookie 轮换逻辑；区别是：
+   *   · 路径是调用方给的 `/api/...`，不是 `ns/method`；
+   *   · 请求体就是普通 JSON，不包 `client-request` 信封；
+   *   · 返回值就是响应 JSON，不读 `result.value`。
+   */
+  async request<T = unknown>(
+    path: string,
+    init: {
+      method?: 'GET' | 'POST';
+      body?: unknown;
+      headers?: Record<string, string>;
+      timeoutMs?: number;
+    } = {},
+  ): Promise<T> {
+    if (!this.cookie) throw new Error('not authenticated: call loginWithToken first');
+    if (!path.startsWith('/api/')) throw new Error('request path must start with /api/');
+
+    const timeoutMs = init.timeoutMs && init.timeoutMs > 0 ? init.timeoutMs : RPC_TIMEOUT_MS;
+    const ctrl = new AbortController();
+    const timer = setTimeout(() => ctrl.abort(), timeoutMs);
+    const url = `${this.baseUrl}${path}`;
+    let res: Response;
+    try {
+      res = await this.fetchImpl(url, {
+        method: init.method ?? 'GET',
+        headers: {
+          ...(init.body !== undefined ? { 'Content-Type': 'application/json' } : {}),
+          ...(init.headers ?? {}),
+          Cookie: this.cookie,
+        },
+        body: init.body !== undefined ? JSON.stringify(init.body) : undefined,
+        signal: ctrl.signal,
+      });
+      if (!res.ok) {
+        let message = '';
+        if (res.status !== 401 && res.status !== 403) {
+          try {
+            const body = JSON.parse(await res.text()) as { message?: unknown };
+            if (typeof body.message === 'string') message = body.message.slice(0, 300);
+          } catch { /* Preserve the HTTP status for non-JSON error pages. */ }
+        }
+        throw makeRpcError(path, 'http', `HTTP ${res.status}${message ? `: ${message}` : ''}`);
+      }
+
+      // 与 call 一致：服务端在成功响应头里轮换 dsh-auth Cookie 时同步内存。
+      try {
+        const setCookie = res.headers?.get?.('set-cookie');
+        if (setCookie && setCookie.includes('dsh-auth')) {
+          const rotated = extractCookie([setCookie]);
+          if (rotated && rotated.startsWith('dsh-auth') && rotated !== this.cookie) {
+            this.cookie = rotated;
+            void import('../cookieJar')
+              .then(({ syncNativeCookieJar }) => syncNativeCookieJar(this.baseUrl, rotated))
+              .catch(() => undefined);
+          }
+        }
+      } catch {
+        /* ignore header read differences across environments */
+      }
+
+      const text = await res.text();
+      try {
+        return JSON.parse(text) as T;
+      } catch {
+        throw makeRpcError(path, 'malformed', 'malformed JSON response（不是 JSON）');
+      }
+    } catch (e) {
+      if (e instanceof RpcError) throw e;
+      const err = e as { name?: string; message?: string };
+      if (err?.name === 'AbortError') {
+        throw makeRpcError(path, 'network', `请求超时（${Math.round(timeoutMs / 1000)} 秒无响应）`, e);
+      }
+      throw makeRpcError(path, 'network', `${err?.name ?? ''}: ${err?.message ?? ''}`.trim(), e);
+    } finally {
+      clearTimeout(timer);
+    }
+  }
+
   /** 建立 WebSocket（惰性，复用，带并发 single-flight 与代次隔离） */
   private async ensureSocket(): Promise<WebSocket> {
     if (this.ws && this.ws.readyState === 1) return this.ws;

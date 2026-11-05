@@ -1,0 +1,23 @@
+// Optional local workaround for a broken auto-provisioned JDK 17.
+// Use with -Preact.internal.disableJavaVersionAlignment=true and JAVA_HOME=JDK21.
+// The compiler runs on JDK 21; Android Java/Kotlin bytecode stays at 17.
+gradle.beforeProject { p ->
+    ['com.android.application', 'com.android.library'].each { plugin ->
+        p.plugins.withId(plugin) {
+            // Libraries may set their own defaults after applying the plugin.
+            // Finalize together so Java and Kotlin retain the same target.
+            p.androidComponents.finalizeDsl { android ->
+                android.compileOptions {
+                    sourceCompatibility = JavaVersion.VERSION_17
+                    targetCompatibility = JavaVersion.VERSION_17
+                }
+            }
+        }
+    }
+    p.plugins.withId('org.jetbrains.kotlin.android') {
+        p.kotlin.jvmToolchain(21)
+    }
+    p.tasks.configureEach { t ->
+        if (t.hasProperty('kotlinOptions')) t.kotlinOptions.jvmTarget = '17'
+    }
+}

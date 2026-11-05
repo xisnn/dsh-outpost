@@ -4,10 +4,11 @@
  * 微信式结构 —— tab 只在首页存在，进入会话列表/聊天后整屏压栈，tab 栏隐藏。
  * 纯 RN 原生控件（Pressable + Text），不引图标库，字形与全局视觉一致。
  */
-import React, { useMemo } from 'react';
-import { Pressable, StyleSheet, Text, View } from 'react-native';
+import React, { useCallback, useEffect, useMemo, useRef } from 'react';
+import { Animated, Pressable, StyleSheet, Text, View } from 'react-native';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 
+import { MOTION, useMotionPreference } from '../design/motion';
 import { useTheme } from '../design/theme';
 
 export type HomeTab = 'butler' | 'workspaces' | 'me';
@@ -38,25 +39,69 @@ export function TabBar({
         const active = key === tab;
         const meta = TAB_META[key];
         return (
-          <Pressable
+          <TabItem
             key={key}
+            active={active}
+            meta={meta}
+            styles={styles}
             onPress={() => onChange(key)}
-            hitSlop={{ top: 8, bottom: 8 }}
-            style={styles.item}
-            accessibilityRole="tab"
-            accessibilityState={{ selected: active }}
-            accessibilityLabel={meta.label}
-          >
-            <Text style={[styles.icon, active ? styles.iconActive : styles.iconIdle]}>
-              {meta.icon}
-            </Text>
-            <Text style={[styles.label, active ? styles.labelActive : styles.labelIdle]}>
-              {meta.label}
-            </Text>
-          </Pressable>
+          />
         );
       })}
     </View>
+  );
+}
+
+function TabItem({ active, meta, styles, onPress }: {
+  active: boolean;
+  meta: { icon: string; label: string };
+  styles: ReturnType<typeof makeStyles>;
+  onPress: () => void;
+}) {
+  const reduceMotion = useMotionPreference();
+  const scale = useRef(new Animated.Value(1)).current;
+  const wasActive = useRef(active);
+  const animateTo = useCallback((toValue: number, duration: number) => {
+    scale.stopAnimation();
+    if (reduceMotion) {
+      scale.setValue(1);
+      return;
+    }
+    Animated.timing(scale, { toValue, duration, useNativeDriver: true }).start();
+  }, [reduceMotion, scale]);
+
+  useEffect(() => {
+    scale.stopAnimation();
+    if (active && !wasActive.current && !reduceMotion) {
+      scale.setValue(0.96);
+      animateTo(1, MOTION.enter);
+    } else {
+      scale.setValue(1);
+    }
+    wasActive.current = active;
+    return () => scale.stopAnimation();
+  }, [active, animateTo, reduceMotion, scale]);
+
+  return (
+    <Pressable
+      onPress={onPress}
+      onPressIn={() => animateTo(0.97, MOTION.press)}
+      onPressOut={() => animateTo(1, MOTION.press)}
+      hitSlop={{ top: 8, bottom: 8 }}
+      style={styles.item}
+      accessibilityRole="tab"
+      accessibilityState={{ selected: active }}
+      accessibilityLabel={meta.label}
+    >
+      <Animated.View style={{ alignItems: 'center', transform: [{ scale }] }} pointerEvents="none">
+        <Text style={[styles.icon, active ? styles.iconActive : styles.iconIdle]}>
+          {meta.icon}
+        </Text>
+        <Text style={[styles.label, active ? styles.labelActive : styles.labelIdle]}>
+          {meta.label}
+        </Text>
+      </Animated.View>
+    </Pressable>
   );
 }
 

@@ -10,7 +10,8 @@
  *   6. 提交失败 / 断线 / 401 / 403 / 超时未确认时自动恢复待审批状态并明确报错。
  */
 import React, { useEffect, useMemo, useRef, useState } from 'react';
-import { Platform, Pressable, ScrollView, StyleSheet, Text, View } from 'react-native';
+import { Platform, ScrollView, StyleSheet, Text, View } from 'react-native';
+import { MotionPressable as Pressable } from './MotionPressable';
 
 import {
   APPROVAL_COMMIT_TIMEOUT_MS,
@@ -25,6 +26,7 @@ import {
   type SessionTitleLike,
 } from '../core/approvalDock';
 import { useTheme } from '../design/theme';
+import { actionStyles } from '../design/actionStyles';
 
 /** 会话事件流或网关推来的审批项 */
 export interface ReadonlyApproval extends ApprovalCandidate {
@@ -61,6 +63,7 @@ export function ApprovalBanner({
 }) {
   const tv = useTheme();
   const styles = useMemo(() => makeStyles(tv), [tv]);
+  const actions = useMemo(() => actionStyles(tv), [tv]);
   const controller = useRef(new ApprovalSubmitController()).current;
   const [, bump] = useState(0);
   const [collapsed, setCollapsed] = useState(false);
@@ -214,11 +217,11 @@ export function ApprovalBanner({
             ]}
             accessibilityRole="button"
             accessibilityState={{ expanded: false }}
-            accessibilityLabel={`展开待审批：${current.toolName}`}
+            accessibilityLabel={`展开${risk.highRisk ? '高危' : ''}待审批：${current.toolName}`}
           >
-            <Text style={styles.icon}>{risk.highRisk ? '⛔' : '⚠'}</Text>
+            <Text style={[styles.icon, risk.highRisk ? styles.highRiskText : null]}>{risk.highRisk ? '⛔' : '⚠'}</Text>
             <Text style={styles.collapsedTitle} numberOfLines={1}>
-              等待授权 ({safeIndex + 1}/{total}) · {current.toolName}
+              {risk.highRisk ? '高危待授权' : '等待授权'} ({safeIndex + 1}/{total}) · {current.toolName}
               {details.command ? ` · ${details.command}` : details.targetPath ? ` · ${details.targetPath}` : ''}
             </Text>
             <Text style={styles.collapseToggleText}>展开 ⌃</Text>
@@ -228,7 +231,7 @@ export function ApprovalBanner({
             {/* 顶栏：标题 + 多审批切换器 + 收起按钮 */}
             <View style={styles.headerRow}>
               <View style={styles.headerLeft}>
-                <Text style={styles.icon}>{risk.highRisk ? '⛔' : '⚠'}</Text>
+                <Text style={[styles.icon, risk.highRisk ? styles.highRiskText : null]}>{risk.highRisk ? '⛔' : '⚠'}</Text>
                 <Text style={styles.title}>
                   {risk.highRisk ? '高危操作需要授权' : '需要授权'}
                 </Text>
@@ -366,26 +369,26 @@ export function ApprovalBanner({
                 <Pressable
                   onPress={() => press('rejected')}
                   style={({ pressed }: { pressed: boolean }) => [
-                    styles.btn,
-                    styles.btnGhost,
+                    actions.base,
+                    actions.quiet,
                     pressed ? { opacity: tv.motion.pressOpacity } : null,
                   ]}
                   accessibilityRole="button"
                   accessibilityLabel="拒绝"
                 >
-                  <Text style={[styles.btnText, { color: tv.colors.danger }]}>拒绝</Text>
+                  <Text style={actions.dangerText}>拒绝</Text>
                 </Pressable>
                 <Pressable
                   onPress={() => press('allowed-once')}
                   style={({ pressed }: { pressed: boolean }) => [
-                    styles.btn,
-                    armed ? styles.btnArmed : styles.btnPrimary,
+                    actions.base,
+                    risk.highRisk ? actions.danger : actions.primary,
                     pressed ? { opacity: tv.motion.pressOpacity } : null,
                   ]}
                   accessibilityRole="button"
                   accessibilityLabel={armed ? '再次点击确认允许' : '允许一次'}
                 >
-                  <Text style={[styles.btnText, { color: tv.colors.bg }]}>
+                  <Text style={risk.highRisk ? actions.dangerFillText : actions.primaryText}>
                     {armed ? '再次点击确认允许' : '允许一次'}
                   </Text>
                 </Pressable>
@@ -449,6 +452,7 @@ export function ApprovalReminderStrip({
   const targetTitle =
     (jumpSessionId ? titleMap.get(jumpSessionId) : undefined) ?? '待处理会话';
   const isOtherWorkspace = workspaceSessionIds && scoped.length === 0;
+  const highRisk = targetList.some(item => assessApprovalRisk({ ...item, id: item.rpcId }).highRisk);
 
   return (
     <Pressable
@@ -457,12 +461,13 @@ export function ApprovalReminderStrip({
       }}
       style={({ pressed }: { pressed: boolean }) => [
         styles.reminderStrip,
+        highRisk ? styles.reminderHighRisk : null,
         pressed ? { opacity: tv.motion.pressOpacity } : null,
       ]}
       accessibilityRole="button"
-      accessibilityLabel={`待审批提醒：${targetTitle}，共 ${targetList.length} 个，点击前往处理`}
+      accessibilityLabel={`${highRisk ? '含高危操作，' : ''}待审批提醒：${targetTitle}，共 ${targetList.length} 个，点击前往处理`}
     >
-      <Text style={styles.reminderIcon}>⚠</Text>
+      <Text style={[styles.reminderIcon, highRisk ? styles.highRiskText : null]}>{highRisk ? '⛔' : '⚠'}</Text>
       <View style={styles.reminderBody}>
         <Text style={styles.reminderTitle} numberOfLines={1}>
           {isOtherWorkspace
@@ -475,7 +480,7 @@ export function ApprovalReminderStrip({
           {firstWithSession.reason ? ` · ${firstWithSession.reason}` : ''}
         </Text>
       </View>
-      <Text style={styles.reminderAction}>去处理 ›</Text>
+      <Text style={[styles.reminderAction, highRisk ? styles.highRiskText : null]}>{highRisk ? '含高危 · 去处理 ›' : '去处理 ›'}</Text>
     </Pressable>
   );
 }
@@ -523,11 +528,13 @@ function makeStyles(tv: ReturnType<typeof useTheme>) {
       paddingHorizontal: tv.space.md,
       paddingVertical: 9,
       borderRadius: tv.radius.md,
-      backgroundColor: C.dangerWash,
+      backgroundColor: C.warningWash,
       borderLeftWidth: 3,
-      borderLeftColor: C.danger,
+      borderLeftColor: C.warning,
     },
     collapsedBarHighRisk: {
+      backgroundColor: C.dangerWash,
+      borderLeftColor: C.danger,
       borderWidth: 1,
       borderColor: C.danger,
     },
@@ -538,6 +545,8 @@ function makeStyles(tv: ReturnType<typeof useTheme>) {
       fontWeight: tv.weight.medium,
     },
     collapseBtn: {
+      minHeight: 44,
+      justifyContent: 'center',
       paddingHorizontal: 6,
       paddingVertical: 2,
     },
@@ -550,35 +559,36 @@ function makeStyles(tv: ReturnType<typeof useTheme>) {
       paddingHorizontal: tv.space.md,
       paddingVertical: tv.space.sm,
       borderRadius: tv.radius.md,
-      backgroundColor: C.dangerWash,
+      backgroundColor: C.warningWash,
       borderLeftWidth: 3,
-      borderLeftColor: C.danger,
+      borderLeftColor: C.warning,
     },
     wrapHighRisk: {
+      backgroundColor: C.dangerWash,
+      borderLeftColor: C.danger,
       borderWidth: 1,
       borderColor: C.danger,
     },
-    headerRow: {
-      flexDirection: 'row',
-      alignItems: 'center',
-      justifyContent: 'space-between',
-    },
+    headerRow: { gap: tv.space.xs },
     headerLeft: {
       flexDirection: 'row',
+      flexWrap: 'wrap',
       alignItems: 'center',
-      flex: 1,
       minWidth: 0,
+      rowGap: tv.space.xs,
     },
     headerRight: {
       flexDirection: 'row',
       alignItems: 'center',
+      alignSelf: 'flex-end',
       gap: 6,
     },
     icon: {
       fontSize: tv.type.sm,
       marginRight: tv.space.xs,
-      color: C.danger,
+      color: C.warning,
     },
+    highRiskText: { color: C.danger },
     title: {
       color: C.text,
       fontSize: tv.type.sm,
@@ -590,8 +600,7 @@ function makeStyles(tv: ReturnType<typeof useTheme>) {
       paddingVertical: 1,
       borderRadius: tv.radius.sm,
       backgroundColor: C.bgRaised,
-      borderWidth: StyleSheet.hairlineWidth,
-      borderColor: C.border,
+      flexShrink: 1,
     },
     toolBadgeText: {
       color: C.textSecondary,
@@ -605,10 +614,12 @@ function makeStyles(tv: ReturnType<typeof useTheme>) {
       borderRadius: tv.radius.sm,
       paddingHorizontal: 4,
       paddingVertical: 1,
-      borderWidth: StyleSheet.hairlineWidth,
-      borderColor: C.border,
     },
     pagerBtn: {
+      minWidth: 44,
+      minHeight: 44,
+      alignItems: 'center',
+      justifyContent: 'center',
       paddingHorizontal: 6,
       paddingVertical: 2,
     },
@@ -658,9 +669,7 @@ function makeStyles(tv: ReturnType<typeof useTheme>) {
       paddingHorizontal: tv.space.sm,
       paddingVertical: 6,
       borderRadius: tv.radius.sm,
-      backgroundColor: C.warningWash,
-      borderWidth: StyleSheet.hairlineWidth,
-      borderColor: C.warning,
+      backgroundColor: C.dangerWash,
     },
     riskTitle: {
       color: C.danger,
@@ -677,7 +686,7 @@ function makeStyles(tv: ReturnType<typeof useTheme>) {
       paddingHorizontal: tv.space.sm,
       paddingVertical: 6,
       borderRadius: tv.radius.sm,
-      backgroundColor: C.bgRaised,
+      backgroundColor: C.dangerWash,
       borderWidth: 1,
       borderColor: C.danger,
     },
@@ -691,29 +700,6 @@ function makeStyles(tv: ReturnType<typeof useTheme>) {
       justifyContent: 'flex-end',
       gap: tv.space.sm,
       marginTop: tv.space.sm,
-    },
-    btn: {
-      minWidth: 76,
-      paddingHorizontal: tv.space.md,
-      paddingVertical: 6,
-      borderRadius: tv.radius.sm,
-      alignItems: 'center',
-      justifyContent: 'center',
-    },
-    btnGhost: {
-      borderWidth: 1,
-      borderColor: C.danger,
-      backgroundColor: C.bgRaised,
-    },
-    btnPrimary: {
-      backgroundColor: C.danger,
-    },
-    btnArmed: {
-      backgroundColor: C.warning,
-    },
-    btnText: {
-      fontSize: tv.type.xs,
-      fontWeight: tv.weight.semibold,
     },
     help: {
       color: C.textTertiary,
@@ -734,8 +720,9 @@ function makeStyles(tv: ReturnType<typeof useTheme>) {
       borderWidth: StyleSheet.hairlineWidth,
       borderColor: C.warning,
     },
+    reminderHighRisk: { backgroundColor: C.dangerWash, borderColor: C.danger },
     reminderIcon: {
-      color: C.danger,
+      color: C.warning,
       fontSize: tv.type.base,
       marginRight: tv.space.sm,
     },
@@ -754,7 +741,7 @@ function makeStyles(tv: ReturnType<typeof useTheme>) {
       marginTop: 1,
     },
     reminderAction: {
-      color: C.danger,
+      color: C.warning,
       fontSize: tv.type.xs,
       fontWeight: tv.weight.semibold,
       marginLeft: tv.space.sm,

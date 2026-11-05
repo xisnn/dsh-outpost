@@ -40,16 +40,8 @@
  */
 
 import React, { useCallback, useEffect, useState } from 'react';
-import {
-  ActivityIndicator,
-  Alert,
-  Pressable,
-  RefreshControl,
-  ScrollView,
-  StyleSheet,
-  Text,
-  View,
-} from 'react-native';
+import { ActivityIndicator, Alert, RefreshControl, ScrollView, StyleSheet, Text, View } from 'react-native';
+import { MotionPressable as Pressable } from '../components/MotionPressable';
 
 import { useTheme } from '../design/theme';
 import { radius, space, type, weight } from '../design/tokens';

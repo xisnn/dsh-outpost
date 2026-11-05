@@ -8,7 +8,8 @@
  * 收起时只有一行（队员头像 + 进度），点开是任务清单。
  */
 import React, { useMemo, useState } from 'react';
-import { Pressable, StyleSheet, Text, View } from 'react-native';
+import { StyleSheet, Text, View } from 'react-native';
+import { MotionPressable as Pressable } from './MotionPressable';
 
 import { useTheme } from '../design/theme';
 import type { AgentTeam, TeamMember, TeamTask } from '../core/types';

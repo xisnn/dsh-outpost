@@ -9,13 +9,13 @@ import React, { useEffect, useMemo, useRef, useState } from 'react';
 import {
   Animated,
   Easing,
-  Pressable,
   StyleSheet,
   Text,
   View,
 } from 'react-native';
 import { useTheme } from '../design/theme';
 import { useReduceMotion } from '../design/useReduceMotion';
+import { MotionPressable as Pressable } from './MotionPressable';
 import { motion, radius, space, type, weight } from '../design/tokens';
 import { Collapse } from './ui';
 
@@ -144,15 +144,13 @@ export function ThinkingAccordion({ text, done }: { text: string; done: boolean 
         </Text>
       </Pressable>
 
-      {open ? (
-        <Collapse>
-          <View style={styles.body}>
-            <Text style={styles.bodyText} selectable>
-              {text}
-            </Text>
-          </View>
-        </Collapse>
-      ) : null}
+      <Collapse open={open}>
+        <View style={styles.body}>
+          <Text style={styles.bodyText} selectable>
+            {text}
+          </Text>
+        </View>
+      </Collapse>
     </View>
   );
 }

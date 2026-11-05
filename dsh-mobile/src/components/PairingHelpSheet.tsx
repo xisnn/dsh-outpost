@@ -5,7 +5,9 @@
  * 内容超长时卡片内部滚动，按钮固定在卡片底部。
  */
 import React, { useMemo } from 'react';
-import { Modal, Pressable, ScrollView, StyleSheet, Text, View } from 'react-native';
+import { ScrollView, StyleSheet, Text, View } from 'react-native';
+import { MotionModal as Modal } from './MotionModal';
+import { MotionPressable as Pressable } from './MotionPressable';
 
 import { useTheme } from '../design/theme';
 
@@ -28,7 +30,7 @@ export function PairingHelpSheet({
 
   return (
     <Modal visible={visible} transparent animationType="fade" statusBarTranslucent onRequestClose={onClose}>
-      <Pressable style={styles.backdrop} onPress={onClose}>
+      <Pressable feedback="none" style={styles.backdrop} onPress={onClose}>
         <Pressable
           style={styles.card}
           onPress={() => {

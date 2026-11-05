@@ -14,6 +14,8 @@
 import React, { useCallback, useEffect, useMemo, useState } from 'react';
 import { ActivityIndicator, Alert, AppState, type AppStateStatus, StatusBar, StyleSheet, View } from 'react-native';
 import { SafeAreaProvider } from 'react-native-safe-area-context';
+import { GestureHandlerRootView } from 'react-native-gesture-handler';
+import { BottomSheetModalProvider } from '@gorhom/bottom-sheet';
 import AsyncStorage from '@react-native-async-storage/async-storage';
 
 import { DshConnection } from './core/transport';
@@ -51,6 +53,7 @@ import { WORKSPACE_CUSTOM_KEY, type WorkspaceCustom } from './core/workspace-cus
 import { draftStore } from './core/draftStore';
 import { sessionPinStore } from './core/sessionPins';
 import { ThemeProvider, useTheme } from './design/theme';
+import { MotionProvider } from './design/motion';
 import { themeLabels, type ThemeMode } from './design/tokens';
 import { buildButlerPrime, BUTLER_PRIME_VERSION } from './core/butler';
 import { NavHost, type Screen } from './nav/NavHost';
@@ -62,6 +65,7 @@ import { ChatScreen } from './screens/ChatScreen';
 import { DevicesScreen } from './screens/DevicesScreen';
 import { WorkspacesScreen } from './screens/WorkspacesScreen';
 import { TaskBoardScreen } from './screens/TaskBoardScreen';
+import { ButlerTasksScreen } from './screens/ButlerTasksScreen';
 
 // 旧版本明文凭据键（@dsh/cookie / @dsh/lastCookie / @dsh/gatewayToken /
 // @dsh/gatewayDeviceId）统一由 core/credentialMigration.ts 管理 ——
@@ -1370,16 +1374,22 @@ export default function App() {
   }
 
   return (
-    <SafeAreaProvider>
-      <ThemeProvider initial={initialMode} onChange={onThemeChange}>
-        <AppContext.Provider value={ctxValue}>
-          <ThemedStatusBar />
-          {authed ? <NavHost initial={{ name: 'Home' }} render={renderScreen} /> : <PairScreen />}
-          {/* 全局通知横幅：盖在导航之上，任意页面都能看到 */}
-          {authed ? <GlobalNotices /> : null}
-        </AppContext.Provider>
-      </ThemeProvider>
-    </SafeAreaProvider>
+    <GestureHandlerRootView style={{ flex: 1 }}>
+      <SafeAreaProvider>
+        <ThemeProvider initial={initialMode} onChange={onThemeChange}>
+          <AppContext.Provider value={ctxValue}>
+            <MotionProvider>
+              <BottomSheetModalProvider>
+                <ThemedStatusBar />
+                {authed ? <NavHost initial={{ name: 'Home' }} render={renderScreen} /> : <PairScreen />}
+                {/* 全局通知横幅：盖在导航之上，任意页面都能看到 */}
+                {authed ? <GlobalNotices /> : null}
+              </BottomSheetModalProvider>
+            </MotionProvider>
+          </AppContext.Provider>
+        </ThemeProvider>
+      </SafeAreaProvider>
+    </GestureHandlerRootView>
   );
 }
 
@@ -1471,7 +1481,7 @@ function GlobalNotices() {
   );
 }
 
-function renderScreen(screen: Screen) {
+function renderScreen(screen: Screen, active: boolean) {
   switch (screen.name) {
     case 'Sessions':
       return (
@@ -1483,6 +1493,7 @@ function renderScreen(screen: Screen) {
     case 'Chat':
       return (
         <ChatScreen
+          active={active}
           key={String(screen.params?.sessionId ?? '')}
           sessionId={String(screen.params?.sessionId ?? '')}
           title={screen.params?.title ? String(screen.params.title) : undefined}
@@ -1495,10 +1506,17 @@ function renderScreen(screen: Screen) {
       return <DevicesScreen />;
     case 'TaskBoard':
       return <TaskBoardScreen sessionId={String(screen.params?.sessionId ?? '')} />;
+    case 'ButlerTasks':
+      return (
+        <ButlerTasksScreen
+          cwd={screen.params?.cwd ? String(screen.params.cwd) : undefined}
+        />
+      );
     case 'Subagent':
       // 队员事件流：只读，用 subagent 地址才读得到
       return (
         <ChatScreen
+          active={active}
           sessionId={String(screen.params?.childSessionId ?? '')}
           title={screen.params?.title ? String(screen.params.title) : undefined}
           address={{
@@ -1511,7 +1529,7 @@ function renderScreen(screen: Screen) {
         />
       );
     default:
-      return <HomeScreen />;
+      return <HomeScreen active={active} />;
   }
 }
 

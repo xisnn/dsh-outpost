@@ -240,6 +240,7 @@ export function buildOutputPreview(
   output: string | undefined,
   maxLines: number = OUTPUT_PREVIEW_MAX_LINES,
   maxChars: number = OUTPUT_PREVIEW_MAX_CHARS,
+  contentLabel: '输出' | '参数' = '输出',
 ): OutputPreview {
   const raw = output ?? '';
   if (!raw) return { text: '', truncated: false, totalLines: 0 };
@@ -254,7 +255,7 @@ export function buildOutputPreview(
   }
   if (truncated) {
     // 标记本身不参与「复制」——复制入口在查看器里，取的是原始 output
-    text = `${text}\n…（已省略，查看完整输出）`;
+    text = `${text}\n…（已省略，查看完整${contentLabel}）`;
   }
   return { text, truncated, totalLines };
 }

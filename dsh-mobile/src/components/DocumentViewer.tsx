@@ -19,16 +19,9 @@
  */
 
 import React, { useEffect, useMemo, useState } from 'react';
-import {
-  ActivityIndicator,
-  Dimensions,
-  Modal,
-  Pressable,
-  ScrollView,
-  StyleSheet,
-  Text,
-  View,
-} from 'react-native';
+import { ActivityIndicator, Dimensions, ScrollView, StyleSheet, Text, View } from 'react-native';
+import { MotionModal as Modal } from './MotionModal';
+import { MotionPressable as Pressable } from './MotionPressable';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import ReactNativeBlobUtil from 'react-native-blob-util';
 
@@ -54,6 +47,7 @@ export function DocumentViewer({
   onClose,
   onShare,
   onSave,
+  onRetry,
 }: {
   visible: boolean;
   /** 本地缓存路径（file:// 前缀可有可无）+ 文件名 */
@@ -63,6 +57,8 @@ export function DocumentViewer({
   onShare?: () => void;
   /** 保存到手机。不传则不显示该项 */
   onSave?: () => void;
+  /** 读取失败时，由文件卡片重新下载、校验并打开。 */
+  onRetry?: () => void;
 }) {
   const tv = useTheme();
   const insets = useSafeAreaInsets();
@@ -158,7 +154,7 @@ export function DocumentViewer({
     // 只依赖标量，不依赖 file 对象引用（见上面的注释）
   }, [visible, fsPath, kind]);
 
-  if (!visible || !file) return null;
+  if (!file) return null;
 
   const title = file.name;
 
@@ -195,7 +191,7 @@ export function DocumentViewer({
           <Pressable onPress={onClose} hitSlop={12} style={styles.backBtn}>
             <Text style={styles.backText}>‹</Text>
           </Pressable>
-          <Text style={styles.title} numberOfLines={1}>
+          <Text style={styles.title} numberOfLines={1} ellipsizeMode="middle" accessibilityLabel={title}>
             {title}
           </Text>
           {/* 右上角三点：转发 / 保存到手机，和微信看文件一致 */}
@@ -218,7 +214,16 @@ export function DocumentViewer({
           <View style={styles.center}>
             <Text style={styles.errorIcon}>⚠</Text>
             <Text style={styles.errorText}>{state.message}</Text>
-            <Text style={styles.hint}>可以点下面的按钮用系统应用打开</Text>
+            {onRetry ? (
+              <Pressable
+                onPress={onRetry}
+                accessibilityRole="button"
+                accessibilityLabel="重新下载并打开文档"
+                style={styles.retryBtn}
+              >
+                <Text style={styles.retryText}>重新下载并打开</Text>
+              </Pressable>
+            ) : null}
           </View>
         ) : state.phase === 'md' ? (
           <ScrollView contentContainerStyle={{ paddingBottom: insets.bottom + 24 }}>
@@ -439,6 +444,16 @@ function makeStyles(tv: ReturnType<typeof useTheme>) {
     hint: { color: C.textTertiary, fontSize: tv.type.sm, marginTop: 10, textAlign: 'center' },
     errorIcon: { fontSize: 40, color: C.danger, marginBottom: 10 },
     errorText: { color: C.text, fontSize: tv.type.sm, textAlign: 'center' },
+    retryBtn: {
+      marginTop: tv.space.md,
+      minHeight: 44,
+      paddingHorizontal: tv.space.md,
+      paddingVertical: tv.space.sm,
+      justifyContent: 'center',
+      borderRadius: tv.radius.sm,
+      backgroundColor: C.bgCard,
+    },
+    retryText: { color: C.accent, fontSize: tv.type.sm, textAlign: 'center' },
     heading: {
       color: C.text,
       fontWeight: tv.weight.semibold,

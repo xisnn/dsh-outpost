@@ -37,6 +37,7 @@ import React, {
   useRef,
   useState,
 } from 'react';
+import { MOTION, useMotionPreference } from '../design/motion';
 import {
   Animated,
   BackHandler,
@@ -69,11 +70,8 @@ export function useNav(): NavContextValue {
 
 interface NavHostProps {
   initial: Screen;
-  render: (screen: Screen) => React.ReactNode;
+  render: (screen: Screen, active: boolean) => React.ReactNode;
 }
-
-/** 转场时长：太快看不出、太慢显得卡 */
-const DURATION = 240;
 
 /** 手势起手的左缘宽度。窄一点更稳，避免和内容横滑冲突 */
 export const EDGE_WIDTH = 28;
@@ -132,43 +130,52 @@ function ScreenPane({
   width,
   /** 手势拖动位移（只对顶层页面生效） */
   dragX,
+  animateEnter,
+  motionEpoch,
+  reduceMotion,
   children,
 }: {
   active: boolean;
   covered: boolean;
   width: number;
   dragX?: Animated.Value;
+  animateEnter: boolean;
+  motionEpoch: number;
+  reduceMotion: boolean;
   children: React.ReactNode;
 }) {
-  // 0 = 完全在右侧屏外，1 = 就位
-  const enter = useRef(new Animated.Value(1)).current;
-  const firstMount = useRef(true);
+  // 根页面原地显示；新 push 的页面在第一次挂载时就处于入场起点。
+  const enter = useRef(new Animated.Value(animateEnter && !reduceMotion ? 0 : 1)).current;
+  const pendingEnter = useRef(animateEnter);
 
   useEffect(() => {
-    if (firstMount.current) {
-      firstMount.current = false;
+    enter.stopAnimation();
+    if (!pendingEnter.current || reduceMotion || !active) {
+      pendingEnter.current = false;
+      enter.setValue(1);
       return;
     }
-    // 页面被 push 上来：从右侧滑入
-    enter.setValue(0);
-    Animated.timing(enter, {
+    pendingEnter.current = false;
+    const animation = Animated.timing(enter, {
       toValue: 1,
-      duration: DURATION,
+      duration: MOTION.navigation,
       useNativeDriver: true,
-    }).start();
-  }, [enter]);
+    });
+    animation.start();
+    return () => animation.stop();
+  }, [active, enter, motionEpoch, reduceMotion]);
 
   const translateX = enter.interpolate({
     inputRange: [0, 1],
-    outputRange: [width * 0.28, 0],
+    outputRange: [Math.min(width * 0.06, 24), 0],
   });
   const opacity = enter.interpolate({
     inputRange: [0, 1],
-    outputRange: [0.4, 1],
+    outputRange: [0.94, 1],
   });
 
   // 被覆盖时露出一点边缘，暗示下面还有页面
-  const coverShift = covered ? -width * 0.08 : 0;
+  const coverShift = covered && !reduceMotion ? -width * 0.08 : 0;
 
   // 拖动位移叠加入场位移。dragX 只有顶层才有，底层页面是纯让位。
   const finalX = dragX
@@ -193,53 +200,140 @@ function ScreenPane({
   );
 }
 
+interface NavEntry {
+  screen: Screen;
+  key: number;
+  animateEnter: boolean;
+}
+
 export function NavHost({ initial, render }: NavHostProps) {
-  const [stack, setStack] = useState<Screen[]>([initial]);
-  // 窗口宽度动态获取：旋转、分屏、折叠屏展开后转场距离与返回手势比例都跟随当前宽度
+  const [entries, setEntries] = useState<NavEntry[]>([
+    { screen: initial, key: 0, animateEnter: false },
+  ]);
+  const entriesRef = useRef(entries);
+  const nextKey = useRef(1);
+  const [motionEpoch, setMotionEpoch] = useState(0);
+  const reduceMotion = useMotionPreference();
+  const reduceMotionRef = useRef(reduceMotion);
+  reduceMotionRef.current = reduceMotion;
+  // 窗口宽度动态获取：旋转、分屏时手势比例跟随当前宽度。
   const { width } = useWindowDimensions();
   const widthRef = useRef(width);
   widthRef.current = width;
+  const dragX = useRef(new Animated.Value(0)).current;
+  const committed = useRef(false);
+  const pendingPop = useRef<number | null>(null);
+  const motionToken = useRef(0);
+
+  const updateEntries = useCallback((next: NavEntry[]) => {
+    entriesRef.current = next;
+    setEntries(next);
+  }, []);
+
+  // 新导航先兑现已经请求的 pop，再取消旧动画。旧回调不能操作新栈顶。
+  const interrupt = useCallback(() => {
+    motionToken.current += 1;
+    const target = pendingPop.current;
+    pendingPop.current = null;
+    dragX.stopAnimation();
+    committed.current = false;
+    dragX.setValue(0);
+    const current = entriesRef.current;
+    if (target !== null && current.length > 1 && current[current.length - 1].key === target) {
+      updateEntries(current.slice(0, -1));
+    }
+  }, [dragX, updateEntries]);
 
   const push = useCallback((name: string, params?: Record<string, unknown>) => {
-    setStack((s) => [...s, { name, params }]);
-  }, []);
+    interrupt();
+    setMotionEpoch((epoch) => epoch + 1);
+    updateEntries([...entriesRef.current, {
+      screen: { name, params }, key: nextKey.current++, animateEnter: true,
+    }]);
+  }, [interrupt, updateEntries]);
 
   const pop = useCallback(() => {
-    setStack((s) => (s.length > 1 ? s.slice(0, -1) : s));
-  }, []);
+    interrupt();
+    const current = entriesRef.current;
+    if (current.length <= 1) return;
+    setMotionEpoch((epoch) => epoch + 1);
+    if (reduceMotionRef.current) {
+      updateEntries(current.slice(0, -1));
+      return;
+    }
+    pendingPop.current = current[current.length - 1].key;
+    const token = motionToken.current;
+    Animated.timing(dragX, {
+      toValue: widthRef.current,
+      duration: MOTION.navigation,
+      useNativeDriver: true,
+    }).start(({ finished }) => {
+      if (finished && token === motionToken.current) interrupt();
+    });
+  }, [dragX, interrupt, updateEntries]);
 
   const reset = useCallback((name: string, params?: Record<string, unknown>) => {
-    setStack([{ name, params }]);
-  }, []);
+    interrupt();
+    setMotionEpoch((epoch) => epoch + 1);
+    updateEntries([{ screen: { name, params }, key: nextKey.current++, animateEnter: false }]);
+  }, [interrupt, updateEntries]);
 
-  // Android 返回键：根页面时返回 false，让系统处理（退到后台而不是卡死）
+  // Android 返回键同步读取当前栈；不依赖 React updater 何时执行。
   useEffect(() => {
     const sub = BackHandler.addEventListener('hardwareBackPress', () => {
-      let handled = false;
-      setStack((s) => {
-        if (s.length > 1) {
-          handled = true;
-          return s.slice(0, -1);
-        }
-        return s;
-      });
-      return handled;
+      if (entriesRef.current.length <= 1) return false;
+      pop();
+      return true;
     });
     return () => sub.remove();
-  }, []);
+  }, [pop]);
 
-  // ── 边缘手势 ──────────────────────────────────────────────────
-  const canGoBack = stack.length > 1;
-  const canGoBackRef = useRef(canGoBack);
-  canGoBackRef.current = canGoBack;
+  useEffect(() => {
+    interrupt();
+  }, [width, reduceMotion, interrupt]);
 
-  /** 手势位移，0 = 就位，正值 = 被往右拖 */
-  const dragX = useRef(new Animated.Value(0)).current;
-  /** 这一下是否已判定为返回手势（避免中途变成滚动又变回来） */
-  const committed = useRef(false);
+  useEffect(() => () => {
+    motionToken.current += 1;
+    pendingPop.current = null;
+    committed.current = false;
+    dragX.stopAnimation();
+  }, [dragX]);
 
-  const popRef = useRef(pop);
-  popRef.current = pop;
+  const settleDrag = useCallback(() => {
+    dragX.stopAnimation();
+    if (reduceMotionRef.current) {
+      dragX.setValue(0);
+      return;
+    }
+    Animated.spring(dragX, {
+      toValue: 0,
+      useNativeDriver: true,
+      bounciness: 0,
+      speed: 20,
+    }).start();
+  }, [dragX]);
+
+  const dismissDrag = useCallback(() => {
+    const current = entriesRef.current;
+    if (current.length <= 1) {
+      settleDrag();
+      return;
+    }
+    setMotionEpoch((epoch) => epoch + 1);
+    pendingPop.current = current[current.length - 1].key;
+    if (reduceMotionRef.current) {
+      interrupt();
+      return;
+    }
+    const token = motionToken.current;
+    Animated.timing(dragX, {
+      toValue: widthRef.current,
+      duration: MOTION.exit,
+      useNativeDriver: true,
+    }).start(({ finished }) => {
+      if (finished && token === motionToken.current) interrupt();
+    });
+  }, [dragX, interrupt, settleDrag]);
 
   const pan = useMemo(
     () =>
@@ -259,21 +353,23 @@ export function NavHost({ initial, render }: NavHostProps) {
         onStartShouldSetPanResponderCapture: () => false,
         onMoveShouldSetPanResponderCapture: (evt, g) => {
           const startX = evt.nativeEvent.pageX - g.dx;
-          return isBackGesture(startX, g.dx, g.dy, canGoBackRef.current);
+          return isBackGesture(startX, g.dx, g.dy, entriesRef.current.length > 1);
         },
 
         // 非 Capture 的也留着：万一 Capture 没被调用（某些 RN 版本/嵌套
         // 场景），还能退回到冒泡阶段兜底。
         onMoveShouldSetPanResponder: (evt, g) => {
           const startX = evt.nativeEvent.pageX - g.dx;
-          return isBackGesture(startX, g.dx, g.dy, canGoBackRef.current);
+          return isBackGesture(startX, g.dx, g.dy, entriesRef.current.length > 1);
         },
 
         // 一旦我们接管了，就别再让子级抢回去（否则滑到一半会断）
         onPanResponderTerminationRequest: () => false,
 
         onPanResponderGrant: () => {
-          committed.current = true;
+          interrupt();
+          setMotionEpoch((epoch) => epoch + 1);
+          committed.current = entriesRef.current.length > 1;
         },
         onPanResponderMove: (_evt, g) => {
           if (!committed.current) return;
@@ -284,37 +380,22 @@ export function NavHost({ initial, render }: NavHostProps) {
           if (!committed.current) return;
           committed.current = false;
           if (shouldDismiss(g.dx, g.vx, widthRef.current)) {
-            // 先动画到位，再真正出栈，避免闪一下
-            Animated.timing(dragX, {
-              toValue: widthRef.current,
-              duration: 180,
-              useNativeDriver: true,
-            }).start(() => {
-              dragX.setValue(0);
-              popRef.current();
-            });
+            dismissDrag();
           } else {
-            Animated.spring(dragX, {
-              toValue: 0,
-              useNativeDriver: true,
-              bounciness: 0,
-              speed: 20,
-            }).start();
+            settleDrag();
           }
         },
         onPanResponderTerminate: () => {
+          if (!committed.current) return;
           committed.current = false;
-          Animated.spring(dragX, {
-            toValue: 0,
-            useNativeDriver: true,
-            bounciness: 0,
-            speed: 20,
-          }).start();
+          settleDrag();
         },
       }),
-    [dragX],
+    [dragX, interrupt, dismissDrag, settleDrag],
   );
 
+  const stack = useMemo(() => entries.map((entry) => entry.screen), [entries]);
+  const canGoBack = stack.length > 1;
   const value = useMemo<NavContextValue>(
     () => ({
       stack,
@@ -331,17 +412,20 @@ export function NavHost({ initial, render }: NavHostProps) {
   return (
     <NavContext.Provider value={value}>
       <View style={styles.root} {...pan.panHandlers}>
-        {stack.map((screen, i) => {
+        {entries.map((entry, i) => {
           const isTop = i === topIndex;
           return (
             <ScreenPane
-              key={`${i}-${screen.name}`}
+              key={entry.key}
               active={isTop}
               covered={!isTop}
               width={width}
               dragX={isTop && canGoBack ? dragX : undefined}
+              animateEnter={entry.animateEnter}
+              motionEpoch={motionEpoch}
+              reduceMotion={reduceMotion}
             >
-              {render(screen)}
+              {render(entry.screen, isTop)}
             </ScreenPane>
           );
         })}

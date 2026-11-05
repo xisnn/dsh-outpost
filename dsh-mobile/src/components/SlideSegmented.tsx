@@ -20,6 +20,7 @@ import {
   View,
 } from 'react-native';
 
+import { MOTION, useMotionPreference } from '../design/motion';
 import { useTheme } from '../design/theme';
 
 export interface SegmentOption<T extends string> {
@@ -46,6 +47,7 @@ export function SlideSegmented<T extends string>({
   accessibilityLabel?: string;
 }) {
   const tv = useTheme();
+  const reduceMotion = useMotionPreference();
   const styles = useMemo(() => makeStyles(tv), [tv]);
 
   const count = options.length;
@@ -59,17 +61,35 @@ export function SlideSegmented<T extends string>({
   const boxPageX = useRef(0);
   const moved = useRef(false);
 
-  const tabW = itemWidth ?? (boxWidth > 0 ? (boxWidth - PADDING * 2) / count : 0);
+  const tabW = itemWidth ?? (boxWidth > 0 && count > 0 ? (boxWidth - PADDING * 2) / count : 0);
 
-  useEffect(() => {
-    if (dragging.current) return;
-    Animated.spring(slide, {
-      toValue: index,
-      friction: 11,
-      tension: 150,
+  const settle = useCallback((target: number) => {
+    slide.stopAnimation();
+    if (reduceMotion) {
+      slide.setValue(target);
+      return;
+    }
+    Animated.timing(slide, {
+      toValue: target,
+      duration: MOTION.layout,
       useNativeDriver: true,
     }).start();
-  }, [index, slide]);
+  }, [reduceMotion, slide]);
+
+  // 只在选中项或系统动态偏好改变时过渡，流式内容重渲染不会重启动画。
+  const previousIndex = useRef(index);
+  useEffect(() => {
+    dragging.current = false;
+    moved.current = false;
+    if (previousIndex.current === index) {
+      slide.stopAnimation();
+      slide.setValue(index);
+    } else {
+      settle(index);
+    }
+    previousIndex.current = index;
+    return () => slide.stopAnimation();
+  }, [index, settle, slide]);
 
   const indexAt = useCallback(
     (innerX: number) => {
@@ -85,6 +105,7 @@ export function SlideSegmented<T extends string>({
   };
 
   const handlePressIn = (e: GestureResponderEvent) => {
+    slide.stopAnimation();
     startPageX.current = e.nativeEvent.pageX;
     boxPageX.current = e.nativeEvent.pageX - e.nativeEvent.locationX;
     moved.current = false;
@@ -92,7 +113,7 @@ export function SlideSegmented<T extends string>({
   };
 
   const handleMove = (e: GestureResponderEvent) => {
-    if (!tabW) return;
+    if (!dragging.current || !tabW) return;
     if (Math.abs(e.nativeEvent.pageX - startPageX.current) > DRAG_THRESHOLD) moved.current = true;
     if (!moved.current) return;
     const innerX = e.nativeEvent.pageX - boxPageX.current;
@@ -100,22 +121,26 @@ export function SlideSegmented<T extends string>({
     slide.setValue(pos);
   };
 
+  const handleCancel = () => {
+    if (!dragging.current) return;
+    dragging.current = false;
+    moved.current = false;
+    settle(index);
+  };
+
   const handleRelease = (e: GestureResponderEvent) => {
     dragging.current = false;
-    if (!tabW) return;
+    moved.current = false;
+    if (!tabW) {
+      settle(index);
+      return;
+    }
     const innerX = e.nativeEvent.pageX - boxPageX.current;
     const target = indexAt(innerX);
-
-    Animated.spring(slide, {
-      toValue: target,
-      friction: 11,
-      tension: 150,
-      useNativeDriver: true,
-    }).start();
+    settle(target);
 
     const next = options[target];
     if (next && next.value !== value) onChange(next.value);
-    moved.current = false;
   };
 
   const translateX = slide.interpolate({
@@ -129,7 +154,9 @@ export function SlideSegmented<T extends string>({
       style={[styles.track, compact ? styles.trackCompact : null]}
       onLayout={onLayout}
       onPressIn={handlePressIn}
-      onPressOut={handleRelease}
+      onPressOut={handleCancel}
+      onPress={handleRelease}
+      onTouchCancel={handleCancel}
       onStartShouldSetResponder={() => true}
       onMoveShouldSetResponder={() => true}
       onResponderMove={handleMove}

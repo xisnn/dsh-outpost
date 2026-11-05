@@ -12,17 +12,9 @@
  *   3. 顺便列出电脑上已有工作区的同级目录，方便「在同一个父目录下加一个」
  */
 import React, { useCallback, useEffect, useMemo, useState } from 'react';
-import {
-  ActivityIndicator,
-  KeyboardAvoidingView,
-  Platform,
-  Pressable,
-  ScrollView,
-  StyleSheet,
-  Text,
-  TextInput,
-  View,
-} from 'react-native';
+import { ActivityIndicator, KeyboardAvoidingView, Platform, ScrollView, StyleSheet, Text, TextInput, View } from 'react-native';
+import { MotionPressable as Pressable } from './MotionPressable';
+import { MotionModal as Modal } from './MotionModal';
 
 import { useTheme } from '../design/theme';
 import { space } from '../design/tokens';
@@ -56,6 +48,7 @@ export function NewWorkspaceSheet({
   // 每次打开清空，避免上次的残留
   useEffect(() => {
     if (visible) setValue('');
+    else setBrowsing(false);
   }, [visible]);
 
   const pick = useCallback((p: string) => setValue(p), []);
@@ -70,11 +63,10 @@ export function NewWorkspaceSheet({
     return [...set].slice(0, 3);
   }, [existingPaths]);
 
-  if (!visible) return null;
-
   return (
+    <Modal visible={visible} transparent animationType="fade" onRequestClose={onClose}>
     <View style={styles.backdrop}>
-      <Pressable style={StyleSheet.absoluteFill} onPress={onClose} />
+      <Pressable feedback="none" style={StyleSheet.absoluteFill} onPress={onClose} />
       <KeyboardAvoidingView
         behavior={Platform.OS === 'ios' ? 'padding' : undefined}
         style={styles.center}
@@ -209,6 +201,7 @@ export function NewWorkspaceSheet({
         </View>
       </KeyboardAvoidingView>
     </View>
+    </Modal>
   );
 }
 
@@ -246,6 +239,8 @@ function makeStyles(tv: ReturnType<typeof useTheme>) {
     },
     browseText: { color: C.accentBright, fontSize: tv.type.sm },
     input: {
+      flex: 1,
+      minWidth: 0,
       backgroundColor: C.bgCard,
       borderRadius: tv.radius.md,
       borderWidth: StyleSheet.hairlineWidth,

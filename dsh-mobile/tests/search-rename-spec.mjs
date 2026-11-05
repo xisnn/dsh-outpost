@@ -160,12 +160,13 @@ check('FlatList 配置了分批渲染', () =>
     : '没配分批渲染参数',
 );
 
-check('滚动到底部用 scrollToEnd', () =>
-  chat.includes('scrollToEnd') ? true : '自动滚动失效',
+const scrollHook = readFileSync('src/components/useChatScroll.ts', 'utf8');
+check('聊天页接入实际滚动 hook，使用 scrollToEnd', () =>
+  chat.includes('useChatScroll(chat.items,') && scrollHook.includes('scrollToEnd') ? true : '自动滚动未接入',
 );
 
-check('scorllRef 类型是 FlatList', () =>
-  /useRef<FlatList<ChatItem>>/.test(chat) ? true : 'ref 类型不对',
+check('滚动 hook 的 ref 类型是 FlatList', () =>
+  /useRef<FlatList<T>>/.test(scrollHook) && chat.includes('ref={scrollRef}') ? true : 'ref 类型或列表接线不对',
 );
 
 // ── 会话列表也做了虚拟化参数 ────────────────────────────────────

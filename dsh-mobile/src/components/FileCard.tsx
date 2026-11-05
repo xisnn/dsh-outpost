@@ -9,17 +9,9 @@
  *   - 图片：内联预览，点击全屏
  *   - 其他文件：文件名 + 点击用系统应用打开
  */
-import React, { useEffect, useMemo, useState } from 'react';
-import {
-  ActivityIndicator,
-  Alert,
-  Dimensions,
-  Image,
-  Pressable,
-  StyleSheet,
-  Text,
-  View,
-} from 'react-native';
+import React, { useEffect, useMemo, useRef, useState } from 'react';
+import { ActivityIndicator, Alert, Image, StyleSheet, Text, View, useWindowDimensions } from 'react-native';
+import { MotionPressable as Pressable } from './MotionPressable';
 
 import ReactNativeBlobUtil from 'react-native-blob-util';
 
@@ -29,12 +21,17 @@ import { fetchRemoteFile, openLocalFile, type RemoteFile } from '../core/fileUrl
 import { downloadWorkspaceFile } from '../core/gatewayFiles';
 import { ImageViewer } from './ImageViewer';
 import { DocumentViewer, canPreviewInside } from './DocumentViewer';
+import { FileTypeBadge } from './FileTypeBadge';
+import { formatBytes } from '../core/picker';
 
 export function FileCard({
   path,
   alt,
   image,
   sessionId,
+  workspacePath,
+  expectedSha256,
+  expectedSize,
 }: {
   /** 电脑上的绝对路径，或相对工作区的路径 */
   path: string;
@@ -44,6 +41,9 @@ export function FileCard({
   image?: boolean;
   /** 会话 id：有它就能走网关下载（比 /api/file 可靠） */
   sessionId?: string;
+  workspacePath?: string;
+  expectedSha256?: string;
+  expectedSize?: number;
 }) {
   const tv = useTheme();
   const styles = useMemo(() => makeStyles(tv), [tv]);
@@ -63,11 +63,12 @@ export function FileCard({
   // 管家偶尔发相对路径（cover_out/a.png），用当前项目路径拼成绝对路径。
   // 否则 /api/file 会 404。
   const absPath = useMemo(() => {
-    if (/^[A-Za-z]:\\/.test(path) || /^\\\\/.test(path)) return path;
-    if (!butlerWorkspace) return path;
-    const rel = path.replace(/^[\\/]+/, '');
-    return `${butlerWorkspace}\\${rel}`;
-  }, [path, butlerWorkspace]);
+    if (/^[A-Za-z]:[\\/]/.test(path) || /^[\\/]/.test(path)) return path;
+    const root = workspacePath ?? butlerWorkspace;
+    if (!root) return path;
+    const separator = root.includes('\\') ? '\\' : '/';
+    return `${root.replace(/[\\/]+$/, '')}${separator}${path}`;
+  }, [path, workspacePath, butlerWorkspace]);
   const [local, setLocal] = useState<RemoteFile | null>(null);
   const [failed, setFailed] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
@@ -80,6 +81,8 @@ export function FileCard({
     uri: string;
     name: string;
   } | null>(null);
+  const [reload, setReload] = useState(0);
+  const opening = useRef(false);
 
   const name = path.split(/[\\/]/).pop() ?? path;
 
@@ -107,7 +110,7 @@ export function FileCard({
   // 图片显示宽度：屏幕宽减去左右内边距（见 fileBlockWrap 的 screenPadding*2）。
   // 用固定像素而不用 '100%' —— 见下面 <Image> 上的踩坑注释。
   // 注意：不要包 useMemo（依赖变化时可能拿到旧值/0），直接算。
-  const screenW = Dimensions.get('window').width;
+  const { width: screenW } = useWindowDimensions();
   const imageWidth = Math.max(160, Math.round(screenW - tv.layout.screenPadding * 2 - 8));
 
   // 图片：进组件就开始拉，拉完直接显示。
@@ -120,6 +123,9 @@ export function FileCard({
   useEffect(() => {
     if (!image) return;
     let alive = true;
+    setLocal(null);
+    setFailed(null);
+    setBusy(true);
     void (async () => {
       // 1. 网关（只对工作区内相对路径有效；绝对路径会被拒）
       const gw = gatewayChannel;
@@ -140,7 +146,7 @@ export function FileCard({
       }
       // 2. /api/file → 下载到本地缓存
       try {
-        const f = await fetchRemoteFile(fileBaseUrl, fileCookie, absPath);
+        const f = await fetchRemoteFile(fileBaseUrl, fileCookie, absPath, { forceDownload: reload > 0 });
         if (!alive) return;
         setLocal(f);
         // 3. 关键：再读成 base64 data URI 作为兜底显示源。
@@ -166,7 +172,7 @@ export function FileCard({
       } catch (e) {
         if (alive) setFailed(e instanceof Error ? e.message : '读取失败');
       }
-    })();
+    })().finally(() => { if (alive) setBusy(false); });
     return () => {
       alive = false;
     };
@@ -177,7 +183,7 @@ export function FileCard({
     // 重新走一遍「下载 → 转 base64」，图片闪、流量白费。
     //
     // 真正需要的只有 baseUrl 和 cookie —— 用它们的值做依赖。
-  }, [image, absPath, path, sessionId, fileBaseUrl, fileCookie, gatewayChannel]);
+  }, [image, absPath, path, sessionId, fileBaseUrl, fileCookie, gatewayChannel, reload]);
 
   /**
    * 转发：交给系统分享面板。
@@ -220,13 +226,49 @@ export function FileCard({
   };
 
   /** 用户点卡片：图片进全屏查看器，文档进内置查看器，其余交给系统 */
-  const onPress = async () => {
+  const retryImage = () => {
     if (busy) return;
+    setViewerOpen(false);
+    setLocal(null);
+    setFailed(null);
+    setReload(value => value + 1);
+  };
+  const onPress = async (forceDownload = false) => {
+    if (busy || opening.current) return;
+    if (image && failed) { retryImage(); return; }
+    const retry = forceDownload || !!failed;
+    opening.current = true;
     setBusy(true);
+    setFailed(null);
+    if (forceDownload) setDocOpen(false);
     try {
-      const f =
-        local ??
-        (await fetchRemoteFile(fileBaseUrl, fileCookie, absPath));
+      let f = retry ? null : local;
+      if (!f && gatewayChannel && sessionId && !/^(?:[A-Za-z]:[\\/]|[\\/])/.test(path)) {
+        try {
+          const downloaded = await downloadWorkspaceFile(gatewayChannel, sessionId, path);
+          f = { uri: downloaded.path, fsPath: downloaded.path.replace(/^file:\/\//, ''), name: downloaded.name };
+        } catch {
+          // The authenticated file route also works when the gateway is offline.
+        }
+      }
+      f ??= await fetchRemoteFile(fileBaseUrl, fileCookie, absPath, { forceDownload: retry });
+      if (expectedSha256 || expectedSize !== undefined) {
+        for (let attempt = 0; attempt < 2; attempt += 1) {
+          const stat = await ReactNativeBlobUtil.fs.stat(f.fsPath);
+          const digest = expectedSha256 ? await ReactNativeBlobUtil.fs.hash(f.fsPath, 'sha256') : null;
+          const matches = (expectedSize === undefined || Number(stat.size) === expectedSize) &&
+            (!expectedSha256 || digest?.toLowerCase() === expectedSha256.toLowerCase());
+          if (matches) break;
+          await ReactNativeBlobUtil.fs.unlink(f.fsPath).catch(() => undefined);
+          setLocal(null);
+          if (attempt === 1) {
+            throw new Error('文件内容与交付记录不一致，请让管家重新交付后再打开。');
+          }
+          // A redelivered path may still have an older local cache entry.
+          f = await fetchRemoteFile(fileBaseUrl, fileCookie, absPath, { forceDownload: true });
+        }
+      }
+      setFailed(null);
       setLocal(f);
 
       // ⚠️ 不要依赖 `docFile`（它来自 local，setLocal 是异步的）。
@@ -245,6 +287,7 @@ export function FileCard({
     } catch (e) {
       setFailed(e instanceof Error ? e.message : '打开失败');
     } finally {
+      opening.current = false;
       setBusy(false);
     }
   };
@@ -260,7 +303,8 @@ export function FileCard({
             pressed ? { opacity: 0.85 } : null,
           ]}
           accessibilityRole="imagebutton"
-          accessibilityLabel={`查看图片 ${alt || name}`}
+          disabled={busy}
+          accessibilityLabel={`${failed ? '重试图片' : '查看图片'} ${alt || name}`}
         >
           {/*
             ⚠️ 图片显示的两个必要条件（缺一个都会变成灰块）：
@@ -286,7 +330,7 @@ export function FileCard({
           </View>
           {failed ? (
             <Text style={styles.imageCaption} numberOfLines={2}>
-              {failed}
+              {failed}，点击重试
             </Text>
           ) : (
             <Text style={styles.imageCaption} numberOfLines={1}>
@@ -302,6 +346,9 @@ export function FileCard({
             {
               uri: local.uri,
               caption: alt || name,
+              failed: !!failed,
+              onRetry: retryImage,
+              onError: () => setFailed('图片加载失败'),
               // 长按保存用：本地缓存路径 + 文件名
               save: { fsPath: local.fsPath, name: local.name },
             },
@@ -322,16 +369,19 @@ export function FileCard({
           pressed ? { opacity: 0.7 } : null,
         ]}
         accessibilityRole="button"
-        accessibilityLabel={`打开 ${name}`}
+        accessibilityLabel={`${failed ? '重试加载' : '打开'} ${name}${alt && alt !== name ? `，${alt}` : ''}`}
       >
-        <Text style={styles.icon}>{failed ? '⚠' : iconFor(name)}</Text>
+        <FileTypeBadge name={name} />
         <View style={styles.meta}>
-          <Text style={styles.name} numberOfLines={1}>
-            {alt || name}
+          <Text style={styles.name} numberOfLines={1} ellipsizeMode="middle">
+            {name}
           </Text>
-          <Text style={styles.path} numberOfLines={1}>
+          {alt && alt !== name ? <Text style={styles.description} numberOfLines={2}>{alt}</Text> : null}
+          {expectedSize !== undefined ? <Text style={styles.path}>{expectedSize === 0 ? '0 B' : formatBytes(expectedSize)}</Text> : null}
+          <Text style={styles.path} numberOfLines={failed ? 2 : 1} ellipsizeMode={failed ? 'tail' : 'middle'}>
             {failed ?? (busy ? '正在打开…' : path)}
           </Text>
+          {failed ? <Text style={styles.retryText}>点击重试</Text> : null}
         </View>
         {busy ? <ActivityIndicator size="small" color={tv.colors.accent} /> : null}
       </Pressable>
@@ -342,6 +392,7 @@ export function FileCard({
           visible={docOpen}
           file={docFile}
           onClose={() => setDocOpen(false)}
+          onRetry={() => void onPress(true)}
           onShare={() => {
             if (!local) return;
             void doShare(local);
@@ -354,15 +405,6 @@ export function FileCard({
       ) : null}
     </>
   );
-}
-
-function iconFor(name: string): string {
-  const ext = name.toLowerCase().split('.').pop() ?? '';
-  if (ext === 'pdf') return 'PDF';
-  if (['doc', 'docx'].includes(ext)) return 'DOC';
-  if (['xls', 'xlsx'].includes(ext)) return 'XLS';
-  if (['zip', 'rar', '7z'].includes(ext)) return 'ZIP';
-  return '文件';
 }
 
 function makeStyles(tv: ReturnType<typeof useTheme>) {
@@ -399,15 +441,10 @@ function makeStyles(tv: ReturnType<typeof useTheme>) {
       borderWidth: StyleSheet.hairlineWidth,
       borderColor: C.border,
     },
-    icon: {
-      width: 40,
-      textAlign: 'center',
-      color: C.accentBright,
-      fontSize: tv.type.xs,
-      fontWeight: tv.weight.semibold,
-    },
-    meta: { flex: 1, marginLeft: tv.space.sm },
+    description: { color: C.textSecondary, fontSize: tv.type.xs, marginTop: tv.space.xs },
+    meta: { flex: 1, minWidth: 0, marginLeft: tv.space.sm },
     name: { color: C.text, fontSize: tv.type.sm, fontWeight: tv.weight.medium },
     path: { color: C.textFaint, fontSize: tv.type.micro, marginTop: 2 },
+    retryText: { color: C.accent, fontSize: tv.type.micro, marginTop: tv.space.xs },
   });
 }

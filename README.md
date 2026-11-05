@@ -48,6 +48,9 @@
 - 独立**任务看板**，按 进行中 / 待办 / 已完成 分组
 - 队员全干完后自动唤醒管家做汇总
 - 按项目复用队员，不重复创建
+- **宿主任务运行器（v0.18.2）**：交代目标后由电脑持续执行，手机退出也不停；
+  任务进度、恢复和交付在「任务」页。需要在 DSH web profile 安装
+  `dsh-outpost-butler`，见 [docs/butler-tasks.md](docs/butler-tasks.md)
 
 ### 会话管理
 
@@ -284,6 +287,21 @@ https://xxx.trycloudflare ─┘
 > **为什么必须要插件**：DSH 的审批是 Host 侧 waterfall，结果靠 Remote Event
 > 监听器的**返回值**回传，没有 HTTP RPC 可调（12 个候选端点名全部 not found）。
 > 这个插件在 Host 内部接入 waterfall，再用独立 WebSocket 投影给手机。
+
+### 管家任务（v0.18.2，宿主持续执行）
+
+v0.18.2 新增宿主侧任务运行器：手机交代目标后，由电脑上的 DSH 持续执行；
+手机退出、锁屏都不影响，重启后可以恢复，交付物在「任务」页查看。
+
+```powershell
+.\setup-butler.ps1
+```
+
+它会把 `dsh-outpost-butler` 装进 DSH web profile 并验证配置组合。
+端口空闲时可启动 DSH Web；已有进程会保持运行，按提示手动重启后再检查 TaskApi。
+详细说明、TaskApi 和限制见 [docs/butler-tasks.md](docs/butler-tasks.md)。
+
+> 审批仍由 `setup-gateway.ps1` 安装的移动网关负责；两个脚本可以都装。
 >
 > **真机排查**：如果「审批通道」显示未连通，把后面那行原因发出来。
 > 常见的是 `连接被关闭 1006 ... 401 Unauthorized`（凭据失效，App 会自动重新配对）
@@ -411,6 +429,7 @@ npm run pack              # 打包成 zip
 
 - 应用代码在 [`dsh-mobile/`](dsh-mobile/)，架构与实现细节见 [dsh-mobile/README.md](dsh-mobile/README.md)
 - DSH 内部协议（RPC 形状、投影字段、踩过的坑）见 [docs/protocol-notes.md](docs/protocol-notes.md)
+- 宿主任务运行器（持续执行、恢复、TaskApi）见 [docs/butler-tasks.md](docs/butler-tasks.md)
 - **真机验证清单**（124 项 + 16 项快速回归）见 [docs/device-checklist.md](docs/device-checklist.md)
 
 ### 目录
@@ -426,25 +445,28 @@ npm run pack              # 打包成 zip
 │   │   └── design/          # 主题 token
 │   └── tests/               # Node 单测（770 项）
 ├── dsh-outpost-desktop/     # Windows 桌面助手（Electron 托盘程序）
+├── dsh-outpost-butler/      # v0.18.2 宿主侧任务运行器（DSH bundle）
 ├── dsh-plugin-connect/      # 隧道服务 + 旧版网页插件
 ├── docs/                    # 协议笔记、安全模型、真机验证清单、截图
 ├── start-dsh-web.ps1        # Windows 一键启动脚本
 ├── start-tunnel.ps1         # Cloudflare 隧道
-└── setup-gateway.ps1        # 安装移动网关（手机端审批）
+├── setup-gateway.ps1        # 安装移动网关（手机端审批）
+└── setup-butler.ps1         # 安装宿主任务运行器（v0.18.2）
 ```
 
 ---
 
 ## 版本
 
-当前 **v0.18.1**，修复公网审批通道的 Android URL 兼容问题，以及电脑更换网络后的一键修复。
+当前 **v0.18.2**，新增宿主侧管家任务，优化页面动效、聊天输入、工具详情和图片附件，并加入用户消息的凭据显示保护。
 完整变更见 [Releases](../../releases)。
 
 最近的几个版本：
 
 | 版本 | 内容 |
 |---|---|
-| **v0.18.1** | **修复公网审批 502、已有授权重连和桌面一键网络修复** |
+| **v0.18.2** | **宿主侧管家任务、组件动效、聊天与附件优化、凭据显示保护** |
+| v0.18.1 | 修复公网审批 502、已有授权重连和桌面一键网络修复 |
 | **v0.18.0** | **审批安全与通知 + WorkGroup/工具 Diff + 草稿持久化 + 搜索置顶 + UI 与待发送体验** |
 | v0.17.0 | 持久化消息与附件队列（P0-1）+ WebSocket 自动重连与断档补齐（P0-2）+ 认证与连接状态一致性（P0-3） |
 | v0.16.7 | **消息发送可靠性**：重试复用幂等键，不会重复执行任务；超时与失败分开提示 |

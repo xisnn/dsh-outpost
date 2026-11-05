@@ -1,0 +1,6 @@
+# dsh-outpost-butler bundle patch.
+# Installed into a DSH profile with:
+#   dsh plugin --profile web add <path-to-this-directory>
+- insert:
+    - id: outpost-butler
+      name: '@local/dsh-outpost-butler'

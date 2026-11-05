@@ -1,13 +1,13 @@
 # 下载桌面助手
 
-## v0.18.1
+## v0.18.2
 
-从 [v0.18.1 发布页](https://github.com/xisnn/dsh-outpost/releases/tag/v0.18.1) 下载
-`DSH-Outpost-Desktop-0.18.1-win-x64.zip`，解压到一个新目录后运行桌面助手。
+从 [v0.18.2 发布页](https://github.com/xisnn/dsh-outpost/releases/tag/v0.18.2) 下载
+`DSH-Outpost-Desktop-0.18.2-win-x64.zip`，解压到一个新目录后运行桌面助手。
 这是完整 ZIP，无需合并分卷。更新前先退出旧版桌面助手。
 
 发布页同时提供 `SHA256SUMS.txt`。可用 PowerShell 的
-`Get-FileHash -Algorithm SHA256 .\DSH-Outpost-Desktop-0.18.1-win-x64.zip`
+`Get-FileHash -Algorithm SHA256 .\DSH-Outpost-Desktop-0.18.2-win-x64.zip`
 计算校验值，并与该文件中对应名称的一行比较。
 
 ## 旧版 v0.15.5 分卷下载

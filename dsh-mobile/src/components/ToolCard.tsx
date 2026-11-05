@@ -17,7 +17,6 @@ import {
   Animated,
   Easing,
   Platform,
-  Pressable,
   StyleSheet,
   Text,
   View,
@@ -26,6 +25,7 @@ import type { ToolBlock } from '../core/fold';
 import { buildOutputPreview, parseToolDiff, toolPath, type DiffLine, type ToolDiff } from '../core/toolDiff';
 import { useTheme } from '../design/theme';
 import { useReduceMotion } from '../design/useReduceMotion';
+import { MotionPressable as Pressable } from './MotionPressable';
 import { radius, space, type, weight, toolMeta } from '../design/tokens';
 import { Collapse } from './ui';
 import { ToolOutputViewer } from './ToolOutputViewer';
@@ -112,18 +112,42 @@ function DiffPreviewRow({ line, styles }: { line: DiffLine; styles: Styles }) {
   );
 }
 
+function DetailSection({ title, open, onToggle, detail, children, styles }: {
+  title: string;
+  open: boolean;
+  onToggle: () => void;
+  detail?: React.ReactNode;
+  children: React.ReactNode;
+  styles: Styles;
+}) {
+  return <View style={styles.section}>
+    <Pressable onPress={onToggle} style={styles.sectionHead} accessibilityRole="button"
+      accessibilityLabel={`工具${title}`} accessibilityState={{ expanded: open }}
+      accessibilityHint="展开或收起这个分区">
+      <Text style={styles.sectionTitle}>{title}</Text>
+      <View style={styles.sectionDetail}>{detail}</View>
+      <Text style={styles.chevron}>{open ? '⌃' : '⌄'}</Text>
+    </Pressable>
+    <Collapse open={open}><View style={styles.sectionContent}>{children}</View></Collapse>
+  </View>;
+}
+
 export function ToolCard({ block }: { block: ToolBlock }) {
   const tv = useTheme();
   const styles = useMemo(() => makeStyles(tv), [tv]);
   const [open, setOpen] = useState(false);
-  /** 全屏查看器：看 diff 还是看输出 */
-  const [viewer, setViewer] = useState<'diff' | 'output' | null>(null);
+  const [inputOpen, setInputOpen] = useState(false);
+  const [outputOpen, setOutputOpen] = useState(true);
+  /** Full text is kept separately from bounded card previews. */
+  const [viewer, setViewer] = useState<'diff' | 'output' | 'input' | null>(null);
   const meta = toolMeta(block.name);
   const summary = summarize(block.input);
 
   // 解析失败一律回退原始参数（edit/write 结构不标准时不能让卡片空白）
   const diff = useMemo<ToolDiff | null>(() => parseToolDiff(block.name, block.input), [block.name, block.input]);
   const outputPreview = useMemo(() => buildOutputPreview(block.output), [block.output]);
+  const inputText = useMemo(() => typeof block.input === 'string' ? block.input : JSON.stringify(block.input, null, 2) ?? '(无参数)', [block.input]);
+  const inputPreview = useMemo(() => buildOutputPreview(inputText, 12, 1200, '参数'), [inputText]);
 
   const statusColor = block.pending
     ? tv.colors.textTertiary
@@ -175,96 +199,54 @@ export function ToolCard({ block }: { block: ToolBlock }) {
         <Text style={styles.chevron}>{open ? '⌃' : '⌄'}</Text>
       </Pressable>
 
-      {open ? (
-        <Collapse>
-          <View style={styles.body}>
+      <Collapse open={open}>
+        <View style={styles.body}>
+          <DetailSection title={diff ? '参数与变更' : '参数'} open={inputOpen}
+            onToggle={() => setInputOpen(value => !value)} styles={styles}
+            detail={diff ? <Text style={styles.diffStat}>
+              <Text style={{ color: tv.colors.success }}>+{diff.added}</Text>
+              <Text style={{ color: tv.colors.textFaint }}>{'  '}</Text>
+              <Text style={{ color: tv.colors.danger }}>−{diff.removed}</Text>
+            </Text> : <Text style={styles.sectionHint}>{inputPreview.totalLines} 行</Text>}>
             {diff ? (
               <>
-                {diff.path ? (
-                  <Text style={styles.diffPath} numberOfLines={1} selectable>
-                    {diff.path}
-                  </Text>
-                ) : null}
-                <View style={styles.diffHeadRow}>
-                  <Text style={styles.bodyLabel}>变更</Text>
-                  <Text style={styles.diffStat}>
-                    <Text style={{ color: tv.colors.success }}>+{diff.added}</Text>
-                    <Text style={{ color: tv.colors.textFaint }}>{'  '}</Text>
-                    <Text style={{ color: tv.colors.danger }}>−{diff.removed}</Text>
-                  </Text>
-                </View>
+                {diff.path ? <Text style={styles.diffPath} numberOfLines={1} ellipsizeMode="middle">{diff.path}</Text> : null}
                 <View style={styles.diffBox}>
-                  {diff.preview.map((line, i) => (
-                    <DiffPreviewRow key={`${line.kind}-${i}`} line={line} styles={styles} />
-                  ))}
+                  {diff.preview.map((line, i) => <DiffPreviewRow key={`${line.kind}-${i}`} line={line} styles={styles} />)}
                 </View>
-                {diff.truncated ? (
-                  <Pressable
-                    onPress={() => setViewer('diff')}
-                    style={({ pressed }: { pressed: boolean }) => [
-                      styles.linkBtn,
-                      pressed ? { opacity: tv.motion.pressOpacity } : null,
-                    ]}
-                    accessibilityRole="button"
-                    accessibilityLabel="查看完整差异"
-                  >
-                    <Text style={styles.linkText}>
-                      查看完整差异（共 {diff.lines.length} 行）
-                    </Text>
-                  </Pressable>
-                ) : null}
+                {diff.truncated ? <Pressable onPress={() => setViewer('diff')} style={styles.linkBtn}
+                  accessibilityRole="button" accessibilityLabel="查看完整差异">
+                  <Text style={styles.linkText}>查看完整差异（共 {diff.lines.length} 行）</Text>
+                </Pressable> : null}
               </>
-            ) : (
-              <>
-                <Text style={styles.bodyLabel}>参数</Text>
-                <Text style={styles.code} selectable>
-                  {typeof block.input === 'string'
-                    ? block.input
-                    : JSON.stringify(block.input, null, 2)}
-                </Text>
-              </>
-            )}
+            ) : <Text style={styles.code} selectable>{inputPreview.text || '(无参数)'}</Text>}
+            {diff || inputPreview.truncated ? <Pressable onPress={() => setViewer('input')} style={styles.linkBtn}
+              accessibilityRole="button" accessibilityLabel="查看完整参数">
+              <Text style={styles.linkText}>查看完整参数</Text>
+            </Pressable> : null}
+          </DetailSection>
 
-            {block.output !== undefined ? (
-              <>
-                <Text style={styles.bodyLabel}>输出</Text>
-                {outputPreview.text ? (
-                  <Text
-                    style={[styles.code, block.isError && { color: tv.colors.danger }]}
-                    selectable
-                  >
-                    {outputPreview.text}
-                  </Text>
-                ) : (
-                  <Text style={styles.emptyText}>(无输出)</Text>
-                )}
-                {outputPreview.truncated ? (
-                  <Pressable
-                    onPress={() => setViewer('output')}
-                    style={({ pressed }: { pressed: boolean }) => [
-                      styles.linkBtn,
-                      pressed ? { opacity: tv.motion.pressOpacity } : null,
-                    ]}
-                    accessibilityRole="button"
-                    accessibilityLabel="查看完整输出"
-                  >
-                    <Text style={styles.linkText}>
-                      查看完整输出（共 {outputPreview.totalLines} 行）
-                    </Text>
-                  </Pressable>
-                ) : null}
-              </>
+          <DetailSection title="输出" open={outputOpen} onToggle={() => setOutputOpen(value => !value)} styles={styles}
+            detail={<Text style={styles.sectionHint}>{block.output === undefined && block.pending ? '等待返回' : `${outputPreview.totalLines} 行`}</Text>}>
+            {outputPreview.text ? <Text style={[styles.code, block.isError && { color: tv.colors.danger }]} selectable>
+              {outputPreview.text}
+            </Text> : <Text style={styles.emptyText}>{block.pending && block.output === undefined ? '等待工具返回输出…' : '(无输出)'}</Text>}
+            {outputPreview.truncated ? (
+              <Pressable onPress={() => setViewer('output')} style={styles.linkBtn}
+                accessibilityRole="button" accessibilityLabel="查看完整输出">
+                <Text style={styles.linkText}>查看完整输出（共 {outputPreview.totalLines} 行）</Text>
+              </Pressable>
             ) : null}
-          </View>
-        </Collapse>
-      ) : null}
+          </DetailSection>
+        </View>
+      </Collapse>
 
       {/* 全屏查看器：完整内容 + 复制全部（卡片上没有复制按钮） */}
       <ToolOutputViewer
         visible={viewer !== null}
-        title={`${meta.label} · ${viewer === 'diff' ? '差异' : '输出'}`}
+        title={`${meta.label} · ${viewer === 'diff' ? '差异' : viewer === 'input' ? '参数' : '输出'}`}
         subtitle={diff?.path || toolPath(block.input)}
-        content={viewer === 'output' ? block.output ?? '' : undefined}
+        content={viewer === 'output' ? block.output ?? '' : viewer === 'input' ? inputText : undefined}
         diff={viewer === 'diff' && diff ? diff : undefined}
         onClose={() => setViewer(null)}
       />
@@ -322,15 +304,12 @@ function makeStyles(tv: ReturnType<typeof useTheme>) {
       paddingBottom: space.md,
       paddingTop: space.sm,
     },
-    bodyLabel: {
-      color: C.textFaint,
-      fontSize: type.micro,
-      fontWeight: weight.semibold,
-      letterSpacing: 0.6,
-      textTransform: 'uppercase',
-      marginBottom: 5,
-      marginTop: space.sm,
-    },
+    section: { borderBottomWidth: StyleSheet.hairlineWidth, borderBottomColor: C.toolBorder },
+    sectionHead: { minHeight: 44, flexDirection: 'row', alignItems: 'center' },
+    sectionTitle: { color: C.textSecondary, fontSize: type.xs, fontWeight: weight.semibold },
+    sectionDetail: { flex: 1, alignItems: 'flex-end', marginLeft: space.sm },
+    sectionHint: { color: C.textFaint, fontSize: type.micro },
+    sectionContent: { paddingBottom: space.md },
     code: {
       color: C.textSecondary,
       fontSize: type.xs,
@@ -344,12 +323,7 @@ function makeStyles(tv: ReturnType<typeof useTheme>) {
       fontFamily: Platform.OS === 'ios' ? 'Menlo' : 'monospace',
       marginTop: 2,
     },
-    diffHeadRow: {
-      flexDirection: 'row',
-      alignItems: 'center',
-      justifyContent: 'space-between',
-    },
-    diffStat: { fontSize: type.micro, marginTop: space.sm, fontFamily: 'monospace' },
+    diffStat: { fontSize: type.micro, fontFamily: 'monospace' },
     diffBox: {
       borderRadius: radius.sm,
       borderWidth: StyleSheet.hairlineWidth,
@@ -372,7 +346,7 @@ function makeStyles(tv: ReturnType<typeof useTheme>) {
       lineHeight: 17,
       fontFamily: Platform.OS === 'ios' ? 'Menlo' : 'monospace',
     },
-    linkBtn: { alignSelf: 'flex-start', marginTop: space.sm, paddingVertical: 2 },
+    linkBtn: { alignSelf: 'flex-start', minHeight: 44, justifyContent: 'center', marginTop: space.xs },
     linkText: { color: C.accentBright, fontSize: type.xs, fontWeight: weight.medium },
   });
 }

@@ -1,31 +1,28 @@
-/**
- * 尊重系统「减少动态效果」设置。
- *
- * 返回 true 时，循环动画（思考点、工具执行脉冲、扫码线）应停止并保持静态。
- */
-import { useEffect, useState } from 'react';
+/** One system subscription for the app, including legacy looping indicators. */
+import React, { createContext, useContext, useEffect, useState } from 'react';
 import { AccessibilityInfo } from 'react-native';
 
-export function useReduceMotion(): boolean {
-  const [reduce, setReduce] = useState(false);
+// Remain still until the system preference is known, including isolated mounts.
+const MotionPreference = createContext(true);
 
+export function MotionPreferenceProvider({ children }: { children: React.ReactNode }) {
+  const [reduce, setReduce] = useState(true);
   useEffect(() => {
     let alive = true;
-    void AccessibilityInfo.isReduceMotionEnabled()
-      .then((enabled) => {
-        if (alive) setReduce(enabled);
-      })
-      .catch(() => {
-        // 平台不支持时按「不减少」处理
-      });
-    const subscription = AccessibilityInfo.addEventListener('reduceMotionChanged', (enabled) => {
+    let changed = false;
+    const subscription = AccessibilityInfo.addEventListener('reduceMotionChanged', enabled => {
+      changed = true;
       if (alive) setReduce(enabled);
     });
-    return () => {
-      alive = false;
-      subscription.remove();
-    };
+    void AccessibilityInfo.isReduceMotionEnabled().then(enabled => {
+      // A late initial read must not overwrite a newer accessibility event.
+      if (alive && !changed) setReduce(enabled);
+    }).catch(() => { if (alive && !changed) setReduce(false); });
+    return () => { alive = false; subscription.remove(); };
   }, []);
+  return React.createElement(MotionPreference.Provider, { value: reduce }, children);
+}
 
-  return reduce;
+export function useReduceMotion(): boolean {
+  return useContext(MotionPreference);
 }

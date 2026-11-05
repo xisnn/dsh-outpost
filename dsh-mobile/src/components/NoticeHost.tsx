@@ -15,16 +15,12 @@
  */
 
 import React, { useCallback, useEffect, useMemo, useRef } from 'react';
-import {
-  Animated,
-  Pressable,
-  StyleSheet,
-  Text,
-  View,
-} from 'react-native';
+import { Animated, StyleSheet, Text, View } from 'react-native';
+import { MotionPressable as Pressable } from './MotionPressable';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 
 import { useTheme } from '../design/theme';
+import { MOTION, useMotionPreference } from '../design/motion';
 
 export type NoticeKind = 'done' | 'fail' | 'ask' | 'approval';
 
@@ -64,27 +60,43 @@ function Banner({
   // 0 = 在屏幕上方外，1 = 就位
   const slide = useRef(new Animated.Value(0)).current;
   const leaving = useRef(false);
+  const reduced = useMotionPreference();
+  const reducedRef = useRef(reduced);
+  const dismissRef = useRef(onDismiss);
+  const running = useRef<Animated.CompositeAnimation | null>(null);
+  reducedRef.current = reduced;
+  dismissRef.current = onDismiss;
 
   const leave = useCallback(() => {
     if (leaving.current) return;
     leaving.current = true;
-    Animated.timing(slide, {
+    running.current?.stop();
+    running.current = Animated.timing(slide, {
       toValue: 0,
-      duration: 160,
+      duration: reducedRef.current ? 0 : MOTION.exit,
       useNativeDriver: true,
-    }).start(() => onDismiss(item.id));
-  }, [slide, item.id, onDismiss]);
+    });
+    running.current.start(({ finished }) => { if (finished) dismissRef.current(item.id); });
+  }, [slide, item.id]);
 
   useEffect(() => {
-    Animated.spring(slide, {
+    leaving.current = false;
+    running.current = Animated.timing(slide, {
       toValue: 1,
+      duration: reducedRef.current ? 0 : MOTION.enter,
       useNativeDriver: true,
-      bounciness: 6,
-      speed: 18,
-    }).start();
+    });
+    running.current.start();
     const t = setTimeout(leave, AUTO_DISMISS_MS);
-    return () => clearTimeout(t);
+    return () => { clearTimeout(t); running.current?.stop(); };
   }, [slide, leave]);
+
+  useEffect(() => {
+    if (!reduced) return;
+    running.current?.stop();
+    slide.setValue(leaving.current ? 0 : 1);
+    if (leaving.current) dismissRef.current(item.id);
+  }, [reduced, slide, item.id]);
 
   const translateY = slide.interpolate({
     inputRange: [0, 1],

@@ -114,9 +114,11 @@ function waitMessage(ws, predicate, timeoutMs = 3000) {
 async function connectGateway(srv, deviceId) {
   const code = srv.makePairingCode();
   const { ws, opened } = openGateway(srv, { code, deviceId });
+  // Register before awaiting open: the paired frame can arrive in the same tick.
+  const pairedMessage = waitMessage(ws, (m) => m.kind === 'paired');
   const isOpen = await opened;
-  if (!isOpen) throw new Error('网关连不上');
-  const paired = await waitMessage(ws, (m) => m.kind === 'paired');
+  if (!isOpen) { ws.close(); throw new Error('网关连不上'); }
+  const paired = await pairedMessage;
   if (!paired) throw new Error('连上了但没收到 paired 帧');
   return ws;
 }

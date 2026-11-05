@@ -105,7 +105,15 @@ if (!existsSync(gradlew)) {
     }
   }
 
+  // Optional local SDK/JDK setup, also used by isolated offline verification.
+  // Keep the tasks and assertions below identical on local machines and CI.
+  const extraArgs = JSON.parse(process.env.DSH_TEST_GRADLE_ARGS || '[]');
+  if (!Array.isArray(extraArgs) || extraArgs.some(value => typeof value !== 'string')) {
+    throw new TypeError('DSH_TEST_GRADLE_ARGS must be a JSON array of strings');
+  }
+
   function run(args) {
+    args = [...extraArgs, ...args];
     let out = '';
     let code = 0;
     const file = isWin ? 'cmd.exe' : gradlewCmd;

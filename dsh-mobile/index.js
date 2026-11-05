@@ -1,3 +1,4 @@
+import 'react-native-gesture-handler';
 import { AppRegistry } from 'react-native';
 
 // 必须排在 App 之前：里面设置了 LogBox 过滤，晚于 App 模块求值就没用了

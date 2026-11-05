@@ -62,7 +62,10 @@ param(
 [switch]$SkipGatewayPatchCheck,
 [switch]$Foreground,
 # 换网后先释放旧地址上的 DSH 监听，再用当前地址启动。
-[switch]$Restart
+[switch]$Restart,
+# Profile names resolve under DSH_HOME, inherited by the DSH child process.
+[ValidatePattern('\A[A-Za-z0-9][A-Za-z0-9_.-]*\z')]
+[string]$Profile = 'web'
 )
 
 # dsh 可执行文件：环境变量 → PATH → 常见安装位置
@@ -118,7 +121,22 @@ if (Test-Path -LiteralPath $gatePath) {
 }
 
 $patchScript = Join-Path $PSScriptRoot 'patches\mobile-gateway-mgmt-auth\apply.mjs'
-$gate = Test-GatewayPatchApplied -PatchScript $patchScript -Skip:$SkipGatewayPatchCheck
+$dshHome = if ($env:DSH_HOME) { $env:DSH_HOME } else { Join-Path $env:USERPROFILE '.dsh' }
+$gatewayDir = Join-Path $dshHome "profiles\$Profile\node_modules\dsh-plugin-mobile-gateway"
+$gatewayIndex = Join-Path $gatewayDir 'lib\index.mjs'
+$gate = Test-GatewayPatchApplied -PatchScript $patchScript -Skip:$SkipGatewayPatchCheck `
+    -PluginInstalled:(Test-Path -LiteralPath (Join-Path $gatewayDir 'package.json')) -CheckRunner {
+        param($script)
+        $previous = $ErrorActionPreference
+        $ErrorActionPreference = 'Continue'
+        try {
+            $global:LASTEXITCODE = $null
+            $output = (& node $script --check "--path=$gatewayIndex" 2>&1 | Out-String)
+            $code = $global:LASTEXITCODE
+            if ($null -eq $code) { $code = 1 }
+            return @{ ExitCode = $code; Output = $output }
+        } finally { $ErrorActionPreference = $previous }
+    }
 if ($gate.ShouldCheck) {
     if ($gate.ExitCode -ne 0) {
         Write-GatewayPatchRefusal -Detail $gate.Output
@@ -241,6 +259,9 @@ if ($lanIp -and $bindIp -ne $lanIp) {
 
 # ---- 端口检查 ----
 $busy = Get-NetTCPConnection -LocalPort $Port -State Listen -ErrorAction SilentlyContinue
+if ($busy -and $Restart -and ($PSBoundParameters.ContainsKey('Profile') -or $env:DSH_HOME)) {
+  throw "Port $Port is occupied. Cannot authenticate the selected profile and DSH_HOME; restart it manually. No process was stopped."
+}
 if ($busy -and $Restart) {
   # 地址失效时 TCP 连接探测会失败，但旧监听仍可能占着端口。
   # 从监听表定位 PID，并核实确实是 DSH web，避免结束其它程序。
@@ -390,7 +411,7 @@ try {
   Write-Host "  [提示] 日志文件权限收紧失败，该文件含 token，建议手动检查。" -ForegroundColor DarkYellow
 }
 
-$dshArgs = @('--profile', 'web', '--no-open', '--host', $bindIp, '--port', "$Port")
+$dshArgs = @('--profile', $Profile, '--no-open', '--host', $bindIp, '--port', "$Port")
 
 # 用 Start-Process + -PassThru，并且**不加 -Wait**：
 # 这样 dsh 是独立进程，脚本退出不会把它带走。

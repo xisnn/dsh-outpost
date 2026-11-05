@@ -7,42 +7,23 @@
  * - 底部：浮动输入条 + 发送/打断
  */
 import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
-import {
-  ActivityIndicator,
-  AppState,
-  FlatList,
-  Image,
-  Keyboard,
-  KeyboardAvoidingView,
-  Modal,
-  Platform,
-  Pressable,
-  ScrollView,
-  StyleSheet,
-  Text,
-  TextInput,
-  View,
-} from 'react-native';
+import { ActivityIndicator, AppState, FlatList, KeyboardAvoidingView, Platform, StyleSheet, Text, View } from 'react-native';
+import { MotionModal as Modal } from '../components/MotionModal';
+import { MotionPressable as Pressable } from '../components/MotionPressable';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import AsyncStorage from '@react-native-async-storage/async-storage';
 
 import { useApp } from '../App';
 import { useNav } from '../nav/NavHost';
 import { Header } from '../components/Header';
+import { ChatComposer } from '../components/ChatComposer';
 import { useTheme } from '../design/theme';
 import { layout, radius, space, type, weight } from '../design/tokens';
 import { AssistantText, UserBubble } from '../components/Message';
 import { MessageActionSheet } from '../components/MessageActionSheet';
 import { JumpToBottomFab } from '../components/JumpToBottomFab';
-import {
-  NEAR_BOTTOM_PX,
-  classifyListChange,
-  distanceFromBottom,
-  shouldMarkNewContent,
-  shouldShowJumpToBottom,
-  tailOf,
-  type ListTail,
-} from '../core/scrollFollow';
+import { useChatScroll } from '../components/useChatScroll';
+import { useChatMetaPolling } from '../components/useChatMetaPolling';
 import { buildAssistantCopyText } from '../core/copyText';
 import { draftStore, MAX_DRAFT_CHARS } from '../core/draftStore';
 import { buildWorkGroupMap, type WorkGroupView } from '../core/workGroup';
@@ -66,7 +47,7 @@ import type { ButlerMode } from '../core/butler';
 import { ThinkingAccordion, ThinkingDots } from '../components/Thinking';
 import { ToolCard } from '../components/ToolCard';
 import { ModelSwitcher } from '../components/ModelSwitcher';
-import { pickAttachments, formatBytes, type PickMode } from '../core/picker';
+import { pickAttachments, type PickMode } from '../core/picker';
 import { guessImageMime } from '../core/rpc/upload';
 import type { PendingSendRecord } from '../core/pendingSend/types';
 import {
@@ -99,6 +80,7 @@ interface ChatItemRowProps {
   doneTaskCount: number;
   sessionId: string;
   uploadApi: ReturnType<typeof useApp>['store']['upload'];
+  allowReveal?: boolean;
   openMessageActions: (text: string) => void;
   renderBlocks: (
     blocks: Block[],
@@ -118,6 +100,7 @@ export function areChatItemRowPropsEqual(prev: ChatItemRowProps, next: ChatItemR
     prev.doneTaskCount === next.doneTaskCount &&
     prev.sessionId === next.sessionId &&
     prev.uploadApi === next.uploadApi &&
+    prev.allowReveal === next.allowReveal &&
     prev.openMessageActions === next.openMessageActions &&
     prev.renderBlocks === next.renderBlocks &&
     prev.dividerStyle === next.dividerStyle &&
@@ -137,6 +120,7 @@ const ChatItemRow = React.memo(function ChatItemRow({
   doneTaskCount,
   sessionId,
   uploadApi,
+  allowReveal,
   openMessageActions,
   renderBlocks,
   dividerStyle,
@@ -152,6 +136,8 @@ const ChatItemRow = React.memo(function ChatItemRow({
         sessionId={sessionId}
         api={uploadApi}
         onLongPress={openMessageActions}
+        displayScope={JSON.stringify([sessionId, item.key])}
+        allowReveal={allowReveal}
       />
     );
   }
@@ -215,6 +201,7 @@ export function ChatScreen({
   embedded = false,
   address,
   readOnly = false,
+  active = true,
 }: {
   sessionId: string;
   title?: string;
@@ -226,6 +213,8 @@ export function ChatScreen({
   address?: SessionAddress;
   /** 只读（队员事件流不允许发消息） */
   readOnly?: boolean;
+  /** Owning navigation entry and Home tab are both visible. */
+  active?: boolean;
 }) {
   const { store, baseUrl, butlerWorkspace, pickButlerWorkspace, butlerNeedWorkspace } = useApp();
   const nav = useNav();
@@ -249,31 +238,8 @@ export function ChatScreen({
   const [butlerMode, setButlerMode] = useState<ButlerMode>('chat');
   // 管家页顶部的「切换项目」弹层
   const [switchWs, setSwitchWs] = useState(false);
-  const scrollRef = useRef<FlatList<ChatItem>>(null);
-  const [nearBottom, setNearBottom] = useState(true);
-  /**
-   * 滚动跟随状态（判据在 core/scrollFollow.ts，可单测）：
-   *   · awayFromBottom —— 离底够远，浮出「回到底部」按钮（带迟滞，防闪）
-   *   · hasNewContent  —— 离开底部期间末尾真的长了，按钮上亮圆点
-   * 距离用 ref 存：每帧滚动都 setState 会让整个聊天页重渲染。
-   */
-  const distanceRef = useRef(0);
-  const awayRef = useRef(false);
-  const [awayFromBottom, setAwayFromBottom] = useState(false);
-  const hasNewContentRef = useRef(false);
-  const [hasNewContent, setHasNewContent] = useState(false);
-  /** 上一次的列表尾部签名，用来区分「末尾新增」和「加载更早」 */
-  const tailRef = useRef<ListTail | null>(null);
-  /** 输入区高度：回到底部按钮浮在它上方（跟着草稿栏/打断按钮变化） */
+  /** 输入区高度：回到底部按钮浮在它上方。 */
   const [composerHeight, setComposerHeight] = useState(0);
-  /**
-   * 首次落底之前不要开 `maintainVisibleContentPosition`。
-   *
-   * 它会「把当前可见项钉住」——初次布局时列表还停在顶部，钉住顶部就会
-   * 和 scrollToEnd 抢，表现为进会话偶尔停在历史中间。等首次滚到底
-   * （给一帧余量）再启用，之后「加载更早」才有稳定的锚点。
-   */
-  const [anchorReady, setAnchorReady] = useState(false);
 
   // 地址是对象，不能直接进依赖：用字符串 key 固定住
   const addressKey = address
@@ -293,6 +259,19 @@ export function ChatScreen({
 
   const chat = store.getChat(sessionId);
   const hasTeam = !!chat.agentTeam;
+  const {
+    scrollRef, awayFromBottom, hasNewContent, anchorReady, kbHeight, jumpToBottom,
+    applyScrollMetrics, beginDrag, endDrag, beginMomentum, endMomentum, contentSizeChanged, viewportChanged,
+  } = useChatScroll(chat.items, sessionId + ':' + addressKey, active);
+  const onListScroll = useCallback((event: {
+    nativeEvent: { layoutMeasurement: { height: number }; contentOffset: { y: number }; contentSize: { height: number } };
+  }) => {
+    const { layoutMeasurement, contentOffset, contentSize } = event.nativeEvent;
+    applyScrollMetrics({ contentHeight: contentSize.height, offsetY: contentOffset.y, viewportHeight: layoutMeasurement.height });
+  }, [applyScrollMetrics]);
+  const metaBusy = chat.running || !!chat.agentTeam?.tasks.some(task => task.status === 'pending' || task.status === 'in_progress') ||
+    store.pendingApprovals.some(approval => approval.sessionId === sessionId);
+  useChatMetaPolling(store, sessionId, active, (butler || hasTeam) && !readOnly && !store.authInvalidated, metaBusy);
 
   // F-04：进入会话时恢复该 sessionId 的草稿；离开页面时把防抖中的草稿立即落盘。
   useEffect(() => {
@@ -410,17 +389,6 @@ export function ChatScreen({
     [sessionId, store],
   );
 
-  // 团队状态靠投影轮询刷新：team/* 事件不在会话日志里，拿不到增量
-  useEffect(() => {
-    if (!butler && !hasTeam) return;
-    // 2 秒一次：团队状态和 running 都靠它刷新。
-    // 之前是 5 秒，配合模型十几秒的首字延迟，用户会觉得发完消息没反应。
-    const timer = setInterval(() => {
-      void store.refreshChatMeta(sessionId);
-    }, 2000);
-    return () => clearInterval(timer);
-  }, [store, sessionId, butler, hasTeam]);
-
   // 任务完成提示：显示第一条，5 秒后自动消
   const notice = store.teamNotices[0];
   useEffect(() => {
@@ -428,94 +396,6 @@ export function ChatScreen({
     const timer = setTimeout(() => store.dismissNotice(notice.id), 5000);
     return () => clearTimeout(timer);
   }, [notice, store]);
-
-  useEffect(() => {
-    if (nearBottom) {
-      const timer = setTimeout(() => scrollRef.current?.scrollToEnd({ animated: true }), 60);
-      return () => clearTimeout(timer);
-    }
-  }, [chat.items.length, nearBottom]);
-
-  // 首次落底后再开「保持可见位置」（见 anchorReady 的注释）
-  useEffect(() => {
-    if (anchorReady) return;
-    const timer = setTimeout(() => setAnchorReady(true), 800);
-    return () => clearTimeout(timer);
-  }, [anchorReady]);
-
-  /**
-   * 滚动度量 → 三个派生状态。
-   *
-   * 只有跨过阈值时才 setState：滚动事件 10Hz，无条件 set 会把整页重渲染
-   * 十几次/秒（长会话上肉眼可见地掉帧）。
-   */
-  const applyScrollMetrics = useCallback((distance: number) => {
-    distanceRef.current = distance;
-    setNearBottom(distance < NEAR_BOTTOM_PX);
-
-    const nextAway = shouldShowJumpToBottom(distance, awayRef.current);
-    if (nextAway !== awayRef.current) {
-      awayRef.current = nextAway;
-      setAwayFromBottom(nextAway);
-    }
-
-    // 已经回到底部：新内容提示自动熄灭（用户已经看到了）
-    if (distance < NEAR_BOTTOM_PX && hasNewContentRef.current) {
-      hasNewContentRef.current = false;
-      setHasNewContent(false);
-    }
-  }, []);
-
-  /**
-   * 列表尾部变化 → 是否要亮「有新内容」圆点。
-   *
-   * ⚠️ 判据是「末尾真的长了」，不是「items 变了」：
-   * 点「加载更早」会让 items 变长，但那是往回翻，亮圆点就是骗人。
-   * 具体的四类判定在 classifyListChange（core/scrollFollow.ts）。
-   */
-  useEffect(() => {
-    const next = tailOf(chat.items);
-    const change = classifyListChange(tailRef.current, next);
-    tailRef.current = next;
-    if (shouldMarkNewContent(change, distanceRef.current) && !hasNewContentRef.current) {
-      hasNewContentRef.current = true;
-      setHasNewContent(true);
-    }
-  }, [chat.items]);
-
-  /** 点「回到底部」：滚到底 + 立刻清掉提示（不等滚动事件回来） */
-  const jumpToBottom = useCallback(() => {
-    hasNewContentRef.current = false;
-    setHasNewContent(false);
-    awayRef.current = false;
-    setAwayFromBottom(false);
-    distanceRef.current = 0;
-    setNearBottom(true);
-    scrollRef.current?.scrollToEnd({ animated: true });
-  }, []);
-
-  /**
-   * 键盘弹出后把列表滚到底。
-   *
-   * 布局交给系统：manifest 里是 adjustResize，键盘弹出时窗口会自己缩小，
-   * 输入框天然浮在键盘上方。**不要**再给容器加 marginBottom —— 那会和
-   * adjustResize 叠加，把输入框顶到页面顶部去（真机上实测过）。
-   * 这里只做两件小事：
-   *   1. 键盘高度归零时把 paddingBottom 还原成安全区高度
-   *   2. 键盘弹出后把消息列表滚到底，让用户看到最新内容
-   */
-  const [kbHeight, setKbHeight] = useState(0);
-  useEffect(() => {
-    const showSub = Keyboard.addListener('keyboardDidShow', (e) => {
-      setKbHeight(e.endCoordinates?.height ?? 0);
-      setTimeout(() => scrollRef.current?.scrollToEnd({ animated: true }), 120);
-    });
-    const hideSub = Keyboard.addListener('keyboardDidHide', () => setKbHeight(0));
-    return () => {
-      showSub.remove();
-      hideSub.remove();
-    };
-  }, []);
 
   const addPicked = useCallback(async (mode: PickMode) => {
     setPickerOpen(false);
@@ -558,7 +438,7 @@ export function ChatScreen({
       await store.sendPending(sessionId, text, pendingAttachments);
       // 已成功进入 PendingSend 队列：草稿清除
       await draftStore.clear(sessionId);
-      setNearBottom(true);
+      jumpToBottom();
     } catch (e) {
       // 区分「入队失败」和「入队成功但发送失败」：
       //   · 入队失败（staging/create 抛错）→ 文本必须还给用户；
@@ -589,7 +469,7 @@ export function ChatScreen({
       setSending(false);
       setAttaching(false);
     }
-  }, [draft, drafts, sending, sessionId, store]);
+  }, [draft, drafts, sending, sessionId, store, jumpToBottom]);
 
   const retryPendingSend = useCallback(
     async (record: PendingSendRecord) => {
@@ -598,14 +478,14 @@ export function ChatScreen({
       setSendError(undefined);
       try {
         await store.retryPending(sessionId, record.requestId);
-        setNearBottom(true);
+        jumpToBottom();
       } catch (e) {
         setSendError(describeSendError(e));
       } finally {
         setRetryingPendingId(undefined);
       }
     },
-    [retryingPendingId, sessionId, store],
+    [retryingPendingId, sessionId, store, jumpToBottom],
   );
 
   const confirmRemovePending = useCallback(async () => {
@@ -776,21 +656,35 @@ export function ChatScreen({
         compact
         right={
           butler ? (
-            <Pressable
-              onPress={() => setSwitchWs(true)}
-              hitSlop={10}
-              style={({ pressed }: { pressed: boolean }) => [
-                styles.wsBtn,
-                pressed ? { opacity: 0.6 } : null,
-              ]}
-              accessibilityRole="button"
-              accessibilityLabel="切换项目"
-            >
-              <Text style={styles.wsBtnText} numberOfLines={1}>
-                {butlerWsName ?? '选项目'}
-              </Text>
-              <Text style={styles.wsBtnChevron}>⌄</Text>
-            </Pressable>
+            <View style={styles.headerRight}>
+              <Pressable
+                onPress={() => nav.push('ButlerTasks', { cwd: butlerWorkspace ?? '' })}
+                hitSlop={10}
+                style={({ pressed }: { pressed: boolean }) => [
+                  styles.taskBtn,
+                  pressed ? { opacity: 0.6 } : null,
+                ]}
+                accessibilityRole="button"
+                accessibilityLabel="管家任务"
+              >
+                <Text style={styles.taskBtnText}>任务</Text>
+              </Pressable>
+              <Pressable
+                onPress={() => setSwitchWs(true)}
+                hitSlop={10}
+                style={({ pressed }: { pressed: boolean }) => [
+                  styles.wsBtn,
+                  pressed ? { opacity: 0.6 } : null,
+                ]}
+                accessibilityRole="button"
+                accessibilityLabel="切换项目"
+              >
+                <Text style={styles.wsBtnText} numberOfLines={1}>
+                  {butlerWsName ?? '选项目'}
+                </Text>
+                <Text style={styles.wsBtnChevron}>⌄</Text>
+              </Pressable>
+            </View>
           ) : null
         }
       />
@@ -858,11 +752,15 @@ export function ChatScreen({
         </View>
       ) : null}
 
+      {/* Edge-to-edge Android windows may keep their full height above the IME.
+          Measure overlap on both platforms to keep the composer and jump button reachable. */}
       <KeyboardAvoidingView
         style={styles.flex}
-        behavior={Platform.OS === 'ios' ? 'padding' : undefined}
+        behavior="padding"
         keyboardVerticalOffset={0}
       >
+        {/* Anchor absolute controls inside the area remaining above the keyboard padding. */}
+        <View style={styles.flex}>
         {/*
           ⚠️ 用 FlatList 而不是 ScrollView + map：长会话（100 轮以上）
           一次性渲染所有消息会明显卡顿。FlatList 只渲染可视区域附近的项。
@@ -891,26 +789,14 @@ export function ChatScreen({
             只在头部插入时生效；正常追加（新消息）不受影响。
           */
           maintainVisibleContentPosition={anchorReady ? { minIndexForVisible: 0 } : undefined}
-          onScroll={(e: {
-            nativeEvent: {
-              layoutMeasurement: { height: number };
-              contentOffset: { y: number };
-              contentSize: { height: number };
-            };
-          }) => {
-            const { layoutMeasurement, contentOffset, contentSize } = e.nativeEvent;
-            applyScrollMetrics(
-              distanceFromBottom({
-                contentHeight: contentSize.height,
-                offsetY: contentOffset.y,
-                viewportHeight: layoutMeasurement.height,
-              }),
-            );
-          }}
+          onScroll={onListScroll}
+          onScrollBeginDrag={beginDrag}
+          onScrollEndDrag={event => { onListScroll(event); endDrag(); }}
+          onMomentumScrollBegin={beginMomentum}
+          onMomentumScrollEnd={event => { onListScroll(event); endMomentum(); }}
+          onLayout={viewportChanged}
           scrollEventThrottle={100}
-          onContentSizeChange={() => {
-            if (nearBottom) scrollRef.current?.scrollToEnd({ animated: false });
-          }}
+          onContentSizeChange={contentSizeChanged}
           ListHeaderComponent={
             chat.hasOlder ? (
               <Pressable
@@ -980,6 +866,7 @@ export function ChatScreen({
                 doneTaskCount={item.kind === 'assistant' && item.delegated ? completedTaskCount : 0}
                 sessionId={sessionId}
                 uploadApi={store.upload}
+                allowReveal={active}
                 openMessageActions={openMessageActions}
                 renderBlocks={renderBlocks}
                 dividerStyle={styles.divider}
@@ -1044,19 +931,6 @@ export function ChatScreen({
           {/* 普通聊天用底部团队条；管家模式用顶部头像条，别重复 */}
           {butler ? null : <TeamBar team={chat.agentTeam} />}
 
-          {chat.running ? (
-            <Pressable
-              style={({ pressed }: { pressed: boolean }) => [
-                styles.stopBtn,
-                pressed ? { opacity: 0.65 } : null,
-              ]}
-              onPress={() => void store.cancel(sessionId)}
-            >
-              <View style={styles.stopDot} />
-              <Text style={styles.stopText}>打断</Text>
-            </Pressable>
-          ) : null}
-
           {sendError ? (
             <View style={styles.errRow}>
               <Text style={styles.errText} numberOfLines={2}>
@@ -1068,98 +942,24 @@ export function ChatScreen({
             </View>
           ) : null}
 
-          {/* 待发送附件：图片给缩略图，文件给 chip，都可单独删 */}
-          {drafts.length > 0 ? (
-            <ScrollView
-              horizontal
-              showsHorizontalScrollIndicator={false}
-              contentContainerStyle={styles.draftRail}
-              style={styles.draftRailScroll}
-              keyboardShouldPersistTaps="handled"
-            >
-              {drafts.map((d) => (
-                <View key={d.id} style={styles.draftItem}>
-                  {d.kind === 'image' ? (
-                    <Image source={{ uri: d.uri }} style={styles.draftThumb} resizeMode="cover" />
-                  ) : (
-                    <View style={styles.draftFile}>
-                      <Text style={styles.draftFileIcon}>▤</Text>
-                      <View style={styles.draftFileBody}>
-                        <Text style={styles.draftFileName} numberOfLines={1}>
-                          {d.name}
-                        </Text>
-                        <Text style={styles.draftFileSize}>{formatBytes(d.size)}</Text>
-                      </View>
-                    </View>
-                  )}
-                  <Pressable
-                    style={styles.draftRemove}
-                    hitSlop={8}
-                    onPress={() => setDrafts((cur) => cur.filter((x) => x.id !== d.id))}
-                    accessibilityLabel={`移除 ${d.name}`}
-                  >
-                    <Text style={styles.draftRemoveText}>✕</Text>
-                  </Pressable>
-                </View>
-              ))}
-            </ScrollView>
-          ) : null}
-
-          {draft.length >= MAX_DRAFT_CHARS ? (
-            <Text style={styles.draftLimitHint}>
-              已达 {MAX_DRAFT_CHARS} 字草稿上限，继续输入请先发送或删减
-            </Text>
-          ) : null}
-
-          <View style={styles.composerRow}>
-            <Pressable
-              style={({ pressed }: { pressed: boolean }) => [
-                styles.attachBtn,
-                pressed ? { opacity: 0.6 } : null,
-              ]}
-              onPress={() => setPickerOpen(true)}
-              disabled={sending}
-              hitSlop={8}
-              accessibilityLabel="添加附件"
-            >
-              <Text style={styles.attachIcon}>＋</Text>
-            </Pressable>
-
-            <TextInput
-              style={styles.input}
-              value={draft}
-              onChangeText={(t: string) => {
-                setDraft(t);
-                // 立即写入内存 + 300ms 防抖落盘；切换会话后回来能恢复
-                draftStore.set(sessionId, t);
-              }}
-              placeholder={attaching ? '正在上传附件…' : '发消息…'}
-              placeholderTextColor={tv.colors.textFaint}
-              multiline
-              maxLength={MAX_DRAFT_CHARS}
-            />
-            <Pressable
-              style={({ pressed }: { pressed: boolean }) => [
-                styles.sendBtn,
-                (!draft.trim() && drafts.length === 0) || sending ? styles.sendDisabled : null,
-                pressed ? { opacity: 0.8 } : null,
-              ]}
-              onPress={() => void send()}
-              disabled={(!draft.trim() && drafts.length === 0) || sending}
-              accessibilityRole="button"
-              accessibilityLabel="发送消息"
-              accessibilityState={{
-                disabled: (!draft.trim() && drafts.length === 0) || sending,
-                busy: sending,
-              }}
-            >
-              {sending ? (
-                <ActivityIndicator color={tv.colors.bg} size="small" />
-              ) : (
-                <Text style={styles.sendIcon}>↑</Text>
-              )}
-            </Pressable>
-          </View>
+          <ChatComposer
+            key={sessionId}
+            value={draft}
+            attachments={drafts}
+            sending={sending}
+            uploading={attaching}
+            running={chat.running}
+            maxLength={MAX_DRAFT_CHARS}
+            onChangeText={(text) => {
+              setDraft(text);
+              // 立即写入内存 + 300ms 防抖落盘；切换会话后回来能恢复
+              draftStore.set(sessionId, text);
+            }}
+            onAddAttachment={() => setPickerOpen(true)}
+            onRemoveAttachment={(id) => setDrafts((cur) => cur.filter((item) => item.id !== id))}
+            onSend={() => void send()}
+            onStop={() => void store.cancel(sessionId)}
+          />
         </View>
 
         {/* 选附件：相册 / 文件 */}
@@ -1171,7 +971,7 @@ export function ChatScreen({
           onRequestClose={() => setPickerOpen(false)}
         >
           <View style={styles.sheetBackdrop}>
-            <Pressable style={StyleSheet.absoluteFill} onPress={() => setPickerOpen(false)} />
+            <Pressable feedback="none" style={StyleSheet.absoluteFill} onPress={() => setPickerOpen(false)} />
             <View
               style={[
                 styles.sheet,
@@ -1223,6 +1023,7 @@ export function ChatScreen({
           onPress={jumpToBottom}
           bottomOffset={readOnly ? 0 : composerHeight}
         />
+        </View>
       </KeyboardAvoidingView>
 
       {/* 团队浮层：头像条点开，再点某个队员才进他的事件流 */}
@@ -1451,10 +1252,20 @@ function makeStyles(tv: ReturnType<typeof useTheme>) {
     liveText: { color: C.textTertiary, fontSize: type.xs, marginLeft: 6 },
 
     // 顶栏「切换项目」
+    headerRight: { flexDirection: 'row', alignItems: 'center', maxWidth: '100%', gap: 6 },
+    taskBtn: {
+      paddingHorizontal: 9,
+      paddingVertical: 5,
+      borderRadius: radius.pill ?? 14,
+      borderWidth: StyleSheet.hairlineWidth,
+      borderColor: C.border,
+    },
+    taskBtnText: { color: C.accent, fontSize: type.xs },
     wsBtn: {
       flexDirection: 'row',
       alignItems: 'center',
       maxWidth: 130,
+      flexShrink: 1,
       paddingHorizontal: 10,
       paddingVertical: 5,
       borderRadius: radius.pill ?? 14,
@@ -1472,89 +1283,6 @@ function makeStyles(tv: ReturnType<typeof useTheme>) {
       paddingTop: space.sm,
       backgroundColor: C.bg,
     },
-    stopBtn: {
-      alignSelf: 'center',
-      flexDirection: 'row',
-      alignItems: 'center',
-      paddingHorizontal: space.lg,
-      paddingVertical: 6,
-      marginBottom: space.sm,
-      borderRadius: radius.pill,
-      backgroundColor: C.dangerWash,
-    },
-    stopDot: {
-      width: 6,
-      height: 6,
-      borderRadius: 1.5,
-      backgroundColor: C.danger,
-      marginRight: 6,
-    },
-    stopText: { color: C.danger, fontSize: type.xs, fontWeight: weight.medium },
-
-    composerRow: {
-      flexDirection: 'row',
-      alignItems: 'flex-end',
-      paddingHorizontal: layout.screenPadding,
-    },
-    attachBtn: {
-      width: 36,
-      height: layout.composerMinHeight,
-      alignItems: 'center',
-      justifyContent: 'center',
-      marginRight: 2,
-    },
-    attachIcon: { color: C.textTertiary, fontSize: 24, fontWeight: weight.regular, marginTop: -2 },
-
-    // ── 待发送附件 ────────────────────────────────────────────────
-    draftRail: {
-      paddingHorizontal: layout.screenPadding,
-      paddingBottom: space.sm,
-      alignItems: 'flex-end',
-    },
-    draftLimitHint: {
-      color: tv.colors.warning,
-      fontSize: type.micro,
-      paddingHorizontal: layout.screenPadding,
-      paddingBottom: 4,
-      textAlign: 'right',
-    },
-    // 横向 ScrollView 在列容器里不加这个会被撑高
-    draftRailScroll: { flexGrow: 0 },
-    draftItem: { marginRight: space.sm },
-    draftThumb: {
-      width: 62,
-      height: 62,
-      borderRadius: radius.md,
-      backgroundColor: C.bgOverlay,
-    },
-    draftFile: {
-      flexDirection: 'row',
-      alignItems: 'center',
-      maxWidth: 200,
-      paddingVertical: 8,
-      paddingHorizontal: 10,
-      borderRadius: radius.md,
-      backgroundColor: C.bgRaised,
-      borderWidth: StyleSheet.hairlineWidth,
-      borderColor: C.borderStrong,
-    },
-    draftFileIcon: { color: C.accentBright, fontSize: 16, marginRight: space.sm },
-    draftFileBody: { flexShrink: 1 },
-    draftFileName: { color: C.text, fontSize: type.xs, fontWeight: weight.medium },
-    draftFileSize: { color: C.textFaint, fontSize: type.micro },
-    draftRemove: {
-      position: 'absolute',
-      top: -6,
-      right: -6,
-      width: 20,
-      height: 20,
-      borderRadius: 10,
-      backgroundColor: C.text,
-      alignItems: 'center',
-      justifyContent: 'center',
-    },
-    draftRemoveText: { color: C.bg, fontSize: 11, fontWeight: weight.bold },
-
     errRow: {
       flexDirection: 'row',
       alignItems: 'center',
@@ -1607,31 +1335,5 @@ function makeStyles(tv: ReturnType<typeof useTheme>) {
       alignItems: 'center',
     },
     sheetCancelText: { color: C.textSecondary, fontSize: type.base },
-    input: {
-      flex: 1,
-      minHeight: layout.composerMinHeight,
-      maxHeight: layout.composerMaxHeight,
-      backgroundColor: C.bgRaised,
-      borderRadius: radius.xl,
-      borderWidth: StyleSheet.hairlineWidth,
-      borderColor: C.borderStrong,
-      color: C.text,
-      fontSize: type.base,
-      lineHeight: type.base * 1.4,
-      paddingHorizontal: space.lg,
-      paddingTop: Platform.OS === 'ios' ? 12 : 10,
-      paddingBottom: Platform.OS === 'ios' ? 12 : 10,
-      marginRight: space.sm,
-    },
-    sendBtn: {
-      width: layout.composerMinHeight,
-      height: layout.composerMinHeight,
-      borderRadius: layout.composerMinHeight / 2,
-      backgroundColor: C.accent,
-      alignItems: 'center',
-      justifyContent: 'center',
-    },
-    sendDisabled: { backgroundColor: C.bgOverlay },
-    sendIcon: { color: C.onAccent, fontSize: 20, fontWeight: weight.bold, marginTop: -2 },
   });
 }

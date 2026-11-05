@@ -19,6 +19,21 @@ export { BUTLER_PRIME_MARK, BUTLER_MODE_MARK };
 
 export type ButlerMode = 'chat' | 'plan';
 
+const BUTLER_WAKE_PREFIX = '〔系统通知〕队员已经做完，请向用户汇总结果：';
+
+/** 手机旧管家产生的控制消息；普通用户输入仍可发送到 Host 托管会话。 */
+export function isPhoneButlerControlMessage(text: string): boolean {
+  const value = text.trimStart();
+  return value.startsWith(BUTLER_PRIME_MARK) ||
+    value.startsWith(BUTLER_MODE_MARK) || value.startsWith(BUTLER_WAKE_PREFIX);
+}
+
+export function buildButlerWake(done: string[]): string {
+  return `${BUTLER_WAKE_PREFIX}\n` +
+    done.map((d) => `- ${d}`).join('\n') +
+    '\n\n请用 2-3 句简短说明结论，不要重复派活。';
+}
+
 /** 人格版本：文案改了要重新注入，靠这个版本号判断 */
 export const BUTLER_PRIME_VERSION = 'v9';
 

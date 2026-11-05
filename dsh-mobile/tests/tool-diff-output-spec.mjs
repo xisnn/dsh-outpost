@@ -188,7 +188,7 @@ check('ToolCard 对 edit/write 渲染 Diff 预览', () =>
     : '缺少 diff 预览渲染',
 );
 check('无法解析 Diff 时回退到原始参数', () =>
-  /\{diff \? \([\s\S]*?: \([\s\S]*?参数[\s\S]*?\)\}/.test(cardSrc) ? true : '没有回退分支',
+  /\{diff \? \([\s\S]*?: <Text[^>]+selectable>\{inputPreview\.text/.test(cardSrc) ? true : '没有回退分支',
 );
 check('全屏查看器正文可选中', () =>
   /<Text style=\{styles\.code\} selectable>/.test(viewerSrc) &&
@@ -209,7 +209,7 @@ check('工具箱卡片没有常驻复制按钮', () => {
 });
 check('查看器完整展示原输出（不受预览上限影响）', () => {
   // 查看器接收 content 原样、不做 slice；静态检查确认没有截断调用
-  return /content=\{viewer === 'output' \? block\.output \?\? '' : undefined\}/.test(cardSrc) &&
+  return /content=\{viewer === 'output' \? block\.output \?\? '' : viewer === 'input' \? inputText : undefined\}/.test(cardSrc) &&
     !/content\.slice|output\.slice/.test(viewerSrc)
     ? true
     : '查看器可能截断内容';

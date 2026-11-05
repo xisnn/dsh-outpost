@@ -5,19 +5,8 @@
  * 首次成功后 cookie 存 AsyncStorage（30 天有效）。
  */
 import React, { useEffect, useMemo, useState } from 'react';
-import {
-  ActivityIndicator,
-  AppState,
-  Clipboard,
-  KeyboardAvoidingView,
-  Platform,
-  Pressable,
-  ScrollView,
-  StyleSheet,
-  Text,
-  TextInput,
-  View,
-} from 'react-native';
+import { ActivityIndicator, AppState, Clipboard, KeyboardAvoidingView, Platform, ScrollView, StyleSheet, Text, TextInput, View } from 'react-native';
+import { MotionPressable as Pressable } from '../components/MotionPressable';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 
 import { useApp } from '../App';

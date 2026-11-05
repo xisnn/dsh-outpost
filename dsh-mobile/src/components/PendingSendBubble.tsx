@@ -5,13 +5,17 @@
  * 结果未知 / 未发出 / 已受理”，并只把“用户明确重试”交给上层。
  */
 import React, { useEffect, useMemo, useState } from 'react';
-import { ActivityIndicator, Pressable, StyleSheet, Text, View } from 'react-native';
+import { ActivityIndicator, StyleSheet, Text, View } from 'react-native';
+import { MotionPressable as Pressable } from './MotionPressable';
 
 import { useTheme } from '../design/theme';
-import { layout, radius, space, type, weight } from '../design/tokens';
+import { layout, motion, radius, space, type } from '../design/tokens';
+import { actionStyles } from '../design/actionStyles';
 import type { PendingSendRecord } from '../core/pendingSend/types';
 import { canAbandonPendingSend, canUserRetry } from '../core/pendingSend/state';
 import { pendingSendFailureLabel, pendingSendSpinnerDelayMs } from '../core/pendingSend/ui';
+import { FileTypeBadge } from './FileTypeBadge';
+import { CredentialText } from './CredentialText';
 
 export const PENDING_SEND_SPINNER_DELAY_MS = 600;
 
@@ -97,6 +101,10 @@ export function PendingSendBubble({
 }) {
   const tv = useTheme();
   const styles = useMemo(() => makeStyles(tv), [tv]);
+  const actions = useMemo(() => actionStyles(tv), [tv]);
+  const [fold, setFold] = useState({ requestId: record.requestId, needed: false, expanded: false });
+  const currentFold = fold.requestId === record.requestId ? fold : { requestId: record.requestId, needed: false, expanded: false };
+  const collapsed = currentFold.needed && !currentFold.expanded;
   const status = statusOf(record);
   const retryable = canUserRetry(record);
   const removable = canAbandonPendingSend(record) && !!onRemove;
@@ -112,29 +120,59 @@ export function PendingSendBubble({
   return (
     <View style={styles.wrap}>
       <View style={styles.bubble}>
-        <Text style={styles.text}>{record.text}</Text>
+        {record.text ? <>
+          <View style={collapsed ? styles.textClip : undefined}>
+            <View onLayout={event => {
+              const needed = event.nativeEvent.layout.height > motion.collapseThresholdPx;
+              if (needed !== currentFold.needed || fold.requestId !== record.requestId) {
+                setFold({ ...currentFold, needed });
+              }
+            }}>
+              <CredentialText style={styles.text} text={record.text} />
+            </View>
+          </View>
+          {currentFold.needed ? <Pressable
+            onPress={() => setFold({ ...currentFold, expanded: !currentFold.expanded })}
+            style={[actions.base, actions.quiet, styles.foldToggle]}
+            accessibilityRole="button"
+            accessibilityLabel={collapsed ? '展开待发送全文' : '收起待发送全文'}
+            accessibilityState={{ expanded: !collapsed }}
+          >
+            <Text style={actions.secondaryText}>{collapsed ? '展开全文 ⌄' : '收起全文 ⌃'}</Text>
+          </Pressable> : null}
+        </> : null}
         {record.attachments.length > 0 ? (
           <View style={styles.attachments}>
             {record.attachments.map((a) => (
-              <Text key={`${a.stagedUri}-${a.name}`} style={styles.attachment} numberOfLines={1}>
-                {a.kind === 'image' ? '图片' : '文件'}：{a.name}
-              </Text>
+              <View key={`${a.stagedUri}-${a.name}`} style={styles.attachmentRow} accessible
+                accessibilityLabel={`${a.kind === 'image' ? '图片' : '文件'} ${a.name}`}>
+                {a.kind === 'file' ? <FileTypeBadge name={a.name} compact /> : null}
+                <Text style={styles.attachment} numberOfLines={1} ellipsizeMode="middle">
+                  {a.kind === 'image' ? `图片：${a.name}` : a.name}
+                </Text>
+              </View>
             ))}
           </View>
         ) : null}
         <View style={styles.footer}>
           <DelayedSpinner record={record} />
-          <Text style={[styles.status, { color: toneColor }]}>{status.label}</Text>
+          <Text style={[styles.status, { color: toneColor }]} accessibilityLiveRegion="polite">{status.label}</Text>
+        </View>
+        {retryable || removable ? <View style={styles.actions}>
           {retryable ? (
             <Pressable
               disabled={busy}
               onPress={() => onRetry(record)}
               style={({ pressed }: { pressed: boolean }) => [
-                styles.retry,
+                actions.base, actions.secondary,
                 pressed ? { opacity: tv.motion.pressOpacity } : null,
+                busy ? actions.disabled : null,
               ]}
+              accessibilityRole="button"
+              accessibilityLabel={record.state === 'unknown' || record.state === 'failed' ? '安全重试（复用原 ID）' : '继续发送'}
+              accessibilityState={{ disabled: busy }}
             >
-              <Text style={styles.retryText}>
+              <Text style={actions.secondaryText}>
                 {record.state === 'unknown' || record.state === 'failed'
                   ? '安全重试（复用原 ID）'
                   : '继续发送'}
@@ -146,14 +184,18 @@ export function PendingSendBubble({
               disabled={busy}
               onPress={() => onRemove?.(record)}
               style={({ pressed }: { pressed: boolean }) => [
-                styles.remove,
+                actions.base, actions.quiet,
                 pressed ? { opacity: tv.motion.pressOpacity } : null,
+                busy ? actions.disabled : null,
               ]}
+              accessibilityRole="button"
+              accessibilityLabel="移除待发送消息"
+              accessibilityState={{ disabled: busy }}
             >
-              <Text style={styles.removeText}>移除</Text>
+              <Text style={actions.dangerText}>移除</Text>
             </Pressable>
           ) : null}
-        </View>
+        </View> : null}
       </View>
     </View>
   );
@@ -185,10 +227,8 @@ function makeStyles(tv: ReturnType<typeof useTheme>) {
       marginTop: space.xs,
       gap: 2,
     },
-    attachment: {
-      color: C.textTertiary,
-      fontSize: type.xs,
-    },
+    attachmentRow: { flexDirection: 'row', alignItems: 'center', gap: space.sm, marginVertical: space.xs },
+    attachment: { flexShrink: 1, minWidth: 0, color: C.textTertiary, fontSize: type.xs },
     footer: {
       flexDirection: 'row',
       alignItems: 'center',
@@ -199,31 +239,8 @@ function makeStyles(tv: ReturnType<typeof useTheme>) {
       flex: 1,
       fontSize: type.xs,
     },
-    retry: {
-      paddingHorizontal: space.sm,
-      paddingVertical: 3,
-      borderRadius: radius.sm,
-      backgroundColor: C.bg,
-      borderColor: C.borderStrong,
-      borderWidth: StyleSheet.hairlineWidth,
-    },
-    retryText: {
-      color: C.accent,
-      fontSize: type.xs,
-      fontWeight: weight.medium,
-    },
-    remove: {
-      paddingHorizontal: space.sm,
-      paddingVertical: 3,
-      borderRadius: radius.sm,
-      backgroundColor: C.bg,
-      borderColor: C.borderStrong,
-      borderWidth: StyleSheet.hairlineWidth,
-    },
-    removeText: {
-      color: C.danger,
-      fontSize: type.xs,
-      fontWeight: weight.medium,
-    },
+    textClip: { maxHeight: motion.collapseThresholdPx, overflow: 'hidden' },
+    foldToggle: { alignSelf: 'flex-start', paddingHorizontal: 0 },
+    actions: { flexDirection: 'row', flexWrap: 'wrap', justifyContent: 'flex-end', gap: space.xs, marginTop: space.xs },
   });
 }

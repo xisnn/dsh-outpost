@@ -9,7 +9,7 @@ name: Android APK
 # 2. **正式发布**（push tag v*）
 #    - 必须有完整签名材料，否则整个 job 失败
 #    - 构建前后都校验签名证书指纹
-#    - 校验通过后才创建 Release（本分支默认 Pre-release）
+#    - 校验通过后才创建正式 Release
 #
 # ## 本轮修复的门禁漏洞（此前真实存在）
 #
@@ -72,6 +72,11 @@ jobs:
         working-directory: dsh-mobile
         run: npm test
 
+      # Pure Host tests use fakes; DSH supplies the bundle's runtime services and imports.
+      - name: Host butler unit tests
+        working-directory: dsh-outpost-butler
+        run: npm test
+
       # 起本地模拟 DSH（HTTP + WebSocket）跑真实协议行为，不需要外部服务
       - name: Integration tests (fake DSH server)
         working-directory: dsh-mobile
@@ -83,6 +88,36 @@ jobs:
       - name: Integration tests under Node 20 semantics
         working-directory: dsh-mobile
         run: npm run test:node20
+
+  desktop:
+    needs: test
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+          cache-dependency-path: dsh-outpost-desktop/package-lock.json
+      - name: Verify desktop release version
+        if: startsWith(github.ref, 'refs/tags/')
+        working-directory: dsh-outpost-desktop
+        run: node -e "if ('v' + require('./package.json').version !== process.env.GITHUB_REF_NAME) process.exit(1)"
+      - name: Install desktop dependencies
+        working-directory: dsh-outpost-desktop
+        run: npm ci
+      - name: Desktop tests
+        working-directory: dsh-outpost-desktop
+        run: npm test
+      - name: Package desktop ZIP
+        working-directory: dsh-outpost-desktop
+        run: npm run pack
+      - uses: actions/upload-artifact@v4
+        with:
+          name: dsh-outpost-desktop-zip
+          path: dsh-outpost-desktop/release/DSH-Outpost-Desktop-*-win-x64.zip
+          if-no-files-found: error
+          retention-days: 30
 
   # ══════════════════════════════════════════════════════════════
   # 测试构建（手动触发）：debug 签名，只出 Artifact，不发 Release
@@ -150,11 +185,20 @@ jobs:
             -PDSH_VERSION_NAME="${{ steps.ver.outputs.version }}" \
             -PDSH_VERSION_CODE="${{ steps.ver.outputs.code }}"
 
+      - name: Package Host butler bundle
+        run: |
+          mkdir -p out
+          npm pack ./dsh-outpost-butler --pack-destination out
+          ( cd out && sha256sum *.tgz > SHA256SUMS.txt )
+
       - name: Upload test APK
         uses: actions/upload-artifact@v4
         with:
           name: dsh-outpost-test-apk
-          path: dsh-mobile/android/app/build/outputs/apk/debug/app-debug.apk
+          path: |
+            dsh-mobile/android/app/build/outputs/apk/debug/app-debug.apk
+            out/*.tgz
+            out/SHA256SUMS.txt
           retention-days: 14
 
   # ══════════════════════════════════════════════════════════════
@@ -162,7 +206,7 @@ jobs:
   # ══════════════════════════════════════════════════════════════
   release:
     if: startsWith(github.ref, 'refs/tags/v')
-    needs: test
+    needs: [test, desktop]
     runs-on: ubuntu-latest
     # 只在这个 job 给写权限
     permissions:
@@ -413,6 +457,12 @@ jobs:
           echo "CERT=$ACTUAL" >> "$GITHUB_OUTPUT"
           echo "APK SHA-256: $SHA256"
 
+      - name: Download desktop release ZIP
+        uses: actions/download-artifact@v4
+        with:
+          name: dsh-outpost-desktop-zip
+          path: out
+
       - name: Prepare release files
         run: |
           set -euo pipefail
@@ -420,8 +470,10 @@ jobs:
           mkdir -p out
           APK="dsh-mobile/android/app/build/outputs/apk/release/app-release.apk"
           cp "$APK" "out/dsh-outpost-${VERSION}.apk"
-          # SHA256SUMS：下载后可独立复核
-          ( cd out && sha256sum "dsh-outpost-${VERSION}.apk" > SHA256SUMS.txt )
+          npm pack ./dsh-outpost-butler --pack-destination out
+          test -f "out/DSH-Outpost-Desktop-${{ steps.ver.outputs.version }}-win-x64.zip"
+          # SHA256SUMS covers Android, the installable Host bundle and desktop.
+          ( cd out && sha256sum *.apk *.tgz > SHA256SUMS.txt && sha256sum *.zip >> SHA256SUMS.txt )
           cat out/SHA256SUMS.txt
           ls -lh out/
 
@@ -436,24 +488,36 @@ jobs:
           name: dsh-outpost-release-apk
           path: |
             out/*.apk
+            out/*.tgz
+            out/*.zip
             out/SHA256SUMS.txt
           retention-days: 90
 
       # ── 发布：只有前面所有门禁通过才会到这里 ──────────────────
-      - name: Publish GitHub Release (pre-release)
+      - name: Publish GitHub Release
         uses: softprops/action-gh-release@v2
         with:
           files: |
             out/*.apk
+            out/*.tgz
+            out/*.zip
             out/SHA256SUMS.txt
-          prerelease: true
+          prerelease: false
+          make_latest: true
           generate_release_notes: false
           body: |
-            ## DSH Outpost ${{ steps.ver.outputs.tag }} · 安全与稳定性更新（公开预览版）
+            ## DSH Outpost ${{ steps.ver.outputs.tag }} · 管家任务与交互优化
 
-            > **这是 Pre-release 预览版。**
-            > 自动化测试与模拟器验收已通过，但**尚未完成真实 Android 手机验收**。
-            > 建议先在测试环境验证，谨慎用于重要电脑或敏感工作流。
+            ### 本次更新
+
+            - 新增宿主侧管家任务：电脑持续执行、保存进度，手机查看任务、处理审批并打开交付物。
+            - 优化页面切换、弹层、按钮与折叠动效，遵循系统减少动态效果设置。
+            - 改善聊天输入、阅读位置、工具详情分区、长文件名与文件类型显示。
+            - 图片支持缩放与拖动，附件加载失败可重试，任务和列表增加加载与反馈状态。
+            - 用户已发送及待发送正文默认隐藏可识别凭据；已发送正文可逐处显示，长按菜单可选择复制隐藏后文本或原文。发送与持久化仍保留原文。
+
+            > 显示保护采用启发式识别，不覆盖助手正文、工具输出、附件内容或输入草稿。
+            > 已完成自动化与隔离 Android 模拟器验收；本轮未做实体 Android 手机验收。
 
             ### 安装
 
@@ -461,6 +525,14 @@ jobs:
             2. 手机上允许「安装未知来源应用」后安装
             3. 电脑上运行 `start-dsh-web.ps1` 启动 DSH 服务
             4. 打开 App 扫码配对
+
+            Windows 桌面助手下载 `DSH-Outpost-Desktop-${{ steps.ver.outputs.version }}-win-x64.zip`，退出旧版后解压到新目录运行。
+
+            ### 管家任务
+
+            手机「任务」页可交代目标、查看进度、处理审批并打开交付物。任务由电脑上的 DSH goal driver 持续执行。
+            下载本次附带的 `local-dsh-outpost-butler-*.tgz`，安装到所选 DSH profile 后重启；审批仍需移动网关。
+            安装、升级、单 Host 约束和恢复行为见 `docs/butler-tasks.md`。bundle 版本与 App 版本分别管理。
 
             ### 产物校验
 

@@ -1,0 +1,28 @@
+{
+  "name": "@local/dsh-outpost-butler",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "Host-side butler task runner for DSH Outpost (goals, checkpoints, recovery, TaskApi)",
+  "exports": {
+    ".": "./index.js"
+  },
+  "files": [
+    "index.js",
+    "lib",
+    "cordis.patch.yml",
+    "README.md"
+  ],
+  "dsh": {
+    "bundle": {
+      "patch": "./cordis.patch.yml"
+    }
+  },
+  "engines": {
+    "node": ">=20.0.0",
+    "dsh": ">=0.2.0 <0.3.0"
+  },
+  "scripts": {
+    "test": "node --test test/task-store.test.mjs test/task-manager.test.mjs test/task-api.test.mjs test/deliverables.test.mjs"
+  }
+}

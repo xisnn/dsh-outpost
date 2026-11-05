@@ -42,6 +42,7 @@ export async function fetchRemoteFile(
   baseUrl: string,
   cookie: string | undefined,
   remotePath: string,
+  options?: { forceDownload?: boolean },
 ): Promise<RemoteFile> {
   const dir = ReactNativeBlobUtil.fs.dirs.CacheDir;
   const name = cacheName(remotePath);
@@ -61,7 +62,7 @@ export async function fetchRemoteFile(
   if (await ReactNativeBlobUtil.fs.exists(fsPath)) {
     try {
       const st = await ReactNativeBlobUtil.fs.stat(fsPath);
-      usable = Number(st.size) > 0;
+      usable = !options?.forceDownload && Number(st.size) > 0;
     } catch {
       usable = false;
     }

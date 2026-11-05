@@ -7,13 +7,15 @@
  * - 助手文本：无气泡，左对齐，行高宽松
  */
 import React, { useMemo, useState } from 'react';
-import { Pressable, StyleSheet, Text, View } from 'react-native';
+import { StyleSheet, Text, View } from 'react-native';
+import { MotionPressable as Pressable } from './MotionPressable';
 import { useTheme } from '../design/theme';
 import { layout, motion, radius, space, type, weight } from '../design/tokens';
 import type { AttachRef } from '../core/types';
 import type { UploadApi } from '../core/rpc/upload';
 import { AttachmentGallery } from './Attachment';
 import { AssistantRichText } from './AssistantRichText';
+import { useCredentialDisplay, CredentialRevealControls } from './CredentialText';
 
 export function UserBubble({
   text,
@@ -22,6 +24,8 @@ export function UserBubble({
   sessionId,
   api,
   onLongPress,
+  displayScope = sessionId ?? '',
+  allowReveal = true,
 }: {
   text: string;
   time?: number;
@@ -31,11 +35,15 @@ export function UserBubble({
   api?: UploadApi;
   /** 长按气泡：由聊天页弹出「复制全文」面板（不直接复制，避免误触） */
   onLongPress?: (text: string) => void;
+  /** Bound to the owning session/message, including when a native list reuses a row. */
+  displayScope?: string;
+  allowReveal?: boolean;
 }) {
   const tv = useTheme();
   const styles = useMemo(() => makeStyles(tv), [tv]);
   const [expanded, setExpanded] = useState(false);
   const [needsFold, setNeedsFold] = useState(false);
+  const display = useCredentialDisplay(text, displayScope, allowReveal);
 
   const onLayout = (e: { nativeEvent: { layout: { height: number } } }) => {
     if (!expanded && !needsFold && e.nativeEvent.layout.height > motion.collapseThresholdPx) {
@@ -64,6 +72,7 @@ export function UserBubble({
     <View style={styles.userRow}>
       <View style={styles.userCol}>
         {gallery}
+        <View style={styles.userBubble}>
         <Pressable
           onPress={() => needsFold && setExpanded((v) => !v)}
           onLongPress={() => {
@@ -71,7 +80,6 @@ export function UserBubble({
           }}
           delayLongPress={350}
           style={({ pressed }: { pressed: boolean }) => [
-            styles.userBubble,
             collapsed && { maxHeight: motion.collapseThresholdPx, overflow: 'hidden' },
             pressed && needsFold ? { opacity: 0.9 } : null,
           ]}
@@ -80,7 +88,7 @@ export function UserBubble({
           <View onLayout={onLayout}>
             {/* 不做 selectable：长按要留给「复制全文」菜单；
                 部分选择由聊天页的「选择文本」浮层提供（见 TextSelectionSheet） */}
-            <Text style={styles.userText}>{text}</Text>
+            <Text style={styles.userText}>{display.text}</Text>
           </View>
 
           {collapsed ? (
@@ -94,6 +102,8 @@ export function UserBubble({
             </>
           ) : null}
         </Pressable>
+        <CredentialRevealControls display={display} />
+        </View>
       </View>
     </View>
   );

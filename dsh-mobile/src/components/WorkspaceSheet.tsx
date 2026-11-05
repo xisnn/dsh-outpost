@@ -5,7 +5,9 @@
  * 只做「本地展示层覆盖」——DSH 的 cwd 是路径本身，不能真的改名。
  */
 import React, { useEffect, useRef, useState } from 'react';
-import { Modal, Pressable, StyleSheet, Text, TextInput, View } from 'react-native';
+import { StyleSheet, Text, TextInput, View } from 'react-native';
+import { MotionModal as Modal } from './MotionModal';
+import { MotionPressable as Pressable } from './MotionPressable';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 
 import { useTheme } from '../design/theme';
@@ -70,7 +72,7 @@ export function WorkspaceSheet({
       onRequestClose={onClose}
     >
       <View style={styles.backdrop}>
-        <Pressable style={StyleSheet.absoluteFill} onPress={onClose} />
+        <Pressable feedback="none" style={StyleSheet.absoluteFill} onPress={onClose} />
         <View style={[styles.sheet, { paddingBottom: Math.max(insets.bottom, tv.space.lg) }]}>
           <View style={styles.handle} />
 

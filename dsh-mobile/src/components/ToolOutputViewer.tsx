@@ -10,7 +10,9 @@
  * 视觉全部走主题 token，深色/浅色一致；不新增依赖。
  */
 import React, { useEffect, useMemo, useRef, useState } from 'react';
-import { Modal, Pressable, ScrollView, StyleSheet, Text, View } from 'react-native';
+import { ScrollView, StyleSheet, Text, View } from 'react-native';
+import { MotionModal as Modal } from './MotionModal';
+import { MotionPressable as Pressable } from './MotionPressable';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 
 import { useTheme } from '../design/theme';
@@ -88,7 +90,7 @@ export function ToolOutputViewer({
               {title}
             </Text>
             {subtitle ? (
-              <Text style={styles.subtitle} numberOfLines={1}>
+              <Text style={styles.subtitle} numberOfLines={1} ellipsizeMode="middle" accessibilityLabel={subtitle}>
                 {subtitle}
               </Text>
             ) : null}

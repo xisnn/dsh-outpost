@@ -7,18 +7,8 @@
  *   主题  ← useTheme()，切换后写入 AsyncStorage，下次启动生效
  */
 import React, { useCallback, useEffect, useMemo, useState } from 'react';
-import {
-  ActivityIndicator,
-  Alert,
-  Linking,
-  Pressable,
-  RefreshControl,
-  ScrollView,
-  StyleSheet,
-  Switch,
-  Text,
-  View,
-} from 'react-native';
+import { ActivityIndicator, Alert, Linking, RefreshControl, ScrollView, StyleSheet, Switch, Text, View } from 'react-native';
+import { MotionPressable as Pressable } from '../components/MotionPressable';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 
 import { useApp } from '../App';

@@ -11,7 +11,8 @@
  * 风格和页面统一：浅灰卡、左侧竖线、小字号，不抢正文的注意力。
  */
 import React, { useEffect, useMemo, useState } from 'react';
-import { Pressable, StyleSheet, Text, View } from 'react-native';
+import { StyleSheet, Text, View } from 'react-native';
+import { MotionPressable as Pressable } from './MotionPressable';
 
 import { useTheme } from '../design/theme';
 import { ThinkingDots } from './Thinking';

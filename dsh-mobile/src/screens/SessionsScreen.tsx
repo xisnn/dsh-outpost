@@ -5,17 +5,8 @@
  * 右上角「＋」新建手机专属会话（可切换模型、可发消息）。
  */
 import React, { useEffect, useMemo, useRef, useState } from 'react';
-import {
-  ActivityIndicator,
-  FlatList,
-  Platform,
-  Pressable,
-  RefreshControl,
-  StyleSheet,
-  Text,
-  TextInput,
-  View,
-} from 'react-native';
+import { ActivityIndicator, FlatList, Platform, RefreshControl, StyleSheet, Text, TextInput, View } from 'react-native';
+import { MotionPressable as Pressable } from '../components/MotionPressable';
 
 import { useApp } from '../App';
 import { Header } from '../components/Header';
@@ -455,7 +446,7 @@ export function SessionsScreen({
       {/* 长按会话后的操作菜单 */}
       {actionTarget ? (
         <View style={styles.actionBackdrop}>
-          <Pressable style={StyleSheet.absoluteFill} onPress={() => setActionTarget(null)} />
+          <Pressable feedback="none" style={StyleSheet.absoluteFill} onPress={() => setActionTarget(null)} />
           <View style={styles.actionSheet}>
             <Text style={styles.actionTitle} numberOfLines={1}>
               {actionTarget.title}

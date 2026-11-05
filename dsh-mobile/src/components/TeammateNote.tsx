@@ -8,7 +8,8 @@
  * 视觉：浅灰底 + 左侧竖线，明显区别于用户的蓝色气泡和助手正文。
  */
 import React, { useMemo, useState } from 'react';
-import { Pressable, StyleSheet, Text, View } from 'react-native';
+import { StyleSheet, Text, View } from 'react-native';
+import { MotionPressable as Pressable } from './MotionPressable';
 
 import { useTheme } from '../design/theme';
 import { AssistantRichText } from './AssistantRichText';

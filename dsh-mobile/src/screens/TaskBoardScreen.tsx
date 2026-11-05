@@ -5,10 +5,12 @@
  * 进行中 / 待办 / 已完成，每条显示负责人。
  */
 import React, { useEffect, useMemo, useState } from 'react';
-import { Pressable, ScrollView, StyleSheet, Text, View } from 'react-native';
+import { ScrollView, StyleSheet, Text, View } from 'react-native';
+import { MotionPressable as Pressable } from '../components/MotionPressable';
 
 import { useApp } from '../App';
 import { Header } from '../components/Header';
+import { LoadingSkeleton } from '../components/LoadingSkeleton';
 import { useTheme } from '../design/theme';
 import type { AgentTeam, TeamTask } from '../core/types';
 
@@ -23,12 +25,29 @@ export function TaskBoardScreen({ sessionId }: { sessionId: string }) {
   const tv = useTheme();
   const styles = useMemo(() => makeStyles(tv), [tv]);
   const [, force] = useState(0);
+  const [retry, setRetry] = useState(0);
+  const [request, setRequest] = useState({ store, sessionId, loading: true, settled: false, error: null as string | null });
+  const currentRequest = request.store === store && request.sessionId === sessionId;
+  const loading = !currentRequest || request.loading;
+  const error = currentRequest ? request.error : null;
 
   useEffect(() => {
+    let active = true;
     const unsub = store.subscribe(() => force((n) => n + 1));
-    void store.refreshChatMeta(sessionId);
-    return unsub;
-  }, [store, sessionId]);
+    setRequest(previous => ({ store, sessionId, loading: true,
+      settled: previous.store === store && previous.sessionId === sessionId && previous.settled,
+      error: previous.store === store && previous.sessionId === sessionId ? previous.error : null }));
+    void (async () => {
+      try {
+        await store.refreshChatMeta(sessionId);
+        if (active) setRequest({ store, sessionId, loading: false, settled: true, error: null });
+      } catch (e) {
+        if (active) setRequest({ store, sessionId, loading: false, settled: true,
+          error: e instanceof Error ? e.message : String(e) });
+      }
+    })();
+    return () => { active = false; unsub(); };
+  }, [store, sessionId, retry]);
 
   // 优先用已打开会话的状态，否则退回 session/list 里的投影
   const team: AgentTeam | undefined =
@@ -98,15 +117,29 @@ export function TaskBoardScreen({ sessionId }: { sessionId: string }) {
           );
         })}
 
-        {tasks.length === 0 ? (
+        {loading && (!currentRequest || !request.settled) && !team && !error ? (
+          <LoadingSkeleton key={sessionId} label="正在加载任务板" />
+        ) : tasks.length === 0 && !error && !team?.failure ? (
           <View style={styles.empty}>
             <Text style={styles.emptyIcon}>☰</Text>
             <Text style={styles.emptyText}>还没有任务</Text>
             <Text style={styles.emptyHint}>管家派活后，任务会出现在这里</Text>
+            {!team ? (
+              <Pressable accessibilityRole="button" disabled={loading} onPress={() => setRetry(n => n + 1)} style={styles.retry}>
+                <Text style={styles.retryText}>{loading ? '重新加载中…' : '重新加载'}</Text>
+              </Pressable>
+            ) : null}
           </View>
         ) : null}
 
-        {team?.failure ? <Text style={styles.failure}>{team.failure}</Text> : null}
+        {error || team?.failure ? (
+          <View>
+            <Text style={styles.failure}>{error ?? team?.failure}</Text>
+            <Pressable accessibilityRole="button" disabled={loading} onPress={() => setRetry(n => n + 1)} style={styles.retry}>
+              <Text style={styles.retryText}>{loading ? '重新加载中…' : '重新加载'}</Text>
+            </Pressable>
+          </View>
+        ) : null}
         <View style={{ height: tv.space.xxxl }} />
       </ScrollView>
     </View>
@@ -156,5 +189,7 @@ function makeStyles(tv: ReturnType<typeof useTheme>) {
     emptyText: { color: C.textSecondary, fontSize: tv.type.base },
     emptyHint: { color: C.textFaint, fontSize: tv.type.xs, marginTop: tv.space.sm },
     failure: { color: C.danger, fontSize: tv.type.xs, marginHorizontal: tv.layout.screenPadding },
+    retry: { alignSelf: 'flex-start', marginHorizontal: tv.layout.screenPadding, padding: tv.space.md, minHeight: 44, minWidth: 64, justifyContent: 'center', alignItems: 'center' },
+    retryText: { color: C.accent, fontSize: tv.type.sm },
   });
 }

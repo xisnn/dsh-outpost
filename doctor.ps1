@@ -151,6 +151,23 @@ if ($gw) {
 } else {
     Line 'warn' '移动网关 (:3081)' '没开 —— 手机不能回答审批。配置：.\setup-gateway.ps1'
 }
+
+# ── 宿主任务运行器（v0.19）──
+$dshHome = if ($env:DSH_HOME) { $env:DSH_HOME } else { Join-Path $env:USERPROFILE '.dsh' }
+$profilePkg = Join-Path $dshHome 'profiles\web\package.json'
+$butlerInstalled = $false
+if (Test-Path $profilePkg) {
+    try {
+        $pkg = Get-Content $profilePkg -Raw | ConvertFrom-Json
+        $bundles = @($pkg.dsh.profile.bundles)
+        if ($bundles -contains '@local/dsh-outpost-butler') { $butlerInstalled = $true }
+    } catch {}
+}
+if ($butlerInstalled) {
+    Line 'warn' '宿主任务运行器' 'web profile 已声明 bundle；尚未验证 compose、运行进程或 TaskApi 健康状态'
+} else {
+    Line 'warn' '宿主任务运行器' 'web profile 未声明 bundle —— 需要持续执行时配置：.\setup-butler.ps1'
+}
 Write-Host ''
 
 # ── 管家工具 ──

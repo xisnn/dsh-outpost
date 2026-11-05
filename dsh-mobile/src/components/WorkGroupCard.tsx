@@ -10,7 +10,8 @@
  * 最终回答由聊天页渲染在组外（见 ChatScreen），不会混进来。
  */
 import React, { useMemo, useState } from 'react';
-import { ActivityIndicator, Pressable, StyleSheet, Text, View } from 'react-native';
+import { ActivityIndicator, StyleSheet, Text, View } from 'react-native';
+import { MotionPressable as Pressable } from './MotionPressable';
 
 import { workGroupSummary, type WorkGroupView } from '../core/workGroup';
 import { useTheme } from '../design/theme';
@@ -83,39 +84,37 @@ export function WorkGroupCard({
         <Text style={styles.chevron}>{open ? '⌃' : '⌄'}</Text>
       </Pressable>
 
-      {open ? (
-        <Collapse>
-          <View style={styles.body}>
-            {group.items.map((item) => {
-              const key = `wg-${group.turn}-${item.index}`;
-              const block = item.block;
-              if (block.kind === 'reasoning') {
-                return (
-                  <ThinkingAccordion
-                    key={key}
-                    text={block.text}
-                    done={!group.running || !block.streaming}
+      <Collapse open={open}>
+        <View style={styles.body}>
+          {group.items.map((item) => {
+            const key = `wg-${group.turn}-${item.index}`;
+            const block = item.block;
+            if (block.kind === 'reasoning') {
+              return (
+                <ThinkingAccordion
+                  key={key}
+                  text={block.text}
+                  done={!group.running || !block.streaming}
+                />
+              );
+            }
+            if (block.kind === 'tool') return <ToolCard key={key} block={block} />;
+            if (block.kind === 'file') {
+              return (
+                <View key={key} style={styles.fileWrap}>
+                  <FileCard
+                    path={block.path}
+                    alt={block.description}
+                    image={isImagePath(block.path)}
+                    sessionId={sessionId}
                   />
-                );
-              }
-              if (block.kind === 'tool') return <ToolCard key={key} block={block} />;
-              if (block.kind === 'file') {
-                return (
-                  <View key={key} style={styles.fileWrap}>
-                    <FileCard
-                      path={block.path}
-                      alt={block.description}
-                      image={isImagePath(block.path)}
-                      sessionId={sessionId}
-                    />
-                  </View>
-                );
-              }
-              return <AssistantText key={key} text={block.text} sessionId={sessionId} />;
-            })}
-          </View>
-        </Collapse>
-      ) : null}
+                </View>
+              );
+            }
+            return <AssistantText key={key} text={block.text} sessionId={sessionId} />;
+          })}
+        </View>
+      </Collapse>
     </View>
   );
 }

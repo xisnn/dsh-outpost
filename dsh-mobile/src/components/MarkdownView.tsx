@@ -22,7 +22,8 @@
  */
 
 import React, { useMemo } from 'react';
-import { Pressable, StyleSheet, Text, View } from 'react-native';
+import { StyleSheet, Text, View } from 'react-native';
+import { MotionPressable as Pressable } from './MotionPressable';
 
 import { useTheme } from '../design/theme';
 
@@ -112,7 +113,7 @@ function BlockView({ block }: { block: Block }) {
       return (
         <View style={styles.codeBox}>
           {/* 标题栏：左边语言名，右边一键复制。
-              复制按钮是「次要动作」，字号压到最小、常态几乎隐形（见 CopyTextButton） */}
+              复制按钮是无描边的次要动作，保留独立触摸区域（见 CopyTextButton） */}
           <View style={styles.codeHead}>
             <Text style={styles.codeLang} numberOfLines={1}>
               {block.lang ?? 'code'}
@@ -243,22 +244,27 @@ function makeStyles(tv: ReturnType<typeof useTheme>) {
     codeBox: {
       backgroundColor: C.bgCard,
       borderRadius: tv.radius.sm,
-      padding: tv.space.sm,
+      overflow: 'hidden',
       marginVertical: tv.space.sm,
     },
     codeHead: {
       flexDirection: 'row',
       alignItems: 'center',
       justifyContent: 'space-between',
-      marginBottom: 4,
+      paddingHorizontal: tv.space.sm,
+      minHeight: 44,
+      backgroundColor: C.bgOverlay,
+      borderBottomWidth: StyleSheet.hairlineWidth,
+      borderBottomColor: C.border,
     },
     codeLang: {
-      color: C.textFaint,
+      color: C.textSecondary,
       fontSize: tv.type.micro,
       flexShrink: 1,
       marginRight: 8,
     },
     codeText: {
+      padding: tv.space.md,
       fontFamily: 'monospace',
       fontSize: tv.type.xs,
       lineHeight: tv.type.xs * 1.5,

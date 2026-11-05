@@ -16,6 +16,18 @@ import { AccountApi, type BalanceResult } from '../core/rpc/account';
 import { UploadApi } from '../core/rpc/upload';
 import { WorkspaceApi } from '../core/rpc/workspace';
 import { DirectoryPickerApi } from '../core/rpc/directory';
+import {
+  listButlerTasks,
+  getButlerTask,
+  createButlerTask,
+  cancelButlerTask,
+  resumeButlerTask,
+  type ButlerTask,
+  type ButlerTaskStatus,
+  type NewButlerTask,
+} from './butlerTasks';
+import { ButlerSessionOwnership } from './butlerSessionOwnership';
+import { buildButlerWake, isPhoneButlerControlMessage } from './butler';
 import type { WorkspaceCustom } from '../core/workspace-custom';
 import {
   foldEvents,
@@ -517,6 +529,39 @@ export class Store {
     return res.sessionId;
   }
 
+  /** 管家任务：宿主侧 TaskApi（v0.19） */
+  private readonly butlerOwnership = new ButlerSessionOwnership();
+
+  async listButlerTasks(status?: ButlerTaskStatus): Promise<ButlerTask[]> {
+    const tasks = await listButlerTasks(this.conn, status);
+    for (const task of tasks) this.butlerOwnership.remember(task);
+    return tasks;
+  }
+
+  async getButlerTask(id: string): Promise<ButlerTask> {
+    const task = await getButlerTask(this.conn, id);
+    this.butlerOwnership.remember(task);
+    return task;
+  }
+
+  async createButlerTask(input: NewButlerTask, idempotencyKey?: string): Promise<ButlerTask> {
+    const task = await createButlerTask(this.conn, input, idempotencyKey);
+    this.butlerOwnership.remember(task);
+    return task;
+  }
+
+  async cancelButlerTask(id: string): Promise<ButlerTask> {
+    const task = await cancelButlerTask(this.conn, id);
+    this.butlerOwnership.remember(task);
+    return task;
+  }
+
+  async resumeButlerTask(id: string): Promise<ButlerTask> {
+    const task = await resumeButlerTask(this.conn, id);
+    this.butlerOwnership.remember(task);
+    return task;
+  }
+
   /** 拉取模型目录 */
   modelCatalog() {
     return this.models.catalog();
@@ -535,80 +580,103 @@ export class Store {
     void this.loadSessions();
   }
 
-  /** 重新拉会话元数据（模型切换 / 团队状态轮询） */
-  async refreshChatMeta(sessionId: string): Promise<void> {
-    try {
-      const items = await this.api.list();
-      // 注意：这里必须过滤归档会话！
-      // 曾经直接赋 items，导致「从工作区返回后已删除的会话又冒出来」——
-      // 因为 refreshChatMeta 在返回、轮询、切模型时都会跑，把列表重刷成未过滤的。
-      await this.ensureArchivedLoaded();
-      this.sessions = items;
-      this.workspaces = groupByWorkspace(this.visibleSessions(items));
-      const row = items.find((s) => s.sessionId === sessionId);
-      const status = readStatus(row?.projections);
-      const cur = this.getChat(sessionId);
+  private projectionRequest?: Promise<SessionSummary[]>;
+  private chatMetaRefreshes = new Map<string, Promise<void>>();
 
-      // 任务完成检测：投影刷新时对比前后状态（team/* 事件不在会话日志里，只能靠投影）
-      const prevStatus = new Map((cur.agentTeam?.tasks ?? []).map((t) => [t.id, t.status]));
-      const justCompleted: string[] = [];
-      if (status.agentTeam) {
-        for (const t of status.agentTeam.tasks) {
-          const before = prevStatus.get(t.id);
-          if (t.status === 'completed' && before !== undefined && before !== 'completed') {
-            justCompleted.push(`${t.ownerName ?? '队员'} 完成了「${t.subject}」`);
-            this.pushNotice(`${t.ownerName ?? '队员'} 完成了：${t.subject}`);
-          }
-        }
-      }
-
-      // 队员全部干完时，主动唤醒管家做汇总。
-      // 原因：DSH 的 Agent Teams 在队友完成后只更新任务投影，
-      // 不会自动给 lead 发消息 —— 管家虽然说了「结果回来我汇总」，
-      // 但那一轮 turn 已经结束，没人叫它，它就永远不说话了。
-      if (justCompleted.length > 0) {
-        const stillRunning = (status.agentTeam?.tasks ?? []).some(
-          (t) => t.status === 'in_progress' || t.status === 'pending',
-        );
-        const running = row?.running ?? false;
-        if (!stillRunning && !running) {
-          void this.wakeButler(sessionId, justCompleted);
-        }
-      }
-
-      const entry = this.streams.get(sessionId);
-      if (entry && typeof row?.running === 'boolean') {
-        entry.authoritativeRunning = row.running;
-      }
-      const nextRunning =
-        typeof row?.running === 'boolean' ? row.running : cur.running;
-      let nextTurns = cur.turns;
-      if (nextRunning === false && cur.turns.length > 0) {
-        const lastTurn = cur.turns[cur.turns.length - 1]!;
-        if (lastTurn.running) {
-          nextTurns = cur.turns.slice();
-          nextTurns[nextTurns.length - 1] = { ...lastTurn, running: false };
-        }
-      }
-
-      this.chats.set(sessionId, {
-        ...cur,
-        turns: nextTurns,
-        running: nextRunning,
-        title: status.title ?? cur.title,
-        contextUsed: status.contextUsed,
-        contextWindow: status.contextWindow,
-        contextRatio: status.contextRatio,
-        model: status.model?.model ?? cur.model,
-        provider: status.model?.provider ?? cur.provider,
-        reasoningEffort: status.model?.reasoningEffort ?? cur.reasoningEffort,
-        tokenUsage: status.tokenUsage,
-        agentTeam: status.agentTeam,
+  /** Share an in-flight projection snapshot between chat polling and global monitoring. */
+  private listSessionProjections(): Promise<SessionSummary[]> {
+    if (!this.projectionRequest) {
+      this.projectionRequest = Promise.resolve().then(() => this.api.list()).finally(() => {
+        this.projectionRequest = undefined;
       });
-      this.emit();
-    } catch {
-      // 刷新失败不影响主流程
     }
+    return this.projectionRequest;
+  }
+
+  /** 重新拉会话元数据；同一会话的请求与副作用一起合并。 */
+  refreshChatMeta(sessionId: string): Promise<void> {
+    if (this.authInvalidated) return Promise.resolve();
+    const pending = this.chatMetaRefreshes.get(sessionId);
+    if (pending) return pending;
+    const request = (async () => {
+      try {
+        const items = await this.listSessionProjections();
+        await this.ensureArchivedLoaded();
+        this.sessions = items;
+        this.workspaces = groupByWorkspace(this.visibleSessions(items));
+        this.applyChatMeta(sessionId, items.find(row => row.sessionId === sessionId));
+      } catch (error) {
+        if (isAuthFailure(error) || isForbiddenRejection(error)) this.markAuthTerminal(error);
+        // 刷新失败不影响主流程。
+      } finally {
+        this.chatMetaRefreshes.delete(sessionId);
+      }
+    })();
+    this.chatMetaRefreshes.set(sessionId, request);
+    return request;
+  }
+
+  private applyChatMeta(sessionId: string, row: SessionSummary | undefined): void {
+    const status = readStatus(row?.projections);
+    const cur = this.getChat(sessionId);
+
+    // 任务完成检测：投影刷新时对比前后状态（team/* 事件不在会话日志里，只能靠投影）
+    const prevStatus = new Map((cur.agentTeam?.tasks ?? []).map((t) => [t.id, t.status]));
+    const justCompleted: string[] = [];
+    if (status.agentTeam) {
+      for (const t of status.agentTeam.tasks) {
+        const before = prevStatus.get(t.id);
+        if (t.status === 'completed' && before !== undefined && before !== 'completed') {
+          justCompleted.push(`${t.ownerName ?? '队员'} 完成了「${t.subject}」`);
+          this.pushNotice(`${t.ownerName ?? '队员'} 完成了：${t.subject}`);
+        }
+      }
+    }
+
+    // 队员全部干完时，主动唤醒管家做汇总。
+    // 原因：DSH 的 Agent Teams 在队友完成后只更新任务投影，
+    // 不会自动给 lead 发消息 —— 管家虽然说了「结果回来我汇总」，
+    // 但那一轮 turn 已经结束，没人叫它，它就永远不说话了。
+    if (justCompleted.length > 0) {
+      const stillRunning = (status.agentTeam?.tasks ?? []).some(
+        (t) => t.status === 'in_progress' || t.status === 'pending',
+      );
+      const running = row?.running ?? false;
+      if (!stillRunning && !running) {
+        void this.wakeButler(sessionId, justCompleted);
+      }
+    }
+
+    const entry = this.streams.get(sessionId);
+    if (entry && typeof row?.running === 'boolean') {
+      entry.authoritativeRunning = row.running;
+    }
+    const nextRunning =
+      typeof row?.running === 'boolean' ? row.running : cur.running;
+    let nextTurns = cur.turns;
+    if (nextRunning === false && cur.turns.length > 0) {
+      const lastTurn = cur.turns[cur.turns.length - 1]!;
+      if (lastTurn.running) {
+        nextTurns = cur.turns.slice();
+        nextTurns[nextTurns.length - 1] = { ...lastTurn, running: false };
+      }
+    }
+
+    this.chats.set(sessionId, {
+      ...cur,
+      turns: nextTurns,
+      running: nextRunning,
+      title: status.title ?? cur.title,
+      contextUsed: status.contextUsed,
+      contextWindow: status.contextWindow,
+      contextRatio: status.contextRatio,
+      model: status.model?.model ?? cur.model,
+      provider: status.model?.provider ?? cur.provider,
+      reasoningEffort: status.model?.reasoningEffort ?? cur.reasoningEffort,
+      tokenUsage: status.tokenUsage,
+      agentTeam: status.agentTeam,
+    });
+    this.emit();
   }
 
   // ── 一次性提示（任务完成等） ─────────────────────────────────────
@@ -664,10 +732,18 @@ export class Store {
   /** 扫一遍所有会话，发现状态变化就推通知 */
   private async scanOnce(): Promise<void> {
     try {
-      const items = await this.api.list();
+      const items = await this.listSessionProjections();
       await this.ensureArchivedLoaded();
       const archived = this.archived;
       const live = items.filter((s) => !archived.has(s.sessionId));
+
+      // Hidden chats no longer poll. Reuse the existing global scan so team completion
+      // and wakeButler continue without a second per-screen background timer.
+      const rows = new Map(live.map(row => [row.sessionId, row]));
+      for (const [sessionId, chat] of [...this.chats]) {
+        const row = rows.get(sessionId);
+        if (chat.agentTeam && row) this.applyChatMeta(sessionId, row);
+      }
 
       // 注意：这里**不能**用「有没有会话在跑」来决定要不要扫。
       // 踩过的坑：任务跑得比扫描间隔还快时，两次扫描都看到 running=false，
@@ -1109,11 +1185,8 @@ export class Store {
     if (this.waking.has(sessionId)) return;
     this.waking.add(sessionId);
     try {
-      const text =
-        `〔系统通知〕队员已经做完，请向用户汇总结果：\n` +
-        done.map((d) => `- ${d}`).join('\n') +
-        `\n\n请用 2-3 句简短说明结论，不要重复派活。`;
-      await this.send(sessionId, text, []);
+      // send 在 prompt 前查询 Host 归属；尚未验证或已托管时不会开启旧管家回合。
+      await this.send(sessionId, buildButlerWake(done), []);
     } catch {
       // 发送失败就静默放弃，不打扰用户（下次任务完成还能再触发）
     } finally {
@@ -2068,6 +2141,16 @@ export class Store {
     requestId?: string,
     opts: { optimistic?: boolean } = {},
   ): Promise<void> {
+    const phoneButlerControl = isPhoneButlerControlMessage(text);
+    if (phoneButlerControl) {
+      // App 打开旧管家时的 prime 和任务完成 wake 都必须先查归属。
+      // 拒绝而非假成功，避免调用方把被跳过的 prime 记为已注入。
+      await this.butlerOwnership.assertPhoneMayDrive(this.conn, sessionId);
+      // 查询完成到本 continuation 恢复之间，另一个 task 响应也可能到达。
+      if (this.butlerOwnership.isManaged(sessionId)) {
+        throw new Error('Host 管理的会话不接受手机管家自动驱动');
+      }
+    }
     const cur = this.getChat(sessionId);
     const parts = attachments.map((a) => a.part);
     const content: PromptPart[] = [

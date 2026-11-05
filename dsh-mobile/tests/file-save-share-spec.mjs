@@ -217,7 +217,7 @@ check('长按保存后有反馈（不然用户以为没按到）', () => {
 check('图片没有本地路径时长按不报错', () => {
   const i = imgSrc.indexOf('const handleLongPress');
   const body = imgSrc.slice(i, i + 1200);
-  return /if \(!target\) return/.test(body) ? true : '可能对网络图报错';
+  return /if \(!img\.save\) return/.test(body) ? true : '可能对网络图报错';
 });
 
 check('FileCard 给图片传了保存信息', () => {

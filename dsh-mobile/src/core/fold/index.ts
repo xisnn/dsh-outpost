@@ -40,6 +40,8 @@ export function isInjectedMessage(text: string): boolean {
     t.startsWith(BUTLER_MODE_MARK) ||
     // DSH 每轮注入的运行时上下文，纯噪音，不该显示成用户发言
     t.startsWith('Current runtime context.') ||
+    // v0.19 宿主 goal-round-driver 的续轮提示，属于内部执行指令
+    t.startsWith('<goal_round>') ||
     t.startsWith('Time sampled while preparing turn') ||
     t.startsWith('<system-reminder>') ||
     t.startsWith('[model changed:')

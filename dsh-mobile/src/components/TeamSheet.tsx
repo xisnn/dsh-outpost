@@ -3,7 +3,9 @@
  * 再点某一张卡片才进入那个队员的事件流（他的会话）。
  */
 import React, { useMemo } from 'react';
-import { Modal, Pressable, ScrollView, StyleSheet, Text, View } from 'react-native';
+import { ScrollView, StyleSheet, Text, View } from 'react-native';
+import { MotionModal as Modal } from './MotionModal';
+import { MotionPressable as Pressable } from './MotionPressable';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 
 import { useTheme } from '../design/theme';
@@ -49,7 +51,7 @@ export function TeamSheet({
   return (
     <Modal visible={visible} transparent animationType="fade" statusBarTranslucent onRequestClose={onClose}>
       <View style={styles.backdrop}>
-        <Pressable style={StyleSheet.absoluteFill} onPress={onClose} />
+        <Pressable feedback="none" style={StyleSheet.absoluteFill} onPress={onClose} />
         <View style={[styles.card, { marginBottom: Math.max(insets.bottom, tv.space.lg) + 24 }]}>
           <View style={styles.header}>
             <Text style={styles.title}>团队</Text>

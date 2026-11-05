@@ -87,6 +87,16 @@ check(
   'extraResources 包含 patches/ 目录（apply.mjs 检查脚本）',
 );
 
+const builderConfig = JSON.parse(builder);
+const bundledScripts = builderConfig.extraResources.find(item => item.from === '../scripts');
+check(
+  bundledScripts.filter?.includes('gateway-patch-gate.ps1') &&
+    bundledScripts.filter?.includes('butler-installer.ps1') &&
+    !bundledScripts.filter?.includes('android-chatscreen-nav.ps1') &&
+    !bundledScripts.filter?.includes('**/*'),
+  '桌面包只包含运行时脚本，不包含本地 Android 导航探针',
+);
+
 // 目录确实存在且包含关键文件
 {
   const scriptsDir = path.join(repo, 'scripts');

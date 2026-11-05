@@ -8,20 +8,9 @@
  * 相机用 camera-kit 的 Camera 组件，自带的取景框关掉（showFrame={false}）。
  */
 import React, { useEffect, useRef, useState } from 'react';
-import {
-  ActivityIndicator,
-  Animated,
-  Linking,
-  Easing,
-  Modal,
-  PermissionsAndroid,
-  Platform,
-  Pressable,
-  StyleSheet,
-  Text,
-  useWindowDimensions,
-  View,
-} from 'react-native';
+import { ActivityIndicator, Animated, Linking, Easing, PermissionsAndroid, Platform, StyleSheet, Text, useWindowDimensions, View } from 'react-native';
+import { MotionModal as Modal } from './MotionModal';
+import { MotionPressable as Pressable } from './MotionPressable';
 import { Camera } from 'react-native-camera-kit';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 

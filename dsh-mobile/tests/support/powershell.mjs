@@ -220,6 +220,7 @@ function firstErrLine(text) {
  * @param {string} content
  */
 export function writePowerShellScript(filePath, content) {
-  writeFileSync(filePath, '\uFEFF' + String(content), 'utf8');
+  const utf8Output = '[Console]::OutputEncoding = New-Object System.Text.UTF8Encoding($false)';
+  writeFileSync(filePath, '\uFEFF' + utf8Output + '\n' + String(content), 'utf8');
 }
 

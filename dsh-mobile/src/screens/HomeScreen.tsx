@@ -34,7 +34,7 @@ function ButlerBoot({ busy }: { busy: boolean }) {
   );
 }
 
-export function HomeScreen() {
+export function HomeScreen({ active = true }: { active?: boolean }) {
   const tv = useTheme();
   const {
     butlerMode,
@@ -94,6 +94,7 @@ export function HomeScreen() {
                 // 草稿、展开状态）会串到新会话上。
                 key={String(butlerSessionId)}
                 sessionId={String(butlerSessionId)}
+                active={active && tab === 'butler'}
                 title="DSH"
                 butler
                 embedded

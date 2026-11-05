@@ -14,14 +14,9 @@
  */
 
 import React from 'react';
-import {
-  Modal,
-  Pressable,
-  ScrollView,
-  StyleSheet,
-  Text,
-  View,
-} from 'react-native';
+import { ScrollView, StyleSheet, Text, View } from 'react-native';
+import { MotionModal as Modal } from './MotionModal';
+import { MotionPressable as Pressable } from './MotionPressable';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 
 import { useTheme } from '../design/theme';
@@ -69,7 +64,7 @@ export function FileActionSheet({
       statusBarTranslucent
     >
       {/* 遮罩：点它关闭 */}
-      <Pressable style={styles.backdrop} onPress={onClose}>
+      <Pressable feedback="none" style={styles.backdrop} onPress={onClose}>
         {/* 面板本身要吃掉点击，否则点空白处会穿透到遮罩 */}
         <Pressable
           style={[styles.sheet, { paddingBottom: insets.bottom + space.md }]}

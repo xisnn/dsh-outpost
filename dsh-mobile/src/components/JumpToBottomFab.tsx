@@ -21,9 +21,11 @@
  * 出现/消失用透明度 + 轻微位移，不改变列表布局（绝对定位）。
  */
 import React, { useEffect, useMemo, useRef, useState } from 'react';
-import { Animated, Pressable, StyleSheet, Text, View } from 'react-native';
+import { Animated, StyleSheet, Text, View } from 'react-native';
+import { MotionPressable as Pressable } from './MotionPressable';
 
 import { useTheme } from '../design/theme';
+import { MOTION, useMotionPreference } from '../design/motion';
 
 export function JumpToBottomFab({
   visible,
@@ -40,6 +42,7 @@ export function JumpToBottomFab({
   const tv = useTheme();
   const styles = useMemo(() => makeStyles(tv), [tv]);
   const anim = useRef(new Animated.Value(0)).current;
+  const reduced = useMotionPreference();
   // 淡出结束后才真正卸载：否则消失动画会被打断，按钮「啪」地不见
   const [mounted, setMounted] = useState(visible);
 
@@ -47,14 +50,14 @@ export function JumpToBottomFab({
     if (visible) setMounted(true);
     const animation = Animated.timing(anim, {
       toValue: visible ? 1 : 0,
-      duration: visible ? tv.motion.enterMs : 140,
+      duration: reduced ? 0 : visible ? MOTION.enter : MOTION.exit,
       useNativeDriver: true,
     });
     animation.start(({ finished }) => {
       if (finished && !visible) setMounted(false);
     });
     return () => animation.stop();
-  }, [visible, anim, tv.motion.enterMs]);
+  }, [visible, anim, reduced]);
 
   if (!mounted) return null;
 
@@ -76,6 +79,7 @@ export function JumpToBottomFab({
     >
       <Pressable
         onPress={onPress}
+        disabled={!visible}
         hitSlop={8}
         style={({ pressed }: { pressed: boolean }) => [
           styles.btn,
