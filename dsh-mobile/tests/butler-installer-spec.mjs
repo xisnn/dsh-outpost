@@ -275,7 +275,16 @@ $extra = @{}
 if ($env:MOCK_BUSY -eq 'true') { $extra.Restart = $true }
 & ${quote(path.join(fixture, 'start-dsh-web.ps1'))} -Profile ${quote(s.profile)} -Host_ 127.0.0.1 -Port 43195 -NoQr @extra
 `);
-    const launchEnv = { ...process.env, DSH_CLI: fakeCli, DSH_HOME: s.home, DSH_STATE_DIR: path.join(s.dir, 'state'), MOCK_LAUNCH: path.join(s.dir, 'child.json'), MOCK_GATE_PATH: path.join(s.dir, 'gate-path.txt') };
+    // The Windows launcher resolves these locations before using DSH_CLI.
+    // Keep them inside the fixture on every platform, including Linux CI.
+    const launchEnv = {
+      ...process.env,
+      LOCALAPPDATA: path.join(s.dir, 'mock-localappdata'),
+      ProgramFiles: path.join(s.dir, 'mock-programfiles'),
+      USERPROFILE: path.join(s.dir, 'mock-userprofile'),
+      DSH_CLI: fakeCli, DSH_HOME: s.home, DSH_STATE_DIR: path.join(s.dir, 'state'),
+      MOCK_LAUNCH: path.join(s.dir, 'child.json'), MOCK_GATE_PATH: path.join(s.dir, 'gate-path.txt'),
+    };
     const result = spawnSync(ps.exe, ['-NoProfile', '-NonInteractive', '-ExecutionPolicy', 'Bypass', '-File', driver], {
       cwd: fixture, encoding: 'utf8', timeout: 30000, env: launchEnv,
     });
