@@ -4,7 +4,10 @@ import {ContentSearchController, parseContentSearch, contentSearchUnsupported} f
 import {mergeContentSearch} from '../src/core/sessionSearch.ts';
 import {SessionApi} from '../src/core/rpc/session.ts';
 import {DshConnection} from '../src/core/transport/index.ts';
-import {RpcError} from '../src/core/rpc-error.ts';
+import {createRequire} from 'node:module';
+// Node 20/tsx can instantiate separate ESM and CJS copies of this class.
+// Match the dependency instance used by contentSearch.ts, preserving instanceof checks.
+const {RpcError}=createRequire(new URL('../src/core/contentSearch.ts',import.meta.url))('./rpc-error');
 import {componentHarness,loadSource} from './support/component-harness.mjs';
 import {hookHarness} from './support/hook-harness.mjs';
 const tick=async()=>{for(let i=0;i<12;i++)await Promise.resolve();};
@@ -67,6 +70,15 @@ test('actual API and transport send only request.query to the optional read-only
  const api=new SessionApi(conn);assert.equal((await api.search('  needle  ')).items[0].sessionId,'one');
  assert.equal(calls[0].url,'http://127.0.0.1:9/api/session/search');const body=JSON.parse(calls[0].init.body);assert.equal(body.method,'session/search');assert.deepEqual(body.payload.args,{request:{query:'needle'}});
  await assert.rejects(()=>api.search(' '));await assert.rejects(()=>api.search('x'.repeat(501)));assert.equal(calls.length,1);
+});
+test('actual transport errors retain optional-feature and authentication distinctions',async()=>{
+ for(const [status,expected]of [[404,'unsupported'],[401,'failed']]){
+  let reads=0;
+  const conn=new DshConnection({baseUrl:'http://127.0.0.1:9',cookie:'isolated-test',WebSocketImpl:class{},fetchImpl:async()=>{reads++;return{ok:false,status,text:async()=>status===404?'not found':'unauthorized'};}});
+  const api=new SessionApi(conn),f=fixture(query=>api.search(query));
+  f.controller.submit('first');f.advance(250);await tick();assert.equal(f.last().status,expected);
+  f.controller.submit('second');f.advance(250);await tick();assert.equal(reads,status===404?1:2);assert.equal(f.last().status,expected);f.controller.dispose();
+ }
 });
 test('real screen defers button search until native final input and opens a hit without a fake message anchor',()=>{
  const submitted=[],input=[],pushes=[];
