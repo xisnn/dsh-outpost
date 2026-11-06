@@ -37,6 +37,7 @@ import { docKindOf, canPreviewInside, docxHtmlToBlocks, type DocxBlock } from '.
 type LoadState =
   | { phase: 'loading' }
   | { phase: 'md'; text: string }
+  | { phase: 'text'; text: string }
   | { phase: 'docx'; blocks: DocxBlock[] }
   | { phase: 'sheet'; sheets: { name: string; rows: string[][] }[] }
   | { phase: 'error'; message: string };
@@ -89,9 +90,9 @@ export function DocumentViewer({
 
     void (async () => {
       try {
-        if (kind === 'md') {
+        if (kind === 'md' || kind === 'text') {
           const text = await ReactNativeBlobUtil.fs.readFile(fsPath, 'utf8');
-          if (alive) setState({ phase: 'md', text: String(text) });
+          if (alive) setState({ phase: kind, text: String(text) });
           return;
         }
 
@@ -188,7 +189,7 @@ export function DocumentViewer({
       <View style={styles.root}>
         {/* 顶栏 */}
         <View style={[styles.topBar, { paddingTop: insets.top + 8 }]}>
-          <Pressable onPress={onClose} hitSlop={12} style={styles.backBtn}>
+          <Pressable onPress={onClose} hitSlop={12} style={styles.backBtn} accessibilityRole="button" accessibilityLabel="返回聊天">
             <Text style={styles.backText}>‹</Text>
           </Pressable>
           <Text style={styles.title} numberOfLines={1} ellipsizeMode="middle" accessibilityLabel={title}>
@@ -228,6 +229,10 @@ export function DocumentViewer({
         ) : state.phase === 'md' ? (
           <ScrollView contentContainerStyle={{ paddingBottom: insets.bottom + 24 }}>
             <MarkdownView text={state.text} />
+          </ScrollView>
+        ) : state.phase === 'text' ? (
+          <ScrollView contentContainerStyle={{ padding: tv.layout.screenPadding, paddingBottom: insets.bottom + 24 }}>
+            <Text accessible accessibilityLabel={state.text || '文件为空'} selectable style={{ color: tv.colors.text, fontFamily: 'monospace', fontSize: tv.type.sm, lineHeight: 23 }}>{state.text || '文件为空'}</Text>
           </ScrollView>
         ) : state.phase === 'docx' ? (
           <ScrollView contentContainerStyle={{ paddingBottom: insets.bottom + 24 }}>

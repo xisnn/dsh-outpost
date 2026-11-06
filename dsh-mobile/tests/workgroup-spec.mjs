@@ -200,8 +200,8 @@ check('同轮非首个 assistant item 被跳过', () =>
     ? true
     : '同轮 item 没有去重',
 );
-check('管家模式 / 派活轮不启用分组', () =>
-  /!butler && !item\.delegated \? workGroups\.get/.test(chatSrc) ? true : '分组没有排除管家/派活',
+check('管家模式不启用分组，普通会话派活仍走正常执行过程组', () =>
+  /!butler \? workGroups\.get/.test(chatSrc) ? true : '普通会话派活偏离正常分组',
 );
 check('执行过程组内没有复制按钮', () =>
   /CopyTextButton|复制全部|复制全文/.test(cardSrc) ? false : true,

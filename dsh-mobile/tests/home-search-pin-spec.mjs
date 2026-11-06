@@ -342,7 +342,7 @@ const home = readFileSync('src/screens/WorkspacesScreen.tsx', 'utf8');
 const sessions = readFileSync('src/screens/SessionsScreen.tsx', 'utf8');
 const appSrc = readFileSync('src/App.tsx', 'utf8');
 check('首页有跨工作区搜索框', () =>
-  /placeholder="搜索全部会话"/.test(home) && /searchSessionsAcrossWorkspaces/.test(home)
+  /placeholder="搜索全部会话"/.test(home) && /mergeContentSearch/.test(home)
     ? true
     : '缺少全局搜索',
 );

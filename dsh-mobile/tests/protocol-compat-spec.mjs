@@ -88,9 +88,13 @@ check('代码里用的每个接口都在清单里', () => {
   const undeclared = [...usedEndpoints].filter((ep) => !declared.has(ep));
   if (undeclared.length === 0) return true;
   return (
-    `这些接口在用但没登记（新增接口请加到 protocol.ts 的 REQUIRED_ENDPOINTS）：` +
+    `这些接口在用但没登记（请按必需或可选能力登记到 protocol.ts）：` +
     undeclared.join('、')
   );
+});
+
+check('正文搜索登记为可选能力，不阻断主聊天', () => {
+  return OPTIONAL_ENDPOINTS.includes('session/search') && !REQUIRED_ENDPOINTS.includes('session/search');
 });
 
 check('清单里的每个必需接口都真的在用', () => {

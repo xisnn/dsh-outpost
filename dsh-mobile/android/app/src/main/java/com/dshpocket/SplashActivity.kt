@@ -18,8 +18,31 @@ import androidx.core.content.ContextCompat
  * 系统闪屏也用同色），系统闪屏 → 这里不会有颜色跳变。
  */
 class SplashActivity : AppCompatActivity() {
+    private val handler = Handler(Looper.getMainLooper())
+    private val openMain = Runnable { forwardToMain(intent) }
+
+    private fun forwardToMain(source: Intent) {
+        handler.removeCallbacks(openMain)
+        val next = Intent(this, MainActivity::class.java)
+        ShareInbox.forwardGrants(source, next)
+        startActivity(next)
+        finish()
+    }
+
+    override fun onNewIntent(intent: Intent) {
+        super.onNewIntent(intent)
+        setIntent(intent)
+        // Forward every delivery, not just the latest intent when a splash timer expires.
+        forwardToMain(intent)
+    }
+
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
+        if (ShareInbox.isShare(intent)) {
+            // MainActivity's task owns the URI grants before this Activity finishes.
+            forwardToMain(intent)
+            return
+        }
 
         val image = ImageView(this).apply {
             setImageResource(R.drawable.splash)
@@ -30,9 +53,11 @@ class SplashActivity : AppCompatActivity() {
         }
         setContentView(image)
 
-        Handler(Looper.getMainLooper()).postDelayed({
-            startActivity(Intent(this, MainActivity::class.java))
-            finish()
-        }, 650)
+        handler.postDelayed(openMain, 650)
+    }
+
+    override fun onDestroy() {
+        handler.removeCallbacks(openMain)
+        super.onDestroy()
     }
 }

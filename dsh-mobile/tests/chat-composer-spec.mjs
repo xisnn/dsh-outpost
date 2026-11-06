@@ -22,23 +22,33 @@ function harness(patch = {}) {
   for (const key of ['onChangeText', 'onAddAttachment', 'onRemoveAttachment', 'onSend', 'onStop']) {
     props[key] = (...args) => calls.push([key, ...args]);
   }
-  let focused = false, tree;
+  let cursor = 0, memoCursor = 0, refCursor = 0, tree;
+  const states = [], memos = [], refs = [];
   const theme = { ...tokens, colors: tokens.lightPalette };
   const react = {
     createElement: (type, props, ...children) => ({ type, props: props || {}, children }),
-    useMemo: fn => fn(),
-    useState: () => [focused, value => { focused = value; }],
+    useMemo(fn, deps) {
+      const i = memoCursor++, old = memos[i];
+      if (!old || old.deps.length !== deps.length || deps.some((d, j) => !Object.is(d, old.deps[j]))) memos[i] = { deps, value: fn() };
+      return memos[i].value;
+    },
+    useEffect() {},
+    useRef(value) { return refs[refCursor++] ??= { current: value }; },
+    useState(initial) {
+      const i = cursor++; states[i] ??= { value: initial };
+      return [states[i].value, value => { states[i].value = typeof value === 'function' ? value(states[i].value) : value; }];
+    },
   };
   const { ChatComposer } = load('components/ChatComposer.tsx', {
     react: { ...react, default: react },
-    'react-native': { ...Object.fromEntries(['ActivityIndicator', 'Image', 'ScrollView', 'Text', 'TextInput', 'View'].map(name => [name, name])), Platform: { OS: 'android' }, StyleSheet: { create: value => value, hairlineWidth: 1 } },
+    'react-native': { ...Object.fromEntries(['ActivityIndicator', 'Image', 'ScrollView', 'Text', 'TextInput', 'View'].map(name => [name, name])), Platform: { OS: 'android' }, useWindowDimensions: () => ({fontScale: 1}), StyleSheet: { create: value => value, hairlineWidth: 1 } },
     './MotionPressable': { MotionPressable: 'Pressable' },
     './FileTypeBadge': { FileTypeBadge: 'FileTypeBadge' },
     '../design/theme': { useTheme: () => theme },
     '../core/picker': { formatBytes: bytes => `${bytes} B` },
   });
   const nodes = node => !node || typeof node !== 'object' ? [] : [node, ...node.children.flat(Infinity).flatMap(nodes)];
-  const render = (patch = {}) => { Object.assign(props, patch); tree = ChatComposer(props); return tree; };
+  const render = (patch = {}) => { Object.assign(props, patch); cursor = memoCursor = refCursor = 0; tree = ChatComposer(props); return tree; };
   render();
   return { props, calls, render, theme,
     find: predicate => nodes(tree).find(predicate),
@@ -62,6 +72,69 @@ test('composer forwards CJK multiline drafts without sending and respects empty/
   assert.equal(h.button('发送消息').props.disabled, false);
   h.button('发送消息').props.onPress();
   assert.equal(h.calls.at(-1)[0], 'onSend');
+});
+
+test('compact input expands for wrapping without a height loop, then contracts after shortening; other send states stay complete', () => {
+  const h = harness({value: 'a short draft'});
+  h.render().props.onLayout({nativeEvent: {layout: {width: 320}}}); h.render();
+  assert.ok(!h.text().includes('添加'));
+  h.find(n => n.type === 'TextInput').props.onContentSizeChange({nativeEvent: {contentSize: {height: 70}}}); h.render();
+  assert.ok(h.text().includes('添加'));
+  // A full-width input now fits one line; it must not trigger a collapse loop.
+  h.find(n => n.type === 'TextInput').props.onContentSizeChange({nativeEvent: {contentSize: {height: 33}}}); h.render();
+  assert.ok(h.text().includes('添加'));
+  h.render({value: 'short'}); assert.ok(!h.text().includes('添加'));
+  h.render({value: '第一行\n第二行'}); assert.ok(h.text().includes('添加'));
+  h.render({value: '', uploading: true}); assert.ok(h.text().includes('添加'));
+  h.render({uploading: false, running: true}); assert.ok(h.button('插话到当前轮')); assert.ok(h.button('打断当前回复'));
+  assert.equal(h.calls.length, 0, 'Layout changes never send or mutate the controlled draft');
+});
+
+test('running selection forwards steer for this message and resets the next message to queue', () => {
+  const h = harness({ running: true, value: '先检查配置' });
+  assert.equal(h.button('下一轮处理').props.accessibilityState.checked, true);
+  h.button('插话到当前轮').props.onPress(); h.render();
+  assert.equal(h.button('插话到当前轮').props.accessibilityState.checked, true);
+  assert.match(h.text(), /不会强停/);
+  h.button('发送消息').props.onPress();
+  assert.deepEqual(h.calls.at(-1), ['onSend', 'steer']);
+  h.button('发送消息').props.onPress();
+  assert.equal(h.calls.filter(c => c[0] === 'onSend').length, 1, 'Same-frame double tap cannot duplicate send');
+  h.render({ value: '下一条' });
+  assert.equal(h.button('下一轮处理').props.accessibilityState.checked, true);
+  h.button('发送消息').props.onPress();
+  assert.deepEqual(h.calls.at(-1), ['onSend', 'queue']);
+});
+
+test('scope changes, end of run and disabled ownership invalidate old mode and send handlers', () => {
+  const h = harness({ running: true, value: '中文', sendScope: {} });
+  h.button('插话到当前轮').props.onPress(); h.render();
+  const oldSend = h.button('发送消息').props.onPress;
+  const oldSelect = h.button('插话到当前轮').props.onPress;
+  h.render({ sendScope: {} });
+  oldSend(); oldSelect(); h.render();
+  assert.equal(h.calls.length, 0);
+  assert.equal(h.button('下一轮处理').props.accessibilityState.checked, true);
+  h.button('插话到当前轮').props.onPress(); h.render();
+  h.render({ running: false });
+  assert.equal(h.button('插话到当前轮'), undefined);
+  h.button('发送消息').props.onPress();
+  assert.deepEqual(h.calls.at(-1), ['onSend', 'queue']);
+  h.render({ running: true, enabled: false });
+  assert.equal(h.button('发送消息').props.disabled, true);
+  h.button('发送消息').props.onPress();
+  assert.equal(h.calls.length, 1);
+});
+
+test('sending locks mode changes and pure attachments can be sent as steer', () => {
+  const h = harness({ running: true, attachments: [{ id: 'f', kind: 'file', name: '文档.txt', uri: 'content://f' }] });
+  h.button('插话到当前轮').props.onPress(); h.render();
+  h.render({ sending: true });
+  assert.equal(h.button('插话到当前轮').props.disabled, true);
+  h.button('下一轮处理').props.onPress(); h.render();
+  assert.equal(h.button('插话到当前轮').props.accessibilityState.checked, true);
+  h.render({ sending: false }); h.button('发送消息').props.onPress();
+  assert.deepEqual(h.calls.at(-1), ['onSend', 'steer']);
 });
 
 test('mixed attachments remain controlled and each removal identifies the original attachment', () => {

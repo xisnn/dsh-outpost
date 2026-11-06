@@ -50,7 +50,7 @@ export interface PartitionedApprovals<T extends ApprovalCandidate = ApprovalCand
  * 严格按 sessionId 拆分待审批。
  *
  * - 当前会话只展示 `sessionId === currentSessionId`（或会话内 fold 出的无 sessionId 只读项）；
- * - 其他会话的审批绝不混入当前会话卡片，而是聚合为 `otherGroups` 供跳转入口展示；
+ * - 仅显式核实归属的管家任务/队员会话可汇入主聊天；其余会话仍聚合为 `otherGroups`；
  * - 处于 `inFlightIds`（已发送响应、正等待服务端 `approval-resolved`）的条目暂时隐藏，
  *   一旦超时或断线则从 `inFlightIds` 移除并立即恢复显示。
  */
@@ -60,6 +60,8 @@ export function partitionApprovalsBySession<T extends ApprovalCandidate>(
   opts?: {
     inFlightIds?: ReadonlySet<string>;
     sessions?: readonly SessionTitleLike[];
+    /** Explicit Host task / team ownership, supplied only by the main butler chat. */
+    relatedSessionIds?: ReadonlySet<string>;
   },
 ): PartitionedApprovals<T> {
   const inFlight = opts?.inFlightIds;
@@ -81,7 +83,7 @@ export function partitionApprovalsBySession<T extends ApprovalCandidate>(
       // 缺少 sessionId 的可操作审批（来源不明）绝不默认归入当前会话（即使 currentSessionId 也为空），
       // 单独保留为只读提示，由 UI 明确禁用操作。
       unknown.push(item);
-    } else if (currentSessionId && item.sessionId === currentSessionId) {
+    } else if (currentSessionId && (item.sessionId === currentSessionId || opts?.relatedSessionIds?.has(item.sessionId))) {
       if (inFlight?.has(item.id)) continue;
       current.push(item);
     } else {

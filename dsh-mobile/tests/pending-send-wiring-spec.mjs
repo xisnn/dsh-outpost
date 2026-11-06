@@ -27,7 +27,8 @@ function check(name, fn) {
 }
 
 check('ChatScreen 文本/附件统一走 store.sendPending', () => {
-  assert.match(chat, /store\.sendPending\(sessionId,\s*text,\s*pendingAttachments\)/);
+  assert.match(chat, /store\.sendPending\(sessionId,\s*text,\s*pendingAttachments,\s*mode\)/);
+  assert.match(chat, /onSend=\{\(mode\) => void send\(mode\)\}/);
 });
 
 check('ChatScreen 渲染 PendingSendBubble 并调用 retryPending', () => {

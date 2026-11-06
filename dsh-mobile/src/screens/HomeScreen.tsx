@@ -60,13 +60,21 @@ export function HomeScreen({ active = true }: { active?: boolean }) {
   useEffect(() => {
     const consume = () => {
       const sid = store.consumeOpenSession();
-      if (sid) nav.push('Chat', { sessionId: sid });
+      if (!sid) return;
+      if (butlerMode && sid === butlerSessionId) {
+        setTab('butler');
+        nav.popToRoot();
+      } else {
+        if (!butlerMode) setTab('workspaces');
+        const current = nav.stack[nav.stack.length - 1];
+        if (current?.name !== 'Chat' || current.params?.sessionId !== sid) nav.push('Chat', { sessionId: sid });
+      }
     };
     // 挂载时先检查一次（可能在别的页面点的通知）
     consume();
     const unsub = store.subscribe(consume);
     return unsub;
-  }, [store, nav]);
+  }, [store, nav, butlerMode, butlerSessionId]);
 
   const tabs: HomeTab[] = butlerMode ? ['butler', 'me'] : ['workspaces', 'me'];
 
@@ -109,10 +117,13 @@ export function HomeScreen({ active = true }: { active?: boolean }) {
           </View>
         )}
         <View style={[styles.pane, tab === 'me' ? null : styles.hidden]}>
-          <ProfileScreen active={tab === 'me'} />
+          <ProfileScreen active={active && tab === 'me'} />
         </View>
       </View>
-      <TabBar tab={tab} onChange={setTab} items={tabs} />
+      <TabBar tab={tab} onChange={next => {
+        if (!butlerMode && next === 'me' && nav.stack.at(-1)?.name === 'Chat') nav.popToRoot();
+        setTab(next);
+      }} items={tabs} />
     </View>
   );
 }

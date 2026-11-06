@@ -305,5 +305,22 @@ await check('3. 重新配对、凭据更新与退出登录：syncCookie 重置�
 });
 
 console.log('');
+await check('4. 可选正文搜索沿用聊天鉴权终态，不因成功读取恢复审批授权', async () => {
+  const store = Object.create(Store.prototype);
+  store.connection = 'connected'; store.authInvalidated = false; store.gatewayStatus = 'revoked';
+  let calls = 0; const terminal = [];
+  store.api = { search: async () => { calls++; return { items: [], hasMore: false }; } };
+  store.markAuthTerminal = error => terminal.push(error);
+  await store.searchSessions('needle'); assert.equal(store.gatewayStatus, 'revoked');
+  for (const status of [401, 403]) {
+    const error = new RpcError({endpoint:'session/search',kind:'http',raw:`HTTP ${status}`,userTitle:'',userHint:'',retryable:false});
+    store.api.search = async () => { throw error; };
+    await assert.rejects(() => store.searchSessions('needle'), error);
+    assert.equal(terminal.at(-1), error);
+  }
+  store.authInvalidated = true;
+  await assert.rejects(() => store.searchSessions('blocked'), /聊天连接不可用/);
+  assert.equal(calls, 1); assert.equal(terminal.length, 2);
+});
 console.log(`结果：${pass} 通过，${fail} 失败`);
 process.exit(fail > 0 ? 1 : 0);

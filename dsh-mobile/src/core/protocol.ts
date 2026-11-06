@@ -45,7 +45,8 @@ export const REQUIRED_ENDPOINTS = [
 ] as const;
 
 /** 可选接口：缺失只降级对应功能，不影响主流程 */
-export const OPTIONAL_ENDPOINTS = ['approval/asked', 'approval/decided', 'deliverables/presented'] as const;
+export const OPTIONAL_ENDPOINTS = ['approval/asked', 'approval/decided', 'deliverables/presented', 'session/search',
+  'fileReferences/list', 'sessionReferenceResolver/candidates', 'session/projections', 'session/fork'] as const;
 
 /**
  * 依赖的事件类型（来自 session/follow 的流式推送）。

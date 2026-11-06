@@ -13,13 +13,11 @@
  * 模式切换时补发一条带 MODE_MARK 标记的短消息，告诉管家换档，
  * 同样会被 fold 过滤掉，不出现在聊天记录里。
  */
-import { BUTLER_PRIME_MARK, BUTLER_MODE_MARK } from './fold';
+import { BUTLER_PRIME_MARK, BUTLER_MODE_MARK, BUTLER_WAKE_PREFIX } from './fold';
 
 export { BUTLER_PRIME_MARK, BUTLER_MODE_MARK };
 
 export type ButlerMode = 'chat' | 'plan';
-
-const BUTLER_WAKE_PREFIX = '〔系统通知〕队员已经做完，请向用户汇总结果：';
 
 /** 手机旧管家产生的控制消息；普通用户输入仍可发送到 Host 托管会话。 */
 export function isPhoneButlerControlMessage(text: string): boolean {

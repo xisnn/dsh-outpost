@@ -23,6 +23,7 @@ import { ImageViewer } from './ImageViewer';
 import { DocumentViewer, canPreviewInside } from './DocumentViewer';
 import { FileTypeBadge } from './FileTypeBadge';
 import { formatBytes } from '../core/picker';
+import { FILE_PREVIEW_MAX_BYTES, fileExcerpt, isTextPreviewable } from '../core/filePreview';
 
 export function FileCard({
   path,
@@ -69,7 +70,7 @@ export function FileCard({
     const separator = root.includes('\\') ? '\\' : '/';
     return `${root.replace(/[\\/]+$/, '')}${separator}${path}`;
   }, [path, workspacePath, butlerWorkspace]);
-  const [local, setLocal] = useState<RemoteFile | null>(null);
+  const [localState, setLocalState] = useState<{ owner: object; file: RemoteFile } | null>(null);
   const [failed, setFailed] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
   /** 图片全屏查看器 */
@@ -85,6 +86,32 @@ export function FileCard({
   const opening = useRef(false);
 
   const name = path.split(/[\\/]/).pop() ?? path;
+  const previewable = !image && isTextPreviewable(name);
+  const [excerptState, setExcerptState] = useState<{ owner: object; text: string } | null>(null);
+  const [previewHint, setPreviewHint] = useState('正在加载预览…');
+  // Object identity also binds the active gateway. Stale callbacks cannot open an old file.
+  const identity = useMemo(() => ({}), [absPath, path, sessionId, image, fileBaseUrl, fileCookie, gatewayChannel, expectedSha256, expectedSize]);
+  const activeIdentity = useRef<object | null>(identity);
+  activeIdentity.current = identity;
+  const isActive = () => activeIdentity.current === identity;
+  const local = localState?.owner === identity ? localState.file : null;
+  const setLocal = (file: RemoteFile | null) => setLocalState(file ? { owner: identity, file } : null);
+  const excerpt = excerptState?.owner === identity ? excerptState.text : null;
+  const setExcerpt = (text: string | null) => setExcerptState(text === null ? null : { owner: identity, text });
+
+  useEffect(() => {
+    activeIdentity.current = identity;
+    setLocal(null);
+    setFailed(null);
+    setBusy(false);
+    opening.current = false;
+    setExcerpt(null);
+    setPreviewHint('正在加载预览…');
+    setViewerOpen(false);
+    setDocOpen(false);
+    setDocFileOverride(null);
+    return () => { activeIdentity.current = null; };
+  }, [identity]);
 
   /**
    * 传给 DocumentViewer 的 file 对象。
@@ -183,7 +210,7 @@ export function FileCard({
     // 重新走一遍「下载 → 转 base64」，图片闪、流量白费。
     //
     // 真正需要的只有 baseUrl 和 cookie —— 用它们的值做依赖。
-  }, [image, absPath, path, sessionId, fileBaseUrl, fileCookie, gatewayChannel, reload]);
+  }, [image, absPath, path, sessionId, fileBaseUrl, fileCookie, gatewayChannel, reload, identity]);
 
   /**
    * 转发：交给系统分享面板。
@@ -233,51 +260,58 @@ export function FileCard({
     setFailed(null);
     setReload(value => value + 1);
   };
-  const onPress = async (forceDownload = false) => {
-    if (busy || opening.current) return;
+  const onPress = async (forceDownload = false, previewOnly = false) => {
+    if (!isActive() || (!previewOnly && busy) || opening.current) return;
     if (image && failed) { retryImage(); return; }
     const retry = forceDownload || !!failed;
     opening.current = true;
     setBusy(true);
     setFailed(null);
-    if (forceDownload) setDocOpen(false);
+    if (forceDownload) { setDocOpen(false); setExcerpt(null); }
     try {
-      let f = retry ? null : local;
+      let f = retry || previewOnly ? null : local;
+      const limit = previewOnly ? { maxBytes: FILE_PREVIEW_MAX_BYTES } : undefined;
       if (!f && gatewayChannel && sessionId && !/^(?:[A-Za-z]:[\\/]|[\\/])/.test(path)) {
         try {
-          const downloaded = await downloadWorkspaceFile(gatewayChannel, sessionId, path);
+          const downloaded = await downloadWorkspaceFile(gatewayChannel, sessionId, path, undefined, limit);
           f = { uri: downloaded.path, fsPath: downloaded.path.replace(/^file:\/\//, ''), name: downloaded.name };
-        } catch {
-          // The authenticated file route also works when the gateway is offline.
+        } catch (error) {
+          if (!isActive()) return;
+          // Do not retry a known large file through another transport for an excerpt.
+          if (previewOnly && error instanceof Error && error.message.includes('文件较大')) throw error;
         }
       }
-      f ??= await fetchRemoteFile(fileBaseUrl, fileCookie, absPath, { forceDownload: retry });
+      if (!isActive()) return;
+      f ??= await fetchRemoteFile(fileBaseUrl, fileCookie, absPath, { forceDownload: retry, ...limit });
+      if (!isActive()) return;
       if (expectedSha256 || expectedSize !== undefined) {
         for (let attempt = 0; attempt < 2; attempt += 1) {
           const stat = await ReactNativeBlobUtil.fs.stat(f.fsPath);
           const digest = expectedSha256 ? await ReactNativeBlobUtil.fs.hash(f.fsPath, 'sha256') : null;
+          if (!isActive()) return;
           const matches = (expectedSize === undefined || Number(stat.size) === expectedSize) &&
             (!expectedSha256 || digest?.toLowerCase() === expectedSha256.toLowerCase());
           if (matches) break;
           await ReactNativeBlobUtil.fs.unlink(f.fsPath).catch(() => undefined);
+          if (!isActive()) return;
           setLocal(null);
-          if (attempt === 1) {
-            throw new Error('文件内容与交付记录不一致，请让管家重新交付后再打开。');
-          }
-          // A redelivered path may still have an older local cache entry.
-          f = await fetchRemoteFile(fileBaseUrl, fileCookie, absPath, { forceDownload: true });
+          if (attempt === 1) throw new Error('文件内容与交付记录不一致，请让管家重新交付后再打开。');
+          f = await fetchRemoteFile(fileBaseUrl, fileCookie, absPath, { forceDownload: true, ...limit });
         }
       }
+      if (!isActive()) return;
       setFailed(null);
       setLocal(f);
-
-      // ⚠️ 不要依赖 `docFile`（它来自 local，setLocal 是异步的）。
-      // 这里已经拿到了 f，直接用它开查看器，避免「先 null 再有值」
-      // 导致 DocumentViewer 重新挂载 + 重新解析（又是一次闪）。
-      if (image) {
-        setViewerOpen(true);
+      if (previewOnly) {
+        const stat = await ReactNativeBlobUtil.fs.stat(f.fsPath);
+        if (!Number.isFinite(Number(stat.size)) || Number(stat.size) > FILE_PREVIEW_MAX_BYTES) throw new Error('文件较大，点击后查看完整内容');
+        const text = String(await ReactNativeBlobUtil.fs.readFile(f.fsPath, 'utf8'));
+        if (!isActive()) return;
+        if (text.includes('\u0000')) throw new Error('无法预览此文件，点击打开');
+        setExcerpt(fileExcerpt(text));
         return;
       }
+      if (image) { setViewerOpen(true); return; }
       if (canPreviewInside(f.name)) {
         setDocFileOverride({ uri: f.uri, name: f.name });
         setDocOpen(true);
@@ -285,12 +319,24 @@ export function FileCard({
       }
       await openLocalFile(f);
     } catch (e) {
-      setFailed(e instanceof Error ? e.message : '打开失败');
+      if (!isActive()) return;
+      if (previewOnly) setPreviewHint(e instanceof Error ? e.message : '预览暂不可用，点击打开');
+      else setFailed(e instanceof Error ? e.message : '打开失败');
     } finally {
-      opening.current = false;
-      setBusy(false);
+      if (isActive()) { opening.current = false; setBusy(false); }
     }
   };
+
+  useEffect(() => {
+    if (!previewable) return;
+    if (expectedSize !== undefined && expectedSize > FILE_PREVIEW_MAX_BYTES) {
+      setPreviewHint('文件较大，点击后查看完整内容');
+      return;
+    }
+    void onPress(false, true);
+    // Fetch once per resource identity; transient store updates do not restart it.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [identity]);
 
   // 图片加载成功 → 直接显示预览
   if (image && local) {
@@ -371,19 +417,29 @@ export function FileCard({
         accessibilityRole="button"
         accessibilityLabel={`${failed ? '重试加载' : '打开'} ${name}${alt && alt !== name ? `，${alt}` : ''}`}
       >
-        <FileTypeBadge name={name} />
-        <View style={styles.meta}>
-          <Text style={styles.name} numberOfLines={1} ellipsizeMode="middle">
-            {name}
-          </Text>
-          {alt && alt !== name ? <Text style={styles.description} numberOfLines={2}>{alt}</Text> : null}
-          {expectedSize !== undefined ? <Text style={styles.path}>{expectedSize === 0 ? '0 B' : formatBytes(expectedSize)}</Text> : null}
-          <Text style={styles.path} numberOfLines={failed ? 2 : 1} ellipsizeMode={failed ? 'tail' : 'middle'}>
-            {failed ?? (busy ? '正在打开…' : path)}
-          </Text>
-          {failed ? <Text style={styles.retryText}>点击重试</Text> : null}
+        {previewable ? (
+          <View style={styles.previewBody}>
+            <Text style={styles.previewText} numberOfLines={8} ellipsizeMode="tail">
+              {excerpt === null ? previewHint : excerpt || '文件为空'}
+            </Text>
+          </View>
+        ) : null}
+        <View style={styles.fileRow}>
+          <FileTypeBadge name={name} />
+          <View style={styles.meta}>
+            <Text style={styles.name} numberOfLines={1} ellipsizeMode="middle">
+              {name}
+            </Text>
+            {alt && alt !== name ? <Text style={styles.description} numberOfLines={2}>{alt}</Text> : null}
+            {expectedSize !== undefined ? <Text style={styles.path}>{expectedSize === 0 ? '0 B' : formatBytes(expectedSize)}</Text> : null}
+            <Text style={styles.path} numberOfLines={failed ? 2 : 1} ellipsizeMode={failed ? 'tail' : 'middle'}>
+              {failed ?? (busy ? '正在打开…' : path)}
+            </Text>
+            {failed ? <Text style={styles.retryText}>点击重试</Text> : null}
+          </View>
+          {busy ? <ActivityIndicator size="small" color={tv.colors.accent} /> : null}
+          {!busy && previewable ? <Text style={styles.openText}>查看全文</Text> : null}
         </View>
-        {busy ? <ActivityIndicator size="small" color={tv.colors.accent} /> : null}
       </Pressable>
 
       {/* 文档内置查看：md / docx / xlsx / csv */}
@@ -430,12 +486,19 @@ function makeStyles(tv: ReturnType<typeof useTheme>) {
       paddingHorizontal: tv.space.sm,
       paddingVertical: tv.space.xs,
     },
+    previewBody: {
+      padding: tv.space.md,
+      borderBottomWidth: StyleSheet.hairlineWidth,
+      borderBottomColor: C.border,
+      backgroundColor: C.bgRaised,
+      borderTopLeftRadius: tv.radius.md,
+      borderTopRightRadius: tv.radius.md,
+    },
+    previewText: { color: C.textSecondary, fontFamily: 'monospace', fontSize: tv.type.xs, lineHeight: 21 },
+    fileRow: { flexDirection: 'row', alignItems: 'center', padding: tv.space.md, minHeight: 72 },
+    openText: { color: C.accent, fontSize: tv.type.micro, marginLeft: tv.space.sm },
     card: {
-      flexDirection: 'row',
-      alignItems: 'center',
       marginVertical: tv.space.sm,
-      paddingHorizontal: tv.space.md,
-      paddingVertical: tv.space.md,
       borderRadius: tv.radius.md,
       backgroundColor: C.bgCard,
       borderWidth: StyleSheet.hairlineWidth,

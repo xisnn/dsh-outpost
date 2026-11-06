@@ -24,6 +24,8 @@ import type { AttachRef, ContentBlock, EventRecord } from '../types';
 export const BUTLER_PRIME_MARK = '〔管家初始化〕';
 /** 客户端替管家补发的「队员完成」通知，同样不该显示成用户消息 */
 export const SYSTEM_NUDGE_MARK = '〔系统通知〕';
+/** 旧手机管家确认队员完成后发出的汇总请求（区别于普通派活/系统消息）。 */
+export const BUTLER_WAKE_PREFIX = '〔系统通知〕队员已经做完，请向用户汇总结果：';
 /** 切换闲聊/计划模式时补发的短指令 */
 export const BUTLER_MODE_MARK = '〔模式切换〕';
 
@@ -103,8 +105,10 @@ export interface Turn {
   steps: Step[];
   /** 队员汇报 / subagent 通知。DSH 把它们记成 user/message，实际不是用户说的 */
   teammates?: Array<{ id: string; from: string; text: string; notice: boolean; time: number }>;
-  /** 这一轮是否派过活（调用过 spawn_teammate / team_task_create） */
+  /** 这一轮是否派过活（不代表任务已完成，也不代表是管家会话） */
   delegated?: boolean;
+  /** 本轮收到的明确队员完成通知中的任务数，不取当前团队快照。 */
+  completionTaskCount?: number;
   startedAt?: number;
   endedAt?: number;
   /** completed / aborted / error / 未结束 */
@@ -312,10 +316,22 @@ export function foldEvents(records: EventRecord[]): Turn[] {
       }
 
       case 'user/message': {
-        // 管家初始化提示 / 系统通知都是「假的用户消息」，界面上不显示
-        if (isInjectedMessage(textOf(d.content))) break;
-        // 纯附件消息（无文字）也必须保留：UserBubble 支持只有 image/file parts 的气泡。
         const raw = textOf(d.content);
+        // 汇总请求本身不显示，但保留这轮实际已完成的任务数。
+        // 派活工具调用只说明开始工作，不能把整轮每个 step 都当作完成汇总。
+        if (raw.trimStart().startsWith(BUTLER_WAKE_PREFIX)) {
+          const count = raw.trimStart().slice(BUTLER_WAKE_PREFIX.length)
+            .split('\n').filter((line) => /^-\s+\S/.test(line)).length;
+          if (count > 0) {
+            const turnNo = num(d.turn) ?? current?.turn.turn ?? ev.seq;
+            const b = ensureTurn(turnNo);
+            b.turn.completionTaskCount = count;
+            current = b;
+          }
+        }
+        // 管家初始化提示 / 系统通知都是「假的用户消息」，界面上不显示
+        if (isInjectedMessage(raw)) break;
+        // 纯附件消息（无文字）也必须保留：UserBubble 支持只有 image/file parts 的气泡。
         const body = stripModeTag(raw);
         const parts = attachPartsOf(d.content);
         if (!body && parts.length === 0) break;
@@ -438,7 +454,7 @@ export function foldEvents(records: EventRecord[]): Turn[] {
             rawArguments: raw,
             pending: true,
           });
-          // 记下「这一轮派过活」，UI 用来决定是否把管家回复折叠成「已完成」卡片
+          // 只记录派活事实，不能据此判定任务完成或汇总。
           if (DELEGATING_TOOLS.has(toolName)) b.turn.delegated = true;
         }
         current = b;
@@ -579,7 +595,7 @@ export function foldEvents(records: EventRecord[]): Turn[] {
   return out;
 }
 
-/** 会派活的工具名：调用过就说明这一轮是「计划模式」在执行 */
+/** 会派活的工具名；普通会话和管家的两种模式都可能调用。 */
 const DELEGATING_TOOLS = new Set(['spawn_teammate', 'team_task_create']);
 
 /** 把一批 turn 拍平成可渲染的聊天气泡列表（用于 FlatList） */
@@ -593,8 +609,10 @@ export type ChatItem =
       turn: number;
       step: number;
       blocks: Block[];
-      /** 这一轮派过活，UI 可以折叠成「已完成」卡片 */
+      /** 这一轮派过活；不是完成汇总的依据。 */
       delegated?: boolean;
+      /** 仅已完成的汇总轮最后一个正文/附件 step 携带，最多一张完成卡。 */
+      completionTaskCount?: number;
     }
   | { kind: 'divider'; key: string; turn: number; reason?: string };
 
@@ -622,6 +640,18 @@ export function toChatItems(turns: Turn[]): ChatItem[] {
         notice: tm.notice,
       });
     }
+    let lastStep: Step | undefined;
+    for (let i = t.steps.length - 1; i >= 0; i -= 1) {
+      if (t.steps[i]!.blocks.length > 0) {
+        lastStep = t.steps[i];
+        break;
+      }
+    }
+    const completionStep = !t.running && t.reason === 'completed' &&
+      (t.completionTaskCount ?? 0) > 0 &&
+      !t.steps.some((s) => s.blocks.some((b) => b.kind === 'tool' && b.pending)) &&
+      lastStep?.blocks.some((b) => b.kind === 'text' || b.kind === 'file')
+      ? lastStep : undefined;
     for (const s of t.steps) {
       if (s.blocks.length === 0) continue;
       items.push({
@@ -631,6 +661,7 @@ export function toChatItems(turns: Turn[]): ChatItem[] {
         step: s.step,
         blocks: s.blocks,
         delegated: t.delegated,
+        completionTaskCount: s === completionStep ? t.completionTaskCount : undefined,
       });
     }
     if (!t.running && t.reason && t.reason !== 'completed') {
@@ -713,7 +744,8 @@ export function areTurnsStructurallyEqual(a: Turn, b: Turn): boolean {
     a.startedAt !== b.startedAt ||
     a.endedAt !== b.endedAt ||
     a.reason !== b.reason ||
-    a.delegated !== b.delegated
+    a.delegated !== b.delegated ||
+    a.completionTaskCount !== b.completionTaskCount
   ) {
     return false;
   }
@@ -785,6 +817,7 @@ export function areChatItemsStructurallyEqual(a: ChatItem, b: ChatItem): boolean
     return (
       a.step === b.step &&
       a.delegated === b.delegated &&
+      a.completionTaskCount === b.completionTaskCount &&
       areBlockArraysEqual(a.blocks, b.blocks)
     );
   }

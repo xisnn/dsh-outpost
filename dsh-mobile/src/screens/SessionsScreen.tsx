@@ -48,6 +48,7 @@ export function SessionsScreen({
 }) {
   const { store, butlerSessionId } = useApp();
   const nav = useNav();
+  const inSidebar = nav.column === 'master';
   const tv = useTheme();
   const styles = useMemo(() => makeStyles(tv), [tv]);
   const [, force] = useState(0);
@@ -361,8 +362,12 @@ export function SessionsScreen({
             <Pressable
               style={({ pressed }: { pressed: boolean }) => [
                 styles.card,
+                inSidebar && styles.sidebarCard,
+                inSidebar && item.sessionId === nav.selectedSessionId && styles.cardSelected,
                 pressed && styles.cardPressed,
               ]}
+              accessibilityRole="button"
+              accessibilityState={{selected: inSidebar && item.sessionId === nav.selectedSessionId}}
               onPress={() => nav.push('Chat', { sessionId: item.sessionId, title })}
               onLongPress={() => askActions(item.sessionId, title)}
               delayLongPress={450}
@@ -410,7 +415,7 @@ export function SessionsScreen({
                 {draftStore.has(item.sessionId) ? (
                   <Pill text="✎ 草稿" color={tv.colors.accentBright} bg={tv.colors.accentWash} />
                 ) : null}
-                {modelName ? <Pill text={modelName} /> : null}
+                {modelName && !inSidebar ? <Pill text={modelName} /> : null}
                 {ratio > 0 ? (
                   <Pill
                     text={`${Math.round(ratio * 100)}%`}
@@ -434,9 +439,9 @@ export function SessionsScreen({
 
               <View style={styles.cardBottom}>
                 <Text style={styles.time}>{formatAgo(item.updatedAt)}</Text>
-                <Text style={styles.sid} numberOfLines={1}>
+                {inSidebar ? null : <Text style={styles.sid} numberOfLines={1}>
                   {item.sessionId}
-                </Text>
+                </Text>}
               </View>
             </Pressable>
           );
@@ -557,6 +562,8 @@ function makeStyles(tv: ReturnType<typeof useTheme>) {
       borderRadius: radius.pill,
       backgroundColor: C.accentWash,
       minWidth: 52,
+      minHeight: 44,
+      justifyContent: 'center',
       alignItems: 'center',
     },
     newBtnText: { color: C.accentBright, fontSize: type.sm, fontWeight: weight.semibold },
@@ -632,7 +639,7 @@ function makeStyles(tv: ReturnType<typeof useTheme>) {
       paddingBottom: space.sm,
     },
     pathText: {
-      color: C.textFaint,
+      color: C.textSecondary,
       fontSize: type.xs,
       fontFamily: 'monospace',
     },
@@ -652,6 +659,8 @@ function makeStyles(tv: ReturnType<typeof useTheme>) {
       borderWidth: StyleSheet.hairlineWidth,
       borderColor: C.border,
     },
+    sidebarCard: { backgroundColor: 'transparent', borderColor: 'transparent', marginBottom: space.xs },
+    cardSelected: { backgroundColor: C.accentWash, borderColor: C.accentDim },
     cardPressed: { backgroundColor: C.bgCard, borderColor: C.borderStrong },
     cardTop: { flexDirection: 'row', alignItems: 'flex-start' },
     title: {
@@ -705,10 +714,10 @@ function makeStyles(tv: ReturnType<typeof useTheme>) {
       marginTop: space.sm,
       justifyContent: 'space-between',
     },
-    time: { color: C.textFaint, fontSize: type.micro },
+    time: { color: C.textSecondary, fontSize: type.xs },
     sid: {
-      color: C.textFaint,
-      fontSize: type.micro,
+      color: C.textSecondary,
+      fontSize: type.xs,
       flex: 1,
       textAlign: 'right',
       marginLeft: space.md,

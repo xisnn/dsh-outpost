@@ -35,6 +35,8 @@ export interface WorkGroupView {
   items: WorkGroupItem[];
   /** 最终回答的块（最后一个非文本块之后的内容） */
   finalBlocks: Block[];
+  /** Durable assistant-step identity of the last displayed final block. */
+  finalStep?: number;
   toolCount: number;
   reasoningCount: number;
   /** 是否还有工具在跑（pending） */
@@ -121,6 +123,7 @@ export function buildWorkGroup(turn: Turn): WorkGroupView | null {
     turn: turn.turn,
     items,
     finalBlocks,
+    finalStep: finalBlocks.length ? flat[flat.length - 1]?.step : undefined,
     toolCount,
     reasoningCount,
     hasPendingTool,

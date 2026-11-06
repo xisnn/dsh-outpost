@@ -603,10 +603,12 @@ const homeSrc = readFileSync('src/screens/WorkspacesScreen.tsx', 'utf8');
 const sessionsSrc = readFileSync('src/screens/SessionsScreen.tsx', 'utf8');
 const storeSrc = readFileSync('src/core/store.ts', 'utf8');
 
-check('ApprovalBanner 停靠在 ChatScreen 底部 composerWrap 内（输入框上方）且传入 sessionId', () =>
-  /styles\.composerWrap[\s\S]{0,600}<ApprovalBanner[\s\S]{0,200}sessionId=\{sessionId\}/.test(chatSrc)
+check('管家审批进入聊天列表，普通会话仍在输入框上方，并保留真实 sessionId', () =>
+  /ListFooterComponent=\{[\s\S]{0,100}\{butler \? approvalCard : null\}/.test(chatSrc) &&
+  /\{!butler \? approvalCard : null\}/.test(chatSrc) &&
+  /<ApprovalBanner[\s\S]{0,150}sessionId=\{sessionId\}/.test(chatSrc)
     ? true
-    : 'ApprovalBanner 未停靠在底部输入区上方或未传 sessionId',
+    : '审批卡未按聊天类型挂载或未传 sessionId',
 );
 check('ApprovalBanner 支持收起/展开、多审批队列切换、完整命令/路径、高危二次确认与跨会话跳转', () =>
   /展开 ⌃/.test(bannerSrc) &&

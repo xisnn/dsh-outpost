@@ -65,6 +65,7 @@ export const layout = {
   headerHeight: 52,
   composerMinHeight: 46,
   composerMaxHeight: 132,
+  chatMaxWidth: 760,
   avatarSm: 32,
   avatarMd: 44,
   avatarLg: 52,

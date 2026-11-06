@@ -61,6 +61,7 @@ export async function downloadWorkspaceFile(
   sessionId: string,
   relPath: string,
   onProgress?: (p: DownloadProgress) => void,
+  options?: { maxBytes?: number },
 ): Promise<DownloadedFile> {
   const requestId = `dl-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
 
@@ -76,6 +77,10 @@ export async function downloadWorkspaceFile(
   const name = String(opened.name ?? relPath.split('/').pop() ?? 'file');
   const mediaType = String(opened.mediaType ?? 'application/octet-stream');
   if (!transferId) throw new Error('网关没有返回 transferId');
+  if (options?.maxBytes !== undefined && (!Number.isSafeInteger(size) || size < 0 || size > options.maxBytes)) {
+    channel.send({ type: 'file-download-cancel', transferId });
+    throw new Error('文件较大，点击后查看完整内容');
+  }
 
   // 2. 分块拉
   const dest = `${ReactNativeBlobUtil.fs.dirs.CacheDir}/dsh-${Date.now()}-${name.replace(/[^\w.\-]/g, '_')}`;
@@ -92,8 +97,11 @@ export async function downloadWorkspaceFile(
         30000,
       );
       const data = String(chunk.data ?? '');
-      parts.push(data);
       const bytes = base64Bytes(data);
+      if (options?.maxBytes !== undefined && received + bytes > options.maxBytes) {
+        throw new Error('文件较大，点击后查看完整内容');
+      }
+      parts.push(data);
       received += bytes;
       offset += bytes;
       onProgress?.({ received, total: size });

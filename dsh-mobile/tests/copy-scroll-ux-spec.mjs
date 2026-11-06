@@ -304,7 +304,7 @@ check('CopyTextButton 只被 MarkdownView（代码块）使用', () => {
 });
 
 check('长按消息打开 MessageActionSheet，且传入正文', () => {
-  const usesSheet = /<MessageActionSheet[\s\S]{0,200}text=\{actionText/.test(chatSrc);
+  const usesSheet = /<MessageActionSheet[\s\S]{0,250}text=\{messageAction\?\.text/.test(chatSrc);
   const opensOnLongPress = /onLongPress=\{openMessageActions\}/.test(chatSrc);
   return usesSheet && opensOnLongPress ? true : '没有把长按连接到 MessageActionSheet';
 });

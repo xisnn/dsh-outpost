@@ -38,9 +38,14 @@ import React, {
   useState,
 } from 'react';
 import { MOTION, useMotionPreference } from '../design/motion';
+import { useTheme } from '../design/theme';
+import { navigationColumns } from '../core/adaptiveNavigation';
+import type { StyleProp, ViewStyle } from 'react-native';
 import {
   Animated,
   BackHandler,
+  Dimensions,
+  Keyboard,
   PanResponder,
   useWindowDimensions,
   View,
@@ -56,8 +61,11 @@ interface NavContextValue {
   stack: Screen[];
   push: (name: string, params?: Record<string, unknown>) => void;
   pop: () => void;
+  popToRoot: () => void;
   reset: (name: string, params?: Record<string, unknown>) => void;
   canGoBack: boolean;
+  column?: 'master' | 'detail';
+  selectedSessionId?: string;
 }
 
 const NavContext = createContext<NavContextValue | null>(null);
@@ -71,6 +79,8 @@ export function useNav(): NavContextValue {
 interface NavHostProps {
   initial: Screen;
   render: (screen: Screen, active: boolean) => React.ReactNode;
+  /** Normal Home contains the workspace list; the butler root contains a chat. */
+  rootIsList?: boolean;
 }
 
 /** 手势起手的左缘宽度。窄一点更稳，避免和内容横滑冲突 */
@@ -133,6 +143,8 @@ function ScreenPane({
   animateEnter,
   motionEpoch,
   reduceMotion,
+  layoutStyle,
+  testID,
   children,
 }: {
   active: boolean;
@@ -142,6 +154,8 @@ function ScreenPane({
   animateEnter: boolean;
   motionEpoch: number;
   reduceMotion: boolean;
+  layoutStyle?: StyleProp<ViewStyle>;
+  testID?: string;
   children: React.ReactNode;
 }) {
   // 根页面原地显示；新 push 的页面在第一次挂载时就处于入场起点。
@@ -190,7 +204,9 @@ function ScreenPane({
           opacity,
           transform: [{ translateX: finalX }],
         },
+        layoutStyle,
       ]}
+      testID={testID}
       pointerEvents={active ? 'auto' : 'none'}
       accessibilityElementsHidden={!active}
       importantForAccessibility={active ? 'auto' : 'no-hide-descendants'}
@@ -206,7 +222,8 @@ interface NavEntry {
   animateEnter: boolean;
 }
 
-export function NavHost({ initial, render }: NavHostProps) {
+export function NavHost({ initial, render, rootIsList = false }: NavHostProps) {
+  const tv = useTheme();
   const [entries, setEntries] = useState<NavEntry[]>([
     { screen: initial, key: 0, animateEnter: false },
   ]);
@@ -217,9 +234,32 @@ export function NavHost({ initial, render }: NavHostProps) {
   const reduceMotionRef = useRef(reduceMotion);
   reduceMotionRef.current = reduceMotion;
   // 窗口宽度动态获取：旋转、分屏时手势比例跟随当前宽度。
-  const { width } = useWindowDimensions();
-  const widthRef = useRef(width);
-  widthRef.current = width;
+  const { width, height, fontScale } = useWindowDimensions();
+  const unobscured = useRef({width, height});
+  const [ime, setIme] = useState<{width: number; height: number; fullHeight: number} | null>(null);
+  useEffect(() => {
+    const show = Keyboard.addListener('keyboardDidShow', () => {
+      // Read the native window at the event, after adjustResize. Subsequent
+      // height changes are real window resizing, not another IME subtraction.
+      const window = Dimensions.get('window');
+      setIme({width: window.width, height: window.height,
+        fullHeight: unobscured.current.width === window.width ? unobscured.current.height : window.height});
+    });
+    const hide = Keyboard.addListener('keyboardDidHide', () => setIme(null));
+    return () => { show.remove(); hide.remove(); };
+  }, []);
+  const imeVisible = ime !== null || Keyboard.isVisible();
+  if (!imeVisible) unobscured.current = {width, height};
+  const availableHeight = ime && ime.width === width
+    ? Math.max(height, ime.fullHeight + height - ime.height)
+    : imeVisible && unobscured.current.width === width ? Math.max(height, unobscured.current.height) : height;
+  const columns = navigationColumns(entries.map(entry => entry.screen), width,
+    availableHeight, rootIsList, fontScale);
+  const columnsRef = useRef(columns);
+  columnsRef.current = columns;
+  const paneWidth = columns?.detailWidth ?? width;
+  const widthRef = useRef(paneWidth);
+  widthRef.current = paneWidth;
   const dragX = useRef(new Animated.Value(0)).current;
   const committed = useRef(false);
   const pendingPop = useRef<number | null>(null);
@@ -247,7 +287,22 @@ export function NavHost({ initial, render }: NavHostProps) {
   const push = useCallback((name: string, params?: Record<string, unknown>) => {
     interrupt();
     setMotionEpoch((epoch) => epoch + 1);
-    updateEntries([...entriesRef.current, {
+    const current = entriesRef.current;
+    if (name === 'Chat' && columnsRef.current && typeof params?.sessionId === 'string') {
+      const identity = (value?: Record<string, unknown>) => JSON.stringify([
+        value?.sessionId, value?.address ?? null, !!value?.butler, !!value?.readOnly,
+      ]);
+      const target = identity(params);
+      for (let i = current.length - 1; i > columnsRef.current.masterIndex; i--) {
+        if (current[i].screen.name === 'Chat' && identity(current[i].screen.params) === target) {
+          // Select the existing instance. A second owner would close the same
+          // Store stream when it later unmounts.
+          updateEntries(current.slice(0, i + 1));
+          return;
+        }
+      }
+    }
+    updateEntries([...current, {
       screen: { name, params }, key: nextKey.current++, animateEnter: true,
     }]);
   }, [interrupt, updateEntries]);
@@ -272,6 +327,15 @@ export function NavHost({ initial, render }: NavHostProps) {
     });
   }, [dragX, interrupt, updateEntries]);
 
+  const popToRoot = useCallback(() => {
+    interrupt();
+    const current = entriesRef.current;
+    if (current.length <= 1) return;
+    setMotionEpoch((epoch) => epoch + 1);
+    // Preserve the mounted root, its draft, and its reading position.
+    updateEntries(current.slice(0, 1));
+  }, [interrupt, updateEntries]);
+
   const reset = useCallback((name: string, params?: Record<string, unknown>) => {
     interrupt();
     setMotionEpoch((epoch) => epoch + 1);
@@ -290,7 +354,7 @@ export function NavHost({ initial, render }: NavHostProps) {
 
   useEffect(() => {
     interrupt();
-  }, [width, reduceMotion, interrupt]);
+  }, [width, paneWidth, columns?.masterIndex, reduceMotion, interrupt]);
 
   useEffect(() => () => {
     motionToken.current += 1;
@@ -353,14 +417,14 @@ export function NavHost({ initial, render }: NavHostProps) {
         onStartShouldSetPanResponderCapture: () => false,
         onMoveShouldSetPanResponderCapture: (evt, g) => {
           const startX = evt.nativeEvent.pageX - g.dx;
-          return isBackGesture(startX, g.dx, g.dy, entriesRef.current.length > 1);
+          return !columnsRef.current && isBackGesture(startX, g.dx, g.dy, entriesRef.current.length > 1);
         },
 
         // 非 Capture 的也留着：万一 Capture 没被调用（某些 RN 版本/嵌套
         // 场景），还能退回到冒泡阶段兜底。
         onMoveShouldSetPanResponder: (evt, g) => {
           const startX = evt.nativeEvent.pageX - g.dx;
-          return isBackGesture(startX, g.dx, g.dy, entriesRef.current.length > 1);
+          return !columnsRef.current && isBackGesture(startX, g.dx, g.dy, entriesRef.current.length > 1);
         },
 
         // 一旦我们接管了，就别再让子级抢回去（否则滑到一半会断）
@@ -369,7 +433,7 @@ export function NavHost({ initial, render }: NavHostProps) {
         onPanResponderGrant: () => {
           interrupt();
           setMotionEpoch((epoch) => epoch + 1);
-          committed.current = entriesRef.current.length > 1;
+          committed.current = !columnsRef.current && entriesRef.current.length > 1;
         },
         onPanResponderMove: (_evt, g) => {
           if (!committed.current) return;
@@ -396,17 +460,29 @@ export function NavHost({ initial, render }: NavHostProps) {
 
   const stack = useMemo(() => entries.map((entry) => entry.screen), [entries]);
   const canGoBack = stack.length > 1;
+  const topScreen = stack[stack.length - 1];
+  const selectedSessionId = topScreen?.name === 'Chat' && typeof topScreen.params?.sessionId === 'string'
+    ? topScreen.params.sessionId : undefined;
   const value = useMemo<NavContextValue>(
     () => ({
       stack,
       push,
       pop,
+      popToRoot,
       reset,
       canGoBack,
+      selectedSessionId,
     }),
-    [stack, push, pop, reset, canGoBack],
+    [stack, push, pop, popToRoot, reset, canGoBack, selectedSessionId],
   );
 
+  const popList = (key: number) => {
+    const index = columnsRef.current?.masterIndex;
+    if (index === undefined || index < 1 || entriesRef.current[index]?.key !== key) return;
+    interrupt();
+    setMotionEpoch(epoch => epoch + 1);
+    updateEntries(entriesRef.current.slice(0, index));
+  };
   const topIndex = stack.length - 1;
 
   return (
@@ -414,18 +490,32 @@ export function NavHost({ initial, render }: NavHostProps) {
       <View style={styles.root} {...pan.panHandlers}>
         {entries.map((entry, i) => {
           const isTop = i === topIndex;
+          const isMaster = columns?.masterIndex === i;
+          const visible = isTop || isMaster;
+          // Retain the same parent and entry keys at every size. Hidden chats
+          // stay mounted, but only the current Chat receives active=true.
+          const layoutStyle: StyleProp<ViewStyle> = columns
+            ? isMaster
+              ? {left: 0, right: columns.detailWidth, borderRightWidth: StyleSheet.hairlineWidth, borderRightColor: tv.colors.border}
+              : isTop ? {left: columns.masterWidth, right: 0} : {display: 'none'}
+            : undefined;
           return (
             <ScreenPane
               key={entry.key}
-              active={isTop}
-              covered={!isTop}
-              width={width}
+              active={visible}
+              covered={!isTop && !columns}
+              width={isMaster && columns ? columns.masterWidth : paneWidth}
+              layoutStyle={layoutStyle}
+              testID={columns && visible ? (isMaster ? 'navigation-master' : 'navigation-detail') : undefined}
               dragX={isTop && canGoBack ? dragX : undefined}
               animateEnter={entry.animateEnter}
               motionEpoch={motionEpoch}
               reduceMotion={reduceMotion}
             >
-              {render(entry.screen, isTop)}
+              <NavContext.Provider value={{...value, column: isMaster ? 'master' : columns && isTop ? 'detail' : undefined,
+                ...(isMaster ? {canGoBack: i > 0, pop: () => popList(entry.key)} : {})}}>
+                {render(entry.screen, visible)}
+              </NavContext.Provider>
             </ScreenPane>
           );
         })}

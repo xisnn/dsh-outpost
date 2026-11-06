@@ -77,11 +77,12 @@ export function docxHtmlToBlocks(html: string): DocxBlock[] {
 }
 
 /** 根据文件名判断用哪种查看方式 */
-export type DocKind = 'md' | 'docx' | 'sheet' | 'unsupported';
+export type DocKind = 'md' | 'text' | 'docx' | 'sheet' | 'unsupported';
 
 export function docKindOf(name: string): DocKind {
   const ext = name.toLowerCase().split('.').pop() ?? '';
   if (['md', 'markdown'].includes(ext)) return 'md';
+  if (['txt', 'json', 'jsonc', 'log', 'yaml', 'yml', 'toml', 'ini', 'xml', 'html', 'htm', 'css', 'js', 'jsx', 'mjs', 'cjs', 'ts', 'tsx', 'py', 'sh', 'ps1', 'sql'].includes(ext)) return 'text';
   if (ext === 'docx') return 'docx';
   if (['xlsx', 'xls', 'csv'].includes(ext)) return 'sheet';
   return 'unsupported';
@@ -90,5 +91,5 @@ export function docKindOf(name: string): DocKind {
 /** 这些扩展名能内置查看 */
 export function canPreviewInside(name: string): boolean {
   const k = docKindOf(name);
-  return k === 'md' || k === 'docx' || k === 'sheet';
+  return k !== 'unsupported';
 }

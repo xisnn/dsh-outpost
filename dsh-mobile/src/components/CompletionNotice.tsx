@@ -2,8 +2,8 @@
  * 管家完成提醒：派活跑完之后，先把结果折叠起来，
  * 提示用户「管家已完成 · 点开查看」，而不是一股脑显示一大段。
  *
- * 只用于「这一轮里确实派过活」的情况 —— 闲聊模式的普通回复直接显示，
- * 不做这个拦截（否则每句话都要点一下，很烦）。
+ * 只用于本轮收到明确任务完成通知后的汇总正文。
+ * 普通回复、派活过程都直接显示，不取决于当前输入模式。
  */
 import React, { useMemo, useState } from 'react';
 import { StyleSheet, Text, View } from 'react-native';
@@ -23,6 +23,8 @@ export function CompletionNotice({
   const tv = useTheme();
   const styles = useMemo(() => makeStyles(tv), [tv]);
   const [open, setOpen] = useState(false);
+
+  if (!Number.isFinite(taskCount) || taskCount <= 0) return <>{children}</>;
 
   return (
     <View style={styles.wrap}>

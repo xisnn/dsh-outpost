@@ -17,6 +17,10 @@ import { UploadApi } from '../core/rpc/upload';
 import { WorkspaceApi } from '../core/rpc/workspace';
 import { DirectoryPickerApi } from '../core/rpc/directory';
 import {
+  ConversationActionsApi, formatFileMention, parseHostQueue, replyForkPoint,
+  type HostQueueItem, type HostQueueSnapshot, type ReplyForkPoint,
+} from './conversationActions';
+import {
   listButlerTasks,
   getButlerTask,
   createButlerTask,
@@ -303,6 +307,37 @@ export interface StoreOptions {
   random?: () => number;
 }
 
+/** Replay the installed dsh-agent-loop inbox fold on the inclusive fork prefix.
+ * removedCount omitted means zero, not delete-to-end; outcome does not alter splice.
+ * Reject malformed coordinates/identities even when a later splice would hide them.
+ */
+function assertEmptyForkInbox(records: readonly EventRecord[], atSeq: number): void {
+  const inbox: Record<'next-turn' | 'next-step', unknown[]> = {'next-turn': [], 'next-step': []};
+  for (const {event} of [...records].sort((a, b) => a.event.seq - b.event.seq)) {
+    if (event.seq > atSeq) break;
+    if (event.type !== 'agent/inbox/spliced') {
+      if (event.type.startsWith('agent/inbox/')) throw new Error('切点包含未知 inbox 事件');
+      continue;
+    }
+    const splice = event.data;
+    const target = splice.target;
+    const removed = splice.removedCount === undefined ? 0 : splice.removedCount;
+    if ((target !== 'next-turn' && target !== 'next-step') ||
+        !Number.isSafeInteger(splice.start) || typeof splice.start !== 'number' || splice.start < 0 ||
+        !Number.isSafeInteger(removed) || typeof removed !== 'number' || removed < 0 ||
+        !Array.isArray(splice.inserted) || (splice.outcome !== undefined && splice.outcome !== 'canceled')) {
+      throw new Error(`切点 inbox splice 无效 (seq ${event.seq})`);
+    }
+    const slot = inbox[target];
+    if (splice.start > slot.length || splice.start + removed > slot.length) throw new Error(`切点 inbox splice 越界 (seq ${event.seq})`);
+    // Validate inserted messages independently, including messages removed by later events.
+    parseHostQueue({kind: 'sequenced', asOfSeq: event.seq, values: {inbox: {'next-turn': splice.inserted, 'next-step': []}}}, 'fork-prefix');
+    slot.splice(splice.start, removed, ...splice.inserted);
+    parseHostQueue({kind: 'sequenced', asOfSeq: event.seq, values: {inbox}}, 'fork-prefix');
+  }
+  if (inbox['next-turn'].length || inbox['next-step'].length) throw new Error('该回答切点仍有排队消息，不能安全派生');
+}
+
 export class Store {
   readonly api: SessionApi;
   readonly models: ModelApi;
@@ -320,6 +355,225 @@ export class Store {
     cookie: string | undefined,
   ) => Promise<void>;
   private conn: DshConnection;
+  private readonly conversationApi: ConversationActionsApi;
+  private conversationClosed = false;
+  private readonly queueWithdrawals = new Map<string, Promise<HostQueueItem>>();
+  private readonly replyForks = new Map<string, Promise<{sessionId: string}>>();
+
+  /** Bind an action to this authenticated Host and the live owning chat stream. */
+  private conversationGuard(sessionId: string): () => void {
+    const entry = this.streams.get(sessionId), generation = entry?.generation;
+    const conn = this.conn, baseUrl = conn.baseUrl, cookie = conn.currentCookie;
+    const assertCurrent = () => {
+      if (this.conversationClosed || this.authInvalidated || this.connection !== 'connected' ||
+          !entry || !entry.handle || entry.connecting || entry.retryTimer || this.streams.get(sessionId) !== entry || entry.generation !== generation ||
+          entry.address?.kind === 'subagent' || this.sessions.some(row => row.sessionId === sessionId && row.origin === 'subagent') ||
+          conn !== this.conn || baseUrl !== conn.baseUrl || cookie !== conn.currentCookie) {
+        throw new Error('会话连接已变化，请返回当前会话重试');
+      }
+    };
+    assertCurrent();
+    return assertCurrent;
+  }
+
+  /** A write receipt survives closing the page, but never a changed Host/auth identity. */
+  private async conversationContext(sessionId: string) {
+    const assertCurrent = this.conversationGuard(sessionId);
+    const conn = this.conn, baseUrl = conn.baseUrl, cookie = conn.currentCookie;
+    const assertHost = () => {
+      if (this.conversationClosed || this.authInvalidated || this.conn !== conn ||
+          conn.baseUrl !== baseUrl || conn.currentCookie !== cookie) {
+        throw new Error('服务身份已变化，操作结果不可用于当前连接');
+      }
+    };
+    try {
+      const binding = await this.loadPendingBinding(baseUrl);
+      assertCurrent();
+      await this.verifyPendingBinding(binding, baseUrl, cookie);
+      assertCurrent();
+    } catch (error) {
+      if (isAuthFailure(error) || isForbiddenRejection(error)) this.markAuthTerminal(error);
+      throw error;
+    }
+    const api = new ConversationActionsApi({
+      call: async <T,>(endpoint: string, args: Record<string, unknown>): Promise<T> => {
+        const request = args.request as {sessionId?: string} | undefined;
+        const sourceRead = request?.sessionId === sessionId && endpoint !== 'session/fork' && endpoint !== 'session/updateQueue';
+        // New fork projections do not require the original page to remain open.
+        if (request?.sessionId === sessionId) assertCurrent();
+        else assertHost();
+        if (endpoint === 'session/fork') this.assertForkConversation(sessionId);
+        const cursor = this.streams.get(sessionId)?.cursor ?? -1;
+        try {
+          const result = await conn.call<T>(endpoint, args);
+          if (sourceRead) assertCurrent();
+          else assertHost();
+          if (sourceRead && endpoint === 'session/projections' && parseHostQueue(result, sessionId).asOfSeq < cursor) {
+            throw new Error('Host 队列投影已过期，请刷新后重试');
+          }
+          return result;
+        } catch (error) {
+          if (isAuthFailure(error) || isForbiddenRejection(error)) this.markAuthTerminal(error);
+          throw error;
+        }
+      },
+    });
+    return {api, assertCurrent, assertHost};
+  }
+
+  async conversationQueue(sessionId: string): Promise<HostQueueSnapshot> {
+    return (await this.conversationContext(sessionId)).api.queue(sessionId);
+  }
+
+  /** Single-flight per durable item. Never infer success from its later disappearance. */
+  withdrawQueuedText(sessionId: string, itemId: string): Promise<HostQueueItem> {
+    const key = JSON.stringify([sessionId, itemId]);
+    const existing = this.queueWithdrawals.get(key);
+    if (existing) return existing;
+    const task = (async () => (await this.conversationContext(sessionId)).api.removeQueuedText(sessionId, itemId))();
+    this.queueWithdrawals.set(key, task);
+    void task.finally(() => { if (this.queueWithdrawals.get(key) === task) this.queueWithdrawals.delete(key); }).catch(() => {});
+    return task;
+  }
+
+  private assertForkConversation(sessionId: string, records: Iterable<EventRecord> = this.streams.get(sessionId)?.records.values() ?? []): void {
+    if (this.butlerOwnership.isManaged(sessionId)) throw new Error('Host 管理的管家会话不能派生');
+    for (const record of records) {
+      if (record.event.type !== 'user/message') continue;
+      const data = record.event.data;
+      const content = data.content ?? (data.message as {content?: unknown} | undefined)?.content;
+      if (Array.isArray(content) && content.some(part => part?.type === 'text' && typeof part.text === 'string' && isPhoneButlerControlMessage(part.text))) {
+        throw new Error('管家控制会话不能派生');
+      }
+    }
+  }
+
+  private conversationForkPoint(records: EventRecord[], cursor: number, hasMore: boolean, reply: {turn: number; step: number}): ReplyForkPoint {
+    if (records.length > 20_000) return {eligible: false, reason: '历史过长，请先缩小会话范围'};
+    if (!Number.isSafeInteger(reply.turn) || reply.turn < 0 || !Number.isSafeInteger(reply.step) || reply.step < 0) {
+      return {eligible: false, reason: '缺少持久回答轮次和步骤'};
+    }
+    const seqs = records.filter(record => record.event?.type === 'assistant/message' &&
+      record.event.data?.turn === reply.turn && record.event.data?.step === reply.step).map(record => record.event.seq);
+    const point = replyForkPoint(records, seqs.length ? Math.max(...seqs) : -1, {cursor, hasMore, synchronized: true});
+    if (!point.eligible) return point;
+    try {
+      assertEmptyForkInbox(records, point.atSeq);
+      return point;
+    } catch (error) {
+      return {eligible: false, reason: error instanceof Error ? error.message : String(error)};
+    }
+  }
+
+  canForkReply(sessionId: string, reply: {turn: number; step: number}): boolean {
+    try {
+      this.conversationGuard(sessionId)();
+      this.assertForkConversation(sessionId);
+      const entry = this.streams.get(sessionId)!;
+      return this.conversationForkPoint([...entry.records.values()], entry.cursor, this.getChat(sessionId).hasOlder, reply).eligible;
+    } catch { return false; }
+  }
+
+  /** A completed visible final step may request read-only backfill before strict validation. */
+  canPrepareForkReply(sessionId: string, reply: {turn: number; step: number}): boolean {
+    try {
+      this.conversationGuard(sessionId)();
+      this.assertForkConversation(sessionId);
+      const chat = this.getChat(sessionId);
+      if (!chat.hasOlder) return this.canForkReply(sessionId, reply);
+      const turn = chat.turns.find(row => row.turn === reply.turn);
+      const last = turn?.steps[turn.steps.length - 1];
+      return turn?.reason === 'completed' && !turn.running && last?.step === reply.step &&
+        last.blocks.some(block => block.kind === 'text' && !!block.text.trim());
+    } catch {return false;}
+  }
+
+  /** Load a bounded, dense durable prefix; never activate the fork or send a prompt. */
+  forkReply(sessionId: string, reply: {turn: number; step: number}): Promise<{sessionId: string}> {
+    const key = JSON.stringify([sessionId, reply.turn, reply.step]);
+    const existing = this.replyForks.get(key);
+    if (existing) return existing;
+    const task = this.runReplyFork(sessionId, reply);
+    this.replyForks.set(key, task);
+    void task.finally(() => { if (this.replyForks.get(key) === task) this.replyForks.delete(key); }).catch(() => {});
+    return task;
+  }
+
+  private async runReplyFork(sessionId: string, reply: {turn: number; step: number}): Promise<{sessionId: string}> {
+    this.assertForkConversation(sessionId);
+    const {api, assertCurrent, assertHost} = await this.conversationContext(sessionId);
+    const entry = this.streams.get(sessionId)!;
+    const cursor = entry.cursor;
+    const records = new Map(entry.records);
+    let hasMore = this.getChat(sessionId).hasOlder;
+    let pages = 0;
+    // Even hasMore:false cannot excuse a missing middle prefix.
+    while (hasMore || records.size !== cursor + 1 || !records.has(0)) {
+      assertCurrent();
+      if (++pages > 32 || records.size > 20_000) throw new Error('历史过长，请先加载完整历史后再派生');
+      let beforeSeq = 0;
+      while (beforeSeq <= cursor && records.has(beforeSeq)) beforeSeq++;
+      const later = [...records.keys()].filter(seq => seq > beforeSeq);
+      beforeSeq = later.length ? Math.min(...later) : cursor + 1;
+      const page = await this.api.page({sessionId, address: entry.address, throughSeq: cursor, beforeSeq, maxMessages: 200});
+      assertCurrent();
+      const previousSize = records.size;
+      for (const record of page.records) {
+        const seq = record?.event?.seq;
+        if (!Number.isSafeInteger(seq) || seq < 0 || seq > cursor || seq >= beforeSeq) throw new Error('分页历史 seq 无效');
+        const prior = records.get(seq);
+        if (prior && JSON.stringify(prior) !== JSON.stringify(record)) throw new Error('分页历史 seq 冲突');
+        records.set(seq, record);
+      }
+      hasMore = page.hasMore;
+      if (records.size === previousSize) throw new Error('历史分页未补全，不能派生');
+    }
+    if (records.size > 20_000) throw new Error('历史过长，请先加载完整历史后再派生');
+    // Concurrent stream events must be included in the same dense validation.
+    for (const [seq, record] of entry.records) {
+      const prior = records.get(seq);
+      if (prior && JSON.stringify(prior) !== JSON.stringify(record)) throw new Error('持久历史发生变化');
+      records.set(seq, record);
+    }
+    const history = [...records.values()];
+    this.assertForkConversation(sessionId, history);
+    const point = this.conversationForkPoint(history, entry.cursor, false, reply);
+    if (!point.eligible) throw new Error(point.reason);
+    assertCurrent();
+    const fork = await api.forkAfterReply(sessionId, history, point.replySeq, {cursor: entry.cursor, hasMore: false, synchronized: true});
+    try {
+      assertHost();
+      const queue = await api.queue(fork.sessionId);
+      if (queue.asOfSeq < point.atSeq || queue.items.length) throw new Error('派生会话队列非空或投影不完整');
+      assertHost();
+    } catch (error) {
+      throw Object.assign(new Error(`已创建派生会话，但无法确认队列为空；未自动打开，请勿重复创建。${error instanceof Error ? error.message : String(error)}`),
+        {forkSessionId: fork.sessionId, forkQueueUnsafe: true});
+    }
+    return fork;
+  }
+
+  async conversationReferences(sessionId: string, kind: 'file' | 'session', query: string) {
+    const assertCurrent = this.conversationGuard(sessionId);
+    try {
+      if (kind === 'file') {
+        const rows = await this.conversationApi.fileReferences(sessionId, query);
+        assertCurrent();
+        return rows.map(row => ({key: `file:${row.path}`, label: row.path.replace(/\/$/, '').split('/').pop() || row.path,
+          detail: row.path, mention: formatFileMention(row), directory: row.kind === 'directory'}));
+      }
+      const rows = await this.conversationApi.sessionReferences(sessionId, query);
+      assertCurrent();
+      const visible = new Set(this.visibleSessions(this.sessions).filter(row => row.origin !== 'subagent' || row.parentSessionId === sessionId).map(row => row.sessionId));
+      return rows.filter(row => row.sessionId !== sessionId && visible.has(row.sessionId)).map(row => ({
+        key: `session:${row.sessionId}`, label: row.displayTitle ?? row.label, detail: row.cwd,
+        mention: row.mention,
+      }));
+    } catch (error) {
+      if (isAuthFailure(error) || isForbiddenRejection(error)) this.markAuthTerminal(error);
+      throw error;
+    }
+  }
 
   connection: ConnectionState = 'idle';
   connectionError?: string;
@@ -410,6 +664,7 @@ export class Store {
     this.upload = new UploadApi(conn);
     this.workspace = new WorkspaceApi(conn);
     this.dirs = new DirectoryPickerApi(conn);
+    this.conversationApi = new ConversationActionsApi(conn);
     this.pendingSends = opts.pendingSendStore ?? createDefaultPendingSendStore();
     this.loadPendingBinding = opts.loadPendingBinding ?? defaultLoadPendingBinding;
     this.verifyPendingBinding = opts.verifyPendingBinding ?? defaultVerifyPendingBinding;
@@ -1514,13 +1769,17 @@ export class Store {
     }
   }
 
-  /**
-   * 重命名会话。
-   *
-   * DSH 有 `session/rename`，改完会把新标题写进会话投影，
-   * 所以这里也顺手更新本地的 sessions 缓存，列表立刻能看到新名字
-   * （不用等下一次 loadSessions）。
-   */
+  /** Optional Host index; never rebuilds chat history or changes authorization on success. */
+  async searchSessions(query: string) {
+    if (this.authInvalidated || this.connection !== 'connected') throw new Error('聊天连接不可用');
+    try {return await this.api.search(query);}
+    catch (error) {
+      if (isAuthFailure(error) || isForbiddenRejection(error)) this.markAuthTerminal(error);
+      throw error;
+    }
+  }
+
+  /** 重命名后同步本地投影，列表无需等待再次加载。 */
   async renameSession(sessionId: string, title: string): Promise<void> {
     const next = title.trim();
     if (!next) throw new Error('名字不能为空');
@@ -2672,6 +2931,7 @@ export class Store {
   }
 
   close(): void {
+    this.conversationClosed = true;
     if (this.emitTimer !== null) {
       clearTimeout(this.emitTimer);
       this.emitTimer = null;

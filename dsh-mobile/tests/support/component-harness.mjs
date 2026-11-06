@@ -25,7 +25,7 @@ export function componentHarness(file, exported, initialProps, extraModules = {}
   let cursor = 0, refCursor = 0, props = { ...initialProps }, tree;
   const react = {
     createElement: (type, props, ...children) => ({ type, props: props || {}, children }),
-    useMemo: fn => fn(), useEffect() {},
+    useMemo: fn => fn(), useCallback: fn => fn, useEffect() {},
     useRef(value) { const index = refCursor++; return refs[index] ??= { current: value }; },
     useState(initial) {
       const index = cursor++;

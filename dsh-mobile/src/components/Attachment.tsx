@@ -48,7 +48,7 @@ export function AttachmentGallery({ sessionId, parts, api }: { sessionId: string
         </View>
       </View>)}
       <ImageViewer visible={opened?.api === api && opened.sessionId === sessionId} initialIndex={opened?.index ?? 0}
-        images={images.map((image, index) => ({ uri: statuses[index].uri, caption: image.name || `图片 ${index + 1}`,
+        images={images.map((image, index) => ({ id: image.attachmentId, uri: statuses[index].uri, caption: image.name || `图片 ${index + 1}`,
           failed: statuses[index].phase === 'failed', onRetry: () => retry(index),
           onError: () => { const uri = statuses[index].uri; if (uri) failed(index, uri); },
         }))} onClose={() => setOpened(null)} />

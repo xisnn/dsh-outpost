@@ -23,6 +23,7 @@ import { MotionPressable as Pressable } from './MotionPressable';
 import { useTheme } from '../design/theme';
 import { copyTextToClipboard } from './clipboard';
 import { maskCredentials } from '../core/credentialDisplay';
+import { LocalExportPanel } from './LocalExportPanel';
 
 /** 复制成功后的反馈时长：够看到，又不至于让面板卡在那里 */
 const COPIED_MS = 700;
@@ -31,15 +32,20 @@ export function MessageActionSheet({
   visible,
   text,
   onClose,
+  onFork,
 }: {
   visible: boolean;
   /** 要复制的消息正文（不含思考/工具日志） */
   text: string;
   onClose: () => void;
+  /** Only present for a durable, eligible assistant reply. */
+  onFork?: () => void;
 }) {
   const tv = useTheme();
   const styles = useMemo(() => makeStyles(tv), [tv]);
   const [copied, setCopied] = useState<'original' | 'hidden' | null>(null);
+  const [exporting, setExporting] = useState(false);
+  const fileName = useMemo(() => `outpost-message-${Date.now()}.md`, [visible, text]);
   const maskedText = useMemo(() => maskCredentials(text), [text]);
   const protectedText = maskedText !== text;
   const originalLabel = protectedText ? '复制原文（含凭据）' : '复制全文';
@@ -47,6 +53,7 @@ export function MessageActionSheet({
 
   useEffect(() => {
     setCopied(null);
+    setExporting(false);
     if (timer.current) clearTimeout(timer.current);
     timer.current = null;
   }, [visible, text]);
@@ -91,7 +98,7 @@ export function MessageActionSheet({
       */}
       <View style={styles.backdrop}>
         <Pressable feedback="none" style={StyleSheet.absoluteFill} onPress={onClose} accessible={false} />
-        <View style={styles.sheet}>
+        {exporting ? <LocalExportPanel title="导出为 Markdown" text={text} fileName={fileName} onClose={() => setExporting(false)} /> : <View style={styles.sheet}>
           <View style={styles.handle} />
           {preview ? (
             <Text style={styles.preview} numberOfLines={2}>
@@ -121,6 +128,16 @@ export function MessageActionSheet({
             </Text>
           </Pressable>
 
+          <Pressable onPress={() => {
+            if (timer.current) clearTimeout(timer.current);
+            timer.current = null;
+            setExporting(true);
+          }} accessibilityRole="button" accessibilityLabel="导出为 Markdown" style={styles.row}>
+            <Text style={styles.rowText}>导出为 Markdown</Text>
+          </Pressable>
+          {onFork ? <Pressable onPress={onFork} accessibilityRole="button" accessibilityLabel="从此回答分叉继续" style={styles.row}>
+            <Text style={styles.rowText}>从此回答分叉继续</Text>
+          </Pressable> : null}
           <View style={styles.sep} />
 
           <Pressable
@@ -134,7 +151,7 @@ export function MessageActionSheet({
           >
             <Text style={[styles.rowText, { color: tv.colors.textSecondary }]}>取消</Text>
           </Pressable>
-        </View>
+        </View>}
       </View>
     </Modal>
   );
@@ -154,6 +171,9 @@ function makeStyles(tv: ReturnType<typeof useTheme>) {
       backgroundColor: C.bgRaised,
       borderRadius: tv.radius.lg,
       overflow: 'hidden',
+      maxWidth: 560,
+      width: '100%',
+      alignSelf: 'center',
       borderWidth: StyleSheet.hairlineWidth,
       borderColor: C.border,
     },

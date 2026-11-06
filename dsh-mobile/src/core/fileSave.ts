@@ -54,7 +54,9 @@ export async function saveToDownloads(fsPath: string, name: string): Promise<Sav
     if (Number(Platform.Version) >= 29) {
       const uri = await ReactNativeBlobUtil.MediaCollection.copyToMediaStore(
         {
-          name: stripExtension(safeName),
+          // MediaStore receives DISPLAY_NAME verbatim; keep extensions such as
+          // .md even when the device has no MIME-to-extension mapping for them.
+          name: safeName,
           parentFolder: '',
           mimeType: mime,
         },

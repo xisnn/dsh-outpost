@@ -10,7 +10,7 @@ import ts from 'typescript';
 // between an interrupted pop, a new push and unmount are covered.
 const require = createRequire(import.meta.url);
 function fixture() {
-  const env = { reduced: false, width: 400, animations: [], back: null };
+  const env = { reduced: false, width: 400, height: 800, fontScale: 1, keyboard: {}, animations: [], back: null };
   let owner;
   const same = (a, b) => a && b && a.length === b.length && a.every((v, i) => Object.is(v, b[i]));
   const react = {
@@ -95,7 +95,13 @@ function fixture() {
       return { remove: () => { env.back = null; } };
     } },
     PanResponder: { create: (handlers) => ({ panHandlers: handlers }) },
-    useWindowDimensions: () => ({ width: env.width }),
+    useWindowDimensions: () => ({ width: env.width, height: env.height, fontScale: env.fontScale }),
+    Platform: {OS: 'android'},
+    Dimensions: {get: () => ({width: env.width, height: env.height})},
+    Keyboard: {isVisible: () => false, addListener: (name, fn) => {
+      env.keyboard[name] = fn;
+      return {remove: () => {delete env.keyboard[name];}};
+    }},
     StyleSheet: { create: (styles) => styles, absoluteFillObject: {}, hairlineWidth: 1 },
     View: 'View', Pressable: 'Pressable', Text: 'Text',
   };
@@ -139,9 +145,10 @@ function fixture() {
       },
     };
   }
+  modules['../core/adaptiveNavigation'] = load('../src/core/adaptiveNavigation.ts');
   const nav = load('../src/nav/NavHost.tsx');
-  function host(render = (screen) => screen.name) {
-    const result = mount(nav.NavHost, { initial: { name: 'Home' }, render });
+  function host(render = (screen) => screen.name, rootIsList = false) {
+    const result = mount(nav.NavHost, { initial: { name: 'Home' }, render, rootIsList });
     result.render();
     Object.defineProperties(result, {
       nav: { get: () => result.tree.props.value },
@@ -230,6 +237,20 @@ test('rapid pops, same-screen reset and Android back preserve stack identity', (
   assert.deepEqual(names(h), ['Home']); h.unmount();
 });
 
+test('returning to root preserves its key and defeats a late pop callback', () => {
+  const f = fixture(); const h = f.host();
+  const key = h.panes[0].props.key;
+  h.nav.push('A'); h.nav.push('B'); h.render();
+  h.nav.pop(); const old = f.env.animations.at(-1);
+  h.nav.popToRoot(); h.render();
+  assert.deepEqual(names(h), ['Home']);
+  assert.equal(h.panes[0].props.key, key);
+  old.callback({ finished: true }); h.render();
+  assert.equal(h.panes[0].props.key, key);
+  h.nav.popToRoot(); h.render(); assert.equal(h.panes[0].props.key, key);
+  h.unmount();
+});
+
 test('cancelled edge drags settle; new navigation and unmount stop old animations', () => {
   const f = fixture(); const h = f.host();
   h.nav.push('A'); h.render();
@@ -288,6 +309,54 @@ test('width/preference changes complete pending pops without stale callbacks', (
   assert.equal(f.env.animations.at(-1).config.toValue, 700);
   f.env.animations.at(-1).finish(); h.render();
   assert.deepEqual(names(h), ['Home']); h.unmount();
+});
+
+test('wide columns retain entry keys through resizing and keep only the current chat active', () => {
+  const f=fixture(); const seen=[];
+  const h=f.host((screen,active)=>{seen.push([screen.name,active]);return screen.name;},true);
+  h.nav.push('Sessions');h.nav.push('Chat',{sessionId:'first'});h.nav.push('Chat',{sessionId:'second'});h.render();
+  const keys=Array.from(h.panes,p=>p.props.key);
+  f.env.width=1200;f.env.height=800;seen.length=0;h.render();h.render();
+  assert.deepEqual(Array.from(h.panes,p=>p.props.key),keys);
+  assert.deepEqual(Array.from(h.panes,p=>p.props.active),[false,true,false,true]);
+  assert.equal(h.panes[1].props.covered,false);assert.equal(h.panes[2].props.layoutStyle.display,'none');
+  assert.equal(h.panes[3].props.layoutStyle.left,336);
+  assert.equal(h.panes[1].props.children.props.value.column,'master');
+  assert.equal(h.panes[3].props.children.props.value.column,'detail');
+  assert.equal(h.panes[1].props.children.props.value.selectedSessionId,'second');
+  assert.equal(h.gesture.onMoveShouldSetPanResponderCapture(touch(15),{dx:10,dy:0}),false);
+  const master=f.mount(h.panes[1].type,h.panes[1].props);const tree=master.render();
+  assert.equal(tree.props.pointerEvents,'auto');assert.equal(tree.props.accessibilityElementsHidden,false);
+  f.env.width=400;h.render();h.render();assert.deepEqual(Array.from(h.panes,p=>p.props.key),keys);
+  assert.deepEqual(Array.from(h.panes,p=>p.props.active),[false,false,false,true]);
+  assert.equal(h.gesture.onMoveShouldSetPanResponderCapture(touch(15),{dx:10,dy:0}),true);
+  master.unmount();h.unmount();assert.equal(Object.keys(f.env.keyboard).length,0);
+});
+
+test('wide list selection reuses an existing chat owner and list back targets the list', () => {
+  const f=fixture();f.env.width=1200;const h=f.host(undefined,true);
+  h.nav.push('Sessions');h.render();h.nav.push('Chat',{sessionId:'A'});h.render();
+  const key=h.panes[2].props.key;h.nav.push('Chat',{sessionId:'A',title:'updated'});h.render();
+  assert.equal(h.panes.length,3);assert.equal(h.panes[2].props.key,key);
+  h.nav.push('Chat',{sessionId:'B'});h.render();h.nav.push('Chat',{sessionId:'A'});h.render();
+  assert.equal(h.panes.length,3);assert.equal(h.panes[2].props.key,key);
+  const scoped=h.panes[1].props.children.props.value;assert.equal(scoped.canGoBack,true);
+  scoped.pop();h.render();assert.deepEqual(names(h),['Home']);
+  scoped.pop();h.render();assert.deepEqual(names(h),['Home'],'stale list callback ignored');h.unmount();
+});
+
+test('docked keyboard preserves wide columns; short windows and large fonts use the original stack', () => {
+  const f=fixture();f.env.width=1200;const h=f.host(undefined,true);h.nav.push('Chat');h.render();h.render();
+  const key=h.panes[1].props.key;assert.equal(h.panes[0].props.active,true);
+  f.env.height=450;f.env.keyboard.keyboardDidShow({endCoordinates:{height:350}});h.render();
+  assert.equal(h.panes[0].props.active,true);assert.equal(h.panes[1].props.key,key);
+  f.env.height=150;h.render();assert.equal(h.panes[0].props.active,false,'same-width real height reduction must requalify');
+  f.env.height=450;h.render();assert.equal(h.panes[0].props.active,true);
+  f.env.keyboard.keyboardDidHide();h.render();h.render();assert.equal(h.panes[0].props.active,false);
+  f.env.height=800;f.env.fontScale=1.5;h.render();assert.equal(h.panes[0].props.active,false);
+  f.env.fontScale=1;h.render();assert.equal(h.panes[0].props.active,true);
+  f.env.reduced=true;h.render();assert.equal(f.env.back(),true);h.render();assert.deepEqual(names(h),['Home']);h.unmount();
+  const butler=f.host(undefined,false);butler.nav.push('Chat');butler.render();assert.equal(butler.panes[0].props.active,false);butler.unmount();
 });
 
 test('segmented cancellation returns to selection and confirmed release/accessibility still select', () => {

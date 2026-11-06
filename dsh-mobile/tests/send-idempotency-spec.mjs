@@ -191,7 +191,7 @@ await check('🔴 若换新 id → 服务端会当成两条（反证）', async 
 
 
 await check('ChatScreen 文本/附件统一走 store.sendPending', () => {
-  return /store\.sendPending\(sessionId,\s*text,\s*pendingAttachments\)/.test(chatSrc)
+  return /store\.sendPending\(sessionId,\s*text,\s*pendingAttachments,\s*mode\)/.test(chatSrc)
     ? true
     : 'ChatScreen 没有把文本和附件统一交给 store.sendPending';
 });

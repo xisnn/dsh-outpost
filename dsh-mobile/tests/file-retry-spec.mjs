@@ -87,10 +87,12 @@ function harness(file, exported, modules, initialProps) {
   };
 }
 const file = { uri: 'file:///cache/result.md', fsPath: '/cache/result.md', name: 'result.md' };
-function cardHarness({ fetch, fs: fileSystem = {}, gateway = null, download, props = {} }) {
+const preview = load('core/filePreview.ts', {});
+function cardHarness({ fetch, fs: fileSystem = {}, gateway = null, download, props = {}, autoPreview = false, store = { fileBaseUrl: 'http://127.0.0.1:9', gatewayChannel: gateway } }) {
   return harness('components/FileCard.tsx', 'FileCard', {
     'react-native-blob-util': { default: { fs: fileSystem } },
-    '../App': { useApp: () => ({ store: { fileBaseUrl: 'http://127.0.0.1:9', gatewayChannel: gateway }, butlerWorkspace: '/workspace' }) },
+    '../App': { useApp: () => ({ store, butlerWorkspace: '/workspace' }) },
+    '../core/filePreview': { ...preview, isTextPreviewable: autoPreview ? preview.isTextPreviewable : () => false },
     '../core/fileUrl': { fetchRemoteFile: fetch, openLocalFile: async () => assert.fail('Markdown must use its viewer') },
     '../core/gatewayFiles': { downloadWorkspaceFile: download ?? (async () => assert.fail('Unexpected gateway download')) },
     './ImageViewer': { ImageViewer: 'ImageViewer' },
@@ -258,5 +260,98 @@ test('document failure without a retry callback exposes no inactive retry contro
   assert.match(h.text(), /读取失败/);
   assert.equal(retryButton(h), undefined);
   assert.doesNotMatch(h.text(), /下面的按钮/);
+  h.unmount();
+});
+
+test('text excerpt is bounded, inert and opens the complete verified document on tap', async () => {
+  let downloads = 0, hashes = 0;
+  const text = Array.from({ length: 40 }, (_, i) => `line ${i}`).join('\n') + '\nFULL_DOCUMENT_END';
+  const h = cardHarness({ autoPreview: true,
+    fetch: async () => { downloads++; return file; },
+    fs: { stat: async () => ({ size: 300 }), hash: async () => { hashes++; return 'expected'; }, readFile: async () => text },
+    props: { expectedSha256: 'expected', expectedSize: 300 },
+  });
+  h.render(); await flush(); h.render();
+  assert.match(h.text(), /line 0/); assert.doesNotMatch(h.text(), /line 8|FULL_DOCUMENT_END/);
+  assert.equal(viewer(h).props.visible, false, 'Auto preview never opens a modal');
+  cardButton(h).props.onPress(); await flush(); h.render();
+  assert.equal(downloads, 1); assert.equal(hashes, 2);
+  assert.equal(viewer(h).props.visible, true);
+  const d = documentHarness(viewer(h).props, async () => text);
+  d.render(); await flush(); d.render();
+  assert.match(d.find(n => n.type === 'MarkdownView').props.text, /FULL_DOCUMENT_END/);
+  d.unmount(); h.unmount();
+});
+
+test('automatic excerpt refuses a mismatched delivery before reading its contents', async () => {
+  let calls = 0;
+  const h = cardHarness({ autoPreview: true, props: { expectedSize: 3, expectedSha256: 'expected' },
+    fetch: async () => { calls++; return file; },
+    fs: { stat: async () => ({ size: 3 }), hash: async () => 'tampered', unlink: async () => {}, readFile: async () => assert.fail('Unverified bytes must not become an excerpt') },
+  });
+  h.render(); await flush(); h.render();
+  assert.equal(calls, 2); assert.match(h.text(), /文件内容与交付记录不一致/); assert.equal(viewer(h), undefined);
+  h.unmount();
+});
+
+test('late local excerpt reads cannot replace a different file at the same card position', async () => {
+  const reads = [];
+  const h = cardHarness({ autoPreview: true, fetch: async () => file,
+    fs: { stat: async () => ({ size: 3 }), readFile: () => new Promise(resolve => reads.push(resolve)) },
+  });
+  h.render(); await flush(); h.render(); assert.equal(reads.length, 1);
+  h.render({ path: 'other.md' }); await flush(); h.render(); assert.equal(reads.length, 2);
+  reads[0]('OLD_FILE_CONTENT'); await flush(); h.render(); assert.doesNotMatch(h.text(), /OLD_FILE_CONTENT/);
+  reads[1]('new file content'); await flush(); h.render(); assert.match(h.text(), /new file content/);
+  h.unmount();
+});
+
+test('known large and unsupported files do not download automatically', async () => {
+  for (const props of [{ expectedSize: preview.FILE_PREVIEW_MAX_BYTES + 1 }, { path: 'archive.zip' }]) {
+    const h = cardHarness({ autoPreview: true, props, fetch: () => assert.fail('Must wait for a tap') });
+    h.render(); await flush(); h.render();
+    assert.equal(cardButton(h).props.disabled, false); h.unmount();
+  }
+});
+
+test('preview failure stays retryable without starting a retry loop', async () => {
+  let calls = 0;
+  const h = cardHarness({ autoPreview: true, fetch: async () => { calls++; throw new Error('网络暂不可用'); } });
+  h.render(); await flush(); h.render();
+  assert.match(h.text(), /网络暂不可用/);
+  for (let i = 0; i < 3; i++) { h.render(); await flush(); }
+  assert.equal(calls, 1);
+  cardButton(h).props.onPress(); await flush(); h.render(); assert.equal(calls, 2); h.unmount();
+});
+
+test('old preview responses and stale tap handlers cannot reopen files after identity changes', async () => {
+  const store = { fileBaseUrl: 'http://127.0.0.1:9', fileCookie: 'identity-a' };
+  const requests = [];
+  const h = cardHarness({ autoPreview: true, store,
+    fetch: (...args) => new Promise(resolve => requests.push({ args, resolve })),
+    fs: { stat: async () => ({ size: 4 }), readFile: async p => p.includes('old') ? 'OLD_PRIVATE_TEXT' : 'new text' },
+  });
+  h.render(); const staleTap = cardButton(h).props.onPress;
+  store.fileCookie = 'identity-b'; h.render();
+  assert.equal(requests.length, 2);
+  requests[0].resolve({ ...file, fsPath: '/old/file' }); await flush(); h.render();
+  assert.doesNotMatch(h.text(), /OLD_PRIVATE_TEXT/); assert.equal(viewer(h), undefined);
+  staleTap(); assert.equal(requests.length, 2);
+  requests[1].resolve(file); await flush(); h.render(); assert.match(h.text(), /new text/);
+  h.unmount();
+});
+
+test('unmounted text preview ignores a late download', async () => {
+  let resolve;
+  const h = cardHarness({ autoPreview: true, fetch: () => new Promise(r => { resolve = r; }) });
+  h.render(); h.unmount(); resolve(file); await flush();
+});
+
+test('plain text and JSON viewer preserve the whole original content without interpreting HTML', async () => {
+  const text = '<script>doNotExecute()</script>\n' + '  raw value\n'.repeat(100) + 'FULL_TEXT_END';
+  const h = documentHarness({ visible: true, file: { ...file, name: 'result.json' } }, async () => text);
+  h.render(); await flush(); h.render();
+  const body = h.find(n => n.type === 'Text' && n.props.selectable && n.children.includes(text));
+  assert.ok(body); assert.equal(body.props.accessible, true); assert.equal(body.props.accessibilityLabel, text);
   h.unmount();
 });

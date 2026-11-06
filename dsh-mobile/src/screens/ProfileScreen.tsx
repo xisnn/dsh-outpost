@@ -18,6 +18,7 @@ import { themeLabels, type ThemeMode } from '../design/tokens';
 import { formatCount, formatMoney, sumWallets } from '../core/rpc/account';
 import { SectionLabel } from '../components/ui';
 import { ConfirmSheet } from '../components/ConfirmSheet';
+import { LocalDiagnosticsButton } from '../components/LocalDiagnosticsButton';
 import { SlideSegmented } from '../components/SlideSegmented';
 import { APP_VERSION, APP_VERSION_LABEL } from '../core/version';
 import { isNotifyEnabled, notifyDebugState, setNotifyEnabled, vibrateShort } from '../core/notify';
@@ -394,9 +395,9 @@ export function ProfileScreen({ active = true }: { active?: boolean }) {
         <View style={styles.themeCard}>
           <View style={styles.switchRow}>
             <View style={styles.switchBody}>
-              <Text style={styles.switchLabel}>任务完成时震动</Text>
+              <Text style={styles.switchLabel}>任务提醒</Text>
               <Text style={styles.hint}>
-                管家派出去的活干完时，手机会震两下，不用一直盯着屏幕
+                通知栏显示管家执行中和待处理的数量，任务完成时震动。应用被系统关闭后无法继续更新
               </Text>
             </View>
             <Switch
@@ -592,6 +593,9 @@ export function ProfileScreen({ active = true }: { active?: boolean }) {
             )}
           </Pressable>
 
+          <View style={styles.infoSep} />
+          <LocalDiagnosticsButton active={active} />
+
           {/* 下载中：进度条 + 「45% · 31.5/70.1 MB」 */}
           {updateProgress ? (
             <View style={styles.updateProgressWrap}>
@@ -753,6 +757,7 @@ function makeStyles(tv: ReturnType<typeof useTheme>) {
     root: { flex: 1, backgroundColor: C.bg },
 
     header: {
+      width: '100%', maxWidth: tv.layout.chatMaxWidth, alignSelf: 'center',
       paddingHorizontal: tv.layout.screenPadding,
       paddingBottom: tv.space.md,
       backgroundColor: C.bg,
@@ -765,9 +770,9 @@ function makeStyles(tv: ReturnType<typeof useTheme>) {
       fontWeight: tv.weight.bold,
       letterSpacing: -0.5,
     },
-    headerSub: { color: C.textTertiary, fontSize: tv.type.xs, marginTop: 2 },
+    headerSub: { color: C.textSecondary, fontSize: tv.type.xs, marginTop: 2 },
 
-    content: { paddingTop: tv.space.md },
+    content: { paddingTop: tv.space.md, width: '100%', maxWidth: tv.layout.chatMaxWidth, alignSelf: 'center' },
 
     balanceCard: {
       marginHorizontal: tv.layout.screenPadding,
@@ -793,7 +798,7 @@ function makeStyles(tv: ReturnType<typeof useTheme>) {
       justifyContent: 'space-between',
       paddingVertical: 3,
     },
-    moneyKey: { color: C.textTertiary, fontSize: tv.type.xs },
+    moneyKey: { color: C.textSecondary, fontSize: tv.type.xs },
     moneyVal: { color: C.textSecondary, fontSize: tv.type.xs },
 
     errorWrap: {
@@ -845,7 +850,7 @@ function makeStyles(tv: ReturnType<typeof useTheme>) {
       fontWeight: tv.weight.semibold,
       letterSpacing: -0.4,
     },
-    statLabel: { color: C.textTertiary, fontSize: tv.type.micro, marginTop: 3 },
+    statLabel: { color: C.textSecondary, fontSize: tv.type.xs, marginTop: 3 },
     statDivider: {
       height: StyleSheet.hairlineWidth,
       backgroundColor: C.border,
@@ -853,7 +858,7 @@ function makeStyles(tv: ReturnType<typeof useTheme>) {
       marginHorizontal: tv.space.lg,
     },
     statFoot: { paddingHorizontal: tv.space.lg },
-    statFootText: { color: C.textTertiary, fontSize: tv.type.micro, marginTop: 2 },
+    statFootText: { color: C.textSecondary, fontSize: tv.type.xs, marginTop: 2 },
 
     themeCard: {
       marginHorizontal: tv.layout.screenPadding,
@@ -879,7 +884,7 @@ function makeStyles(tv: ReturnType<typeof useTheme>) {
     segItemActive: { backgroundColor: C.accent },
     segText: { color: C.textSecondary, fontSize: tv.type.sm, fontWeight: tv.weight.medium },
     segTextActive: { color: C.onAccent, fontWeight: tv.weight.semibold },
-    hint: { color: C.textFaint, fontSize: tv.type.micro, marginTop: tv.space.sm, textAlign: 'center' },
+    hint: { color: C.textSecondary, fontSize: tv.type.xs, marginTop: tv.space.sm, textAlign: 'center' },
 
     switchRow: {
       flexDirection: 'row',
@@ -897,7 +902,7 @@ function makeStyles(tv: ReturnType<typeof useTheme>) {
       marginTop: tv.space.sm,
     },
     entryLabel: { color: C.text, fontSize: tv.type.base, flex: 1 },
-    entryMeta: { color: C.textFaint, fontSize: tv.type.xs, marginRight: tv.space.sm },
+    entryMeta: { color: C.textSecondary, fontSize: tv.type.xs, marginRight: tv.space.sm },
     entryChevron: { color: C.textFaint, fontSize: 22, marginTop: -2 },
 
     infoCard: {

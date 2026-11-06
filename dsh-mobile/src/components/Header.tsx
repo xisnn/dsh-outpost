@@ -13,12 +13,14 @@ import { useNav } from '../nav/NavHost';
 export function Header({
   title,
   subtitle,
+  metadata,
   right,
   showBack,
   compact,
 }: {
   title: string;
   subtitle?: string;
+  metadata?: React.ReactNode;
   right?: React.ReactNode;
   showBack?: boolean;
   compact?: boolean;
@@ -27,16 +29,19 @@ export function Header({
   const insets = useSafeAreaInsets();
   const nav = useNav();
   const back = showBack ?? nav.canGoBack;
-  const [sideWidth, setSideWidth] = useState(40);
+  const inColumn = nav.column !== undefined;
+  const [sideWidth, setSideWidth] = useState(44);
   const styles = useMemo(() => makeStyles(tv), [tv]);
 
   return (
     <View style={[styles.wrap, { paddingTop: insets.top + (compact ? 4 : 8) }]}>
       <View style={styles.row}>
-        <View style={[styles.left, { width: sideWidth }]}>
+        <View style={[styles.left, { width: inColumn ? (back ? 44 : 8) : sideWidth }]}>
           {back ? (
             <Pressable
               onPress={nav.pop}
+              accessibilityRole="button"
+              accessibilityLabel="返回上一页"
               style={({ pressed }: { pressed: boolean }) => [
                 styles.backBtn,
                 pressed ? { opacity: 0.55 } : null,
@@ -48,8 +53,8 @@ export function Header({
           ) : null}
         </View>
 
-        <View style={styles.center}>
-          <Text style={[styles.title, compact && styles.titleCompact]} numberOfLines={1}>
+        <View style={[styles.center, inColumn && styles.columnCenter]}>
+          <Text style={[styles.title, compact && styles.titleCompact, inColumn && styles.columnTitle]} numberOfLines={1}>
             {title}
           </Text>
           {subtitle ? (
@@ -57,11 +62,12 @@ export function Header({
               {subtitle}
             </Text>
           ) : null}
+          {metadata}
         </View>
 
         <View
           style={styles.right}
-          onLayout={event => setSideWidth(Math.max(40, event.nativeEvent.layout.width))}
+          onLayout={event => setSideWidth(Math.max(44, event.nativeEvent.layout.width))}
         >
           {right}
         </View>
@@ -86,8 +92,8 @@ function makeStyles(tv: ReturnType<typeof useTheme>) {
       paddingHorizontal: space.sm,
     },
     backBtn: {
-      width: 40,
-      height: 40,
+      width: 44,
+      height: 44,
       borderRadius: radius.sm,
       alignItems: 'center',
       justifyContent: 'center',
@@ -104,8 +110,10 @@ function makeStyles(tv: ReturnType<typeof useTheme>) {
       maxWidth: '100%',
     },
     titleCompact: { fontSize: type.base },
-    subtitle: { color: colors.textFaint, fontSize: type.micro, marginTop: 1 },
+    columnCenter: { alignItems: 'flex-start', paddingHorizontal: space.sm },
+    columnTitle: { textAlign: 'left', fontSize: type.lg },
+    subtitle: { color: colors.textSecondary, fontSize: type.xs, marginTop: 1 },
     // Mirror the measured action width on the left to center against the whole screen.
-    right: { minWidth: 40, maxWidth: '40%', alignItems: 'flex-end', justifyContent: 'center' },
+    right: { minWidth: 44, maxWidth: '40%', alignItems: 'flex-end', justifyContent: 'center' },
   });
 }

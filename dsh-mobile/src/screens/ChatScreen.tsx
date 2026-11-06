@@ -17,6 +17,12 @@ import { useApp } from '../App';
 import { useNav } from '../nav/NavHost';
 import { Header } from '../components/Header';
 import { ChatComposer } from '../components/ChatComposer';
+import {ReferenceSuggestions, type ReferenceChoice} from '../components/ReferenceSuggestions';
+import {HostQueuePanel} from '../components/HostQueuePanel';
+import {withdrawalRecovery, withdrawalScope, mergeWithdrawnDraft, type WithdrawalCopy} from '../core/withdrawalRecovery';
+import {mentionAt, insertReference, type ComposerSelection} from '../core/mentionDraft';
+import { useSharedComposer } from '../components/useSharedComposer';
+import { normalizeBaseUrl } from '../core/pairing';
 import { useTheme } from '../design/theme';
 import { layout, radius, space, type, weight } from '../design/tokens';
 import { AssistantText, UserBubble } from '../components/Message';
@@ -44,6 +50,7 @@ import { ButlerWorkspacePicker } from '../components/ButlerWorkspacePicker';
 import { FileCard } from '../components/FileCard';
 import { isImagePath } from '../core/filerefs';
 import type { ButlerMode } from '../core/butler';
+import { useButlerApprovalSessions } from '../components/useButlerApprovalSessions';
 import { ThinkingAccordion, ThinkingDots } from '../components/Thinking';
 import { ToolCard } from '../components/ToolCard';
 import { ModelSwitcher } from '../components/ModelSwitcher';
@@ -81,7 +88,7 @@ interface ChatItemRowProps {
   sessionId: string;
   uploadApi: ReturnType<typeof useApp>['store']['upload'];
   allowReveal?: boolean;
-  openMessageActions: (text: string) => void;
+  openMessageActions: (text: string, reply?: {turn: number; step: number}) => void;
   renderBlocks: (
     blocks: Block[],
     keyPrefix: string,
@@ -163,7 +170,7 @@ const ChatItemRow = React.memo(function ChatItemRow({
         {group.finalBlocks.length > 0 ? (
           <View>
             {renderBlocks(group.finalBlocks, `${item.key}-final`, {
-              onLongPressText: finalText ? () => openMessageActions(finalText) : undefined,
+              onLongPressText: finalText ? () => openMessageActions(finalText, group.finalStep === undefined ? undefined : {turn: item.turn, step: group.finalStep}) : undefined,
               turnRunning,
             })}
           </View>
@@ -171,14 +178,13 @@ const ChatItemRow = React.memo(function ChatItemRow({
       </View>
     );
   }
-  // 派过活的那一轮：管家的汇总默认折叠，点开才看
-  // （闲聊回复 delegated 为 false，直接显示，不打扰用户）
+  // 只有收到明确完成通知的管家汇总正文才折叠；派过活不等于已完成。
   const bodyText = buildAssistantCopyText(item.blocks);
-  if (item.delegated) {
+  if (doneTaskCount > 0 && !turnRunning) {
     return (
       <CompletionNotice taskCount={doneTaskCount}>
         {renderBlocks(item.blocks, item.key, {
-          onLongPressText: bodyText ? () => openMessageActions(bodyText) : undefined,
+          onLongPressText: bodyText ? () => openMessageActions(bodyText, {turn: item.turn, step: item.step}) : undefined,
           turnRunning,
         })}
       </CompletionNotice>
@@ -187,12 +193,18 @@ const ChatItemRow = React.memo(function ChatItemRow({
   return (
     <View>
       {renderBlocks(item.blocks, item.key, {
-        onLongPressText: bodyText ? () => openMessageActions(bodyText) : undefined,
+        onLongPressText: bodyText ? () => openMessageActions(bodyText, {turn: item.turn, step: item.step}) : undefined,
         turnRunning,
       })}
     </View>
   );
 }, areChatItemRowPropsEqual);
+
+export function returnToForkSource(nav: Pick<ReturnType<typeof useNav>, 'stack' | 'pop' | 'push'>, source: {sessionId: string; title?: string}): void {
+  const below = nav.stack[nav.stack.length - 2];
+  if (below?.name === 'Chat' && below.params?.sessionId === source.sessionId) nav.pop();
+  else nav.push('Chat', {sessionId: source.sessionId, title: source.title});
+}
 
 export function ChatScreen({
   sessionId,
@@ -202,6 +214,7 @@ export function ChatScreen({
   address,
   readOnly = false,
   active = true,
+  forkSource,
 }: {
   sessionId: string;
   title?: string;
@@ -215,6 +228,7 @@ export function ChatScreen({
   readOnly?: boolean;
   /** Owning navigation entry and Home tab are both visible. */
   active?: boolean;
+  forkSource?: {sessionId: string; title?: string};
 }) {
   const { store, baseUrl, butlerWorkspace, pickButlerWorkspace, butlerNeedWorkspace } = useApp();
   const nav = useNav();
@@ -224,6 +238,7 @@ export function ChatScreen({
   const [, force] = useState(0);
   const [draft, setDraft] = useState('');
   const [drafts, setDrafts] = useState<Draft[]>([]);
+  const [draftReady, setDraftReady] = useState<string | null>(null);
   const [pickerOpen, setPickerOpen] = useState(false);
   const [teamOpen, setTeamOpen] = useState(false);
   const [sending, setSending] = useState(false);
@@ -240,6 +255,12 @@ export function ChatScreen({
   const [switchWs, setSwitchWs] = useState(false);
   /** 输入区高度：回到底部按钮浮在它上方。 */
   const [composerHeight, setComposerHeight] = useState(0);
+  const [selection, setSelection] = useState<ComposerSelection>({start: 0, end: 0});
+  const [selectionRequest, setSelectionRequest] = useState<ComposerSelection | undefined>();
+  const [referenceManual, setReferenceManual] = useState(false);
+  const [referenceDismissed, setReferenceDismissed] = useState<{text: string; caret: number} | null>(null);
+  const [focusRequest, setFocusRequest] = useState<number | undefined>();
+  const [foreground, setForeground] = useState(AppState.currentState !== 'background' && AppState.currentState !== 'inactive');
 
   // 地址是对象，不能直接进依赖：用字符串 key 固定住
   const addressKey = address
@@ -258,7 +279,52 @@ export function ChatScreen({
   }, [store, sessionId, addressKey]);
 
   const chat = store.getChat(sessionId);
+  const sendScope = useMemo(() => ({}), [store, sessionId, addressKey, baseUrl, active, readOnly, foreground, store.connection, store.fileCookie, store.gatewayStatus, store.authInvalidated]);
+  const referenceScope = useMemo(() => ({}), [sendScope, draft, selection.start, selection.end]);
+  const recoveryKey = useMemo(() => withdrawalScope(store.fileBaseUrl, store.fileCookie), [store.fileBaseUrl, store.fileCookie]);
+  const conversationLive = useRef({scope: sendScope, active: active && foreground, blocked: sending || attaching});
+  conversationLive.current = {scope: sendScope, active: active && foreground, blocked: sending || attaching};
+  useEffect(() => () => {conversationLive.current.active = false; composerLive.current.active = false;}, []);
+  const restoreWithdrawn = (copy: WithdrawalCopy) => {
+    const live = conversationLive.current;
+    if (live.scope !== sendScope || !live.active || live.blocked || copy.scope !== recoveryKey ||
+        copy.sessionId !== sessionId || AppState.currentState === 'background' || AppState.currentState === 'inactive') return;
+    const text = mergeWithdrawnDraft(draftStore.get(sessionId), copy, MAX_DRAFT_CHARS);
+    draftStore.set(sessionId, text); setDraft(text);
+    setSelection({start: text.length, end: text.length}); setSelectionRequest({start: text.length, end: text.length});
+    setFocusRequest(n => (n ?? 0) + 1);
+    // Keep the exact confirmed copy until explicitly cleared, even if draft persistence fails.
+    void withdrawalRecovery.markRestored(copy).catch(() => setSendError('草稿已恢复，撤回副本状态未保存'));
+  };
   const hasTeam = !!chat.agentTeam;
+  const composerLive = useRef({scope: referenceScope, draft, selection, active});
+  composerLive.current = {scope: referenceScope, draft, selection, active: active && foreground};
+  const mentionRange = mentionAt(draft, selection);
+  const referenceVisible = active && foreground && !readOnly && !sending && !attaching && draftReady === sessionId &&
+    store.connection === 'connected' && !store.authInvalidated &&
+    (referenceManual || (!!mentionRange && !(referenceDismissed?.text === draft && referenceDismissed.caret === selection.end)));
+  useEffect(() => {setReferenceManual(false); setSelectionRequest(undefined); setReferenceDismissed(null);}, [sendScope]);
+  const pickReference = (choice: ReferenceChoice) => {
+    const live = composerLive.current;
+    if (live.scope !== referenceScope || !live.active || live.draft !== draft ||
+        live.selection.start !== selection.start || live.selection.end !== selection.end ||
+        AppState.currentState === 'background' || AppState.currentState === 'inactive' ||
+        readOnly || store.authInvalidated || store.connection !== 'connected') return;
+    try {
+      const next = insertReference(draft, selection, choice.mention, mentionRange, MAX_DRAFT_CHARS, choice.directory);
+      setDraft(next.text); draftStore.set(sessionId, next.text);
+      setSelection(next.selection); setSelectionRequest(next.selection);
+      setReferenceManual(false); setReferenceDismissed(null); setFocusRequest(n => (n ?? 0) + 1);
+    } catch (error) {setSendError(error instanceof Error ? error.message : '插入引用失败');}
+  };
+  const hostApprovalSessions = useButlerApprovalSessions(
+    store, sessionId, butlerWorkspace ?? '', butler && active && !readOnly,
+    store.pendingApprovals ?? [],
+  );
+  const relatedApprovalSessions = useMemo(() => new Set([
+    ...hostApprovalSessions,
+    ...(butler ? (chat.agentTeam?.members ?? []).filter(m => m.role === 'teammate').map(m => m.id) : []),
+  ]), [hostApprovalSessions, butler, chat.agentTeam?.members]);
   const {
     scrollRef, awayFromBottom, hasNewContent, anchorReady, kbHeight, jumpToBottom,
     applyScrollMetrics, beginDrag, endDrag, beginMomentum, endMomentum, contentSizeChanged, viewportChanged,
@@ -280,11 +346,25 @@ export function ChatScreen({
       if (!alive) return;
       // 切换会话时必须换成该会话自己的草稿，不能沿用上一会话输入框内容
       setDraft(draftStore.get(sessionId));
+      setDraftReady(sessionId);
     });
     return () => {
       alive = false;
     };
   }, [sessionId]);
+
+  useSharedComposer({
+    source: store, sessionId, presentation: butler ? 'butler' : 'chat', ready: draftReady === sessionId,
+    enabled: active && !readOnly && !sending && !attaching && !store.authInvalidated &&
+      store.connection === 'connected' &&
+      normalizeBaseUrl(store.fileBaseUrl) === normalizeBaseUrl(baseUrl),
+    text: draft, files: drafts,
+    apply: value => {
+      setDraft(value.text); setDrafts(value.files); draftStore.set(sessionId, value.text);
+      setSendError(value.textAsFile ? '分享文字已作为 TXT 附件加入草稿，原有文字已保留' : undefined);
+    },
+    onError: setSendError,
+  });
 
   useEffect(() => {
     return () => {
@@ -295,7 +375,8 @@ export function ChatScreen({
   // 切后台 / 锁屏前立即落盘，缩小「强制停止丢最后几个字」的窗口
   useEffect(() => {
     const sub = AppState.addEventListener('change', (state) => {
-      if (state !== 'active') void draftStore.flush();
+      setForeground(state === 'active');
+      if (state !== 'active') {setReferenceManual(false); void draftStore.flush();}
     });
     return () => sub.remove();
   }, []);
@@ -421,9 +502,9 @@ export function ChatScreen({
     }
   }, []);
 
-  const send = useCallback(async () => {
+  const send = useCallback(async (mode: 'queue' | 'steer' = 'queue') => {
     const text = draft.trim();
-    if ((!text && drafts.length === 0) || sending) return;
+    if ((!text && drafts.length === 0) || sending || !active || readOnly) return;
     const pendingAttachments = drafts;
     const startedAt = Date.now();
 
@@ -435,7 +516,7 @@ export function ChatScreen({
     setDraft('');
     setDrafts([]);
     try {
-      await store.sendPending(sessionId, text, pendingAttachments);
+      await store.sendPending(sessionId, text, pendingAttachments, mode);
       // 已成功进入 PendingSend 队列：草稿清除
       await draftStore.clear(sessionId);
       jumpToBottom();
@@ -469,7 +550,7 @@ export function ChatScreen({
       setSending(false);
       setAttaching(false);
     }
-  }, [draft, drafts, sending, sessionId, store, jumpToBottom]);
+  }, [draft, drafts, sending, sessionId, store, jumpToBottom, active, readOnly]);
 
   const retryPendingSend = useCallback(
     async (record: PendingSendRecord) => {
@@ -608,10 +689,41 @@ export function ChatScreen({
    * 正文在聊天流里不做 selectable（长按要留给面板）；需要按词/按段选择时，
    * 进面板里的「选择文本」模式（同一个 Modal 内切换，避免两个 Modal 打架）。
    */
-  const [actionText, setActionText] = useState<string | null>(null);
-  const openMessageActions = useCallback((text: string) => {
-    setActionText(text);
+  const [messageAction, setMessageAction] = useState<{text: string; reply?: {turn: number; step: number}; scope: object} | null>(null);
+  const [forkTarget, setForkTarget] = useState<{turn: number; step: number; scope: object} | null>(null);
+  const [forking, setForking] = useState(false);
+  const [forkNotice, setForkNotice] = useState('');
+  const forkLock = useRef(false);
+  const openMessageActions = useCallback((text: string, reply?: {turn: number; step: number}) => {
+    setMessageAction({text, reply, scope: conversationLive.current.scope});
   }, []);
+  const canFork = !!messageAction?.reply && messageAction.scope === sendScope && active && foreground &&
+    !butler && !readOnly && !sending && !store.authInvalidated && store.connection === 'connected' &&
+    store.canPrepareForkReply(sessionId, messageAction.reply);
+  const confirmFork = async () => {
+    if (!forkTarget || forkLock.current || forkTarget.scope !== conversationLive.current.scope ||
+        !conversationLive.current.active || butler || readOnly) return;
+    forkLock.current = true; setForking(true); setForkNotice('');
+    try {
+      const created = await store.forkReply(sessionId, forkTarget);
+      void store.loadSessions();
+      if (conversationLive.current.scope === forkTarget.scope && conversationLive.current.active) {
+        setForkTarget(null);
+        nav.push('Chat', {sessionId: created.sessionId, title: '分叉会话', forkSourceSessionId: sessionId, forkSourceTitle: title});
+      }
+    } catch (error) {
+      if (conversationLive.current.scope === forkTarget.scope && conversationLive.current.active) {
+        setForkTarget(null);
+        const createdId = error && typeof error === 'object' && 'forkSessionId' in error ? String(error.forkSessionId) : '';
+        setForkNotice(createdId
+          ? `新分支已创建（${createdId}），但未确认可以安全打开。请在电脑端核对其排队消息；不会重复创建。`
+          : '未确认分叉结果。请先核对电脑端会话列表；不会自动重试创建。');
+      }
+    } finally {
+      forkLock.current = false;
+      setForking(false);
+    }
+  };
 
   /**
    * F-02 执行过程组：每轮一个组，只在该轮第一个 assistant item 上渲染；
@@ -625,11 +737,28 @@ export function ChatScreen({
     }
     return map;
   }, [chat.items]);
-  const completedTaskCount = useMemo(
-    () => (chat.agentTeam?.tasks ?? []).filter((t) => t.status === 'completed').length,
-    [chat.agentTeam?.tasks],
-  );
   const lastTurnNo = chat.turns.length > 0 ? chat.turns[chat.turns.length - 1]!.turn : -1;
+  const approvalCard = readOnly ? null : (
+    <ApprovalBanner
+      key={sessionId}
+      inline={butler}
+      sessionId={sessionId}
+      relatedSessionIds={butler ? relatedApprovalSessions : undefined}
+      approvals={(store.pendingApprovals ?? []).map(a => ({ ...a, id: a.rpcId }))}
+      readonlyApprovals={pendingApprovals}
+      gatewayOnline={store.gatewayStatus === 'online'}
+      authInvalidated={store.authInvalidated ? isForbiddenRejection(store.connectionError) ? 'forbidden' : true : false}
+      serverResolvedIds={store.resolvedApprovalIds}
+      authoritativePendingAt={store.authoritativeApprovalAt}
+      sessions={store.sessions}
+      onAnswer={(a, outcome) => {
+        const hit = (store.pendingApprovals ?? []).find(p => p.rpcId === a.id && p.sessionId === a.sessionId);
+        if (!hit) return false;
+        return store.answerApproval(hit, outcome);
+      }}
+      onOpenSession={(targetSessionId, targetTitle) => nav.push('Chat', { sessionId: targetSessionId, title: targetTitle })}
+    />
+  );
 
   // 审批网关的连/断已经上移到 App 级（见 App.tsx 的 GlobalNotices）。
   //
@@ -649,11 +778,18 @@ export function ChatScreen({
         : '空会话';
 
   return (
-    <View style={styles.root}>
+    <View style={styles.root} testID={`chat-screen:${sessionId}`} collapsable={false}
+      accessibilityElementsHidden={!active} importantForAccessibility={active ? 'auto' : 'no-hide-descendants'}>
       <Header
         title={title ?? '对话'}
         subtitle={readOnly ? '只读 · 执行记录' : undefined}
         compact
+        metadata={!butler ? <View style={styles.headerMeta}>
+          {!chat.running && !chat.loading ? <Text style={styles.statusText}>{statusLabel}</Text> : null}
+          <ModelSwitcher compact sessionId={sessionId} currentProvider={chat.provider} currentModel={chat.model}
+            currentReasoningEffort={chat.reasoningEffort} contextUsed={chat.contextUsed} contextWindow={chat.contextWindow}
+            tokenUsage={chat.tokenUsage} onChanged={() => void store.refreshChatMeta(sessionId)} />
+        </View> : undefined}
         right={
           butler ? (
             <View style={styles.headerRight}>
@@ -689,6 +825,14 @@ export function ChatScreen({
         }
       />
 
+      {forkSource ? <View style={[styles.statusRow, {maxWidth: tv.layout.chatMaxWidth, width: '100%', alignSelf: 'center'}]}>
+        <Text style={[styles.statusText, {flex: 1}]}>对话分支 · 项目文件保持当前状态</Text>
+        <Pressable accessibilityRole="button" accessibilityLabel="返回原会话" style={{minHeight: 44, justifyContent: 'center'}}
+          onPress={() => returnToForkSource(nav, forkSource)}>
+          <Text style={{color: tv.colors.accent, fontSize: tv.type.sm}}>返回原会话</Text>
+        </Pressable>
+      </View> : null}
+      {forkNotice ? <View style={styles.errorBar}><Text style={styles.errorText}>{forkNotice}</Text></View> : null}
       {/* 管家页顶部：团队头像条（点开看谁在干什么） */}
       {butler ? <TeamStrip team={chat.agentTeam} onOpen={() => setTeamOpen(true)} /> : null}
 
@@ -707,8 +851,8 @@ export function ChatScreen({
         </Pressable>
       ) : null}
 
-      {/* 状态行：轮次 + 模型 + 上下文 */}
-      <View style={styles.statusRow}>
+      {/* Idle metadata lives with the title; active work keeps a clear status. */}
+      {butler || chat.running || chat.loading ? <View style={styles.statusRow}>
         <View style={styles.statusLeft}>
           {chat.running ? <ThinkingDots color={tv.colors.accent} /> : null}
           <Text
@@ -717,7 +861,7 @@ export function ChatScreen({
             {statusLabel}
           </Text>
         </View>
-        <ModelSwitcher
+        {butler ? <ModelSwitcher
           sessionId={sessionId}
           currentProvider={chat.provider}
           currentModel={chat.model}
@@ -726,8 +870,8 @@ export function ChatScreen({
           contextWindow={chat.contextWindow}
           tokenUsage={chat.tokenUsage}
           onChanged={() => void store.refreshChatMeta(sessionId)}
-        />
-      </View>
+        /> : null}
+      </View> : null}
 
       {/* 管家模式：闲聊 / 计划（居中，仅管家页出现） */}
       {butler ? <SlideSegmented
@@ -835,6 +979,7 @@ export function ChatScreen({
           }
           ListFooterComponent={
             <>
+              {butler ? approvalCard : null}
               {pendingSends.map((record) => (
                 <PendingSendBubble
                   key={record.requestId}
@@ -856,14 +1001,14 @@ export function ChatScreen({
           renderItem={({ item }: { item: ChatItem }) => {
             // F-02：执行过程组（思考 + 工具）默认折叠；最终回答单独渲染在组外。
             // 管家模式（butler）不启用：它本来就把工具藏在队员事件流里。
-            const group = item.kind === 'assistant' && !butler && !item.delegated ? workGroups.get(item.turn) : undefined;
+            const group = item.kind === 'assistant' && !butler ? workGroups.get(item.turn) : undefined;
             if (group && firstAssistantKey.get(item.turn) !== item.key) return null;
             return (
               <ChatItemRow
                 item={item}
                 group={group}
                 turnRunning={chat.running && item.turn === lastTurnNo}
-                doneTaskCount={item.kind === 'assistant' && item.delegated ? completedTaskCount : 0}
+                doneTaskCount={butler && item.kind === 'assistant' ? item.completionTaskCount ?? 0 : 0}
                 sessionId={sessionId}
                 uploadApi={store.upload}
                 allowReveal={active}
@@ -894,39 +1039,7 @@ export function ChatScreen({
             setComposerHeight((prev) => (prev === h ? prev : h));
           }}
         >
-          {/* F-01：底部停靠式审批面板（在输入框正上方，严格按 sessionId 过滤） */}
-          <ApprovalBanner
-            sessionId={sessionId}
-            approvals={(store.pendingApprovals ?? []).map((a) => ({
-              id: a.rpcId,
-              sessionId: a.sessionId,
-              approvalId: a.approvalId,
-              toolName: a.toolName,
-              reason: a.reason,
-              displayReason: a.displayReason,
-              replay: a.replay,
-            }))}
-            readonlyApprovals={pendingApprovals}
-            gatewayOnline={store.gatewayStatus === 'online'}
-            authInvalidated={
-              store.authInvalidated
-                ? isForbiddenRejection(store.connectionError)
-                  ? 'forbidden'
-                  : true
-                : false
-            }
-            serverResolvedIds={store.resolvedApprovalIds}
-            authoritativePendingAt={store.authoritativeApprovalAt}
-            sessions={store.sessions}
-            onAnswer={(a, outcome) => {
-              const hit = (store.pendingApprovals ?? []).find((p) => p.rpcId === a.id);
-              if (!hit) return false;
-              return store.answerApproval(hit, outcome);
-            }}
-            onOpenSession={(targetSessionId, targetTitle) => {
-              nav.push('Chat', { sessionId: targetSessionId, title: targetTitle });
-            }}
-          />
+          {!butler ? approvalCard : null}
 
           {/* 普通聊天用底部团队条；管家模式用顶部头像条，别重复 */}
           {butler ? null : <TeamBar team={chat.agentTeam} />}
@@ -942,6 +1055,13 @@ export function ChatScreen({
             </View>
           ) : null}
 
+          <HostQueuePanel key={`${recoveryKey}:${sessionId}`} source={store} sessionId={sessionId} scope={sendScope}
+            recoveryScope={recoveryKey} busy={chat.running}
+            enabled={active && foreground && !readOnly && !sending && !attaching && draftReady === sessionId && store.connection === 'connected' && !store.authInvalidated}
+            onRestore={copy => {try {restoreWithdrawn(copy);} catch (error) {setSendError(error instanceof Error ? error.message : '恢复草稿失败');}}}/>
+          {referenceVisible ? <ReferenceSuggestions source={store} sessionId={sessionId} query={mentionRange?.query ?? ''}
+            scope={referenceScope} manual={referenceManual} onPick={pickReference}
+            onClose={() => {setReferenceManual(false); setReferenceDismissed({text: draft, caret: selection.end});}}/> : null}
           <ChatComposer
             key={sessionId}
             value={draft}
@@ -949,15 +1069,20 @@ export function ChatScreen({
             sending={sending}
             uploading={attaching}
             running={chat.running}
+            sendScope={sendScope}
+            enabled={active && !readOnly && !store.authInvalidated}
             maxLength={MAX_DRAFT_CHARS}
+            selection={selectionRequest}
+            focusRequest={focusRequest}
+            onSelectionChange={next => {setSelection(next); setSelectionRequest(undefined);}}
             onChangeText={(text) => {
-              setDraft(text);
+              setDraft(text); setSelectionRequest(undefined);
               // 立即写入内存 + 300ms 防抖落盘；切换会话后回来能恢复
               draftStore.set(sessionId, text);
             }}
             onAddAttachment={() => setPickerOpen(true)}
             onRemoveAttachment={(id) => setDrafts((cur) => cur.filter((item) => item.id !== id))}
-            onSend={() => void send()}
+            onSend={(mode) => void send(mode)}
             onStop={() => void store.cancel(sessionId)}
           />
         </View>
@@ -979,6 +1104,11 @@ export function ChatScreen({
               ]}
             >
               <View style={styles.sheetHandle} />
+              <Pressable style={styles.sheetItem} accessibilityRole="button" accessibilityLabel="引用文件或会话"
+                onPress={() => {setPickerOpen(false); setReferenceManual(true); setReferenceDismissed(null);}}>
+                <Text style={styles.sheetIcon}>@</Text><Text style={styles.sheetLabel}>引用</Text>
+                <Text style={styles.sheetHint}>项目文件或已有会话</Text>
+              </Pressable>
               <Pressable
                 style={({ pressed }: { pressed: boolean }) => [
                   styles.sheetItem,
@@ -1059,10 +1189,20 @@ export function ChatScreen({
 
       {/* 长按消息 → 复制全文 / 选择文本（不常驻按钮） */}
       <MessageActionSheet
-        visible={actionText !== null}
-        text={actionText ?? ''}
-        onClose={() => setActionText(null)}
+        visible={messageAction !== null && messageAction.scope === sendScope && active && foreground}
+        text={messageAction?.text ?? ''}
+        onClose={() => setMessageAction(null)}
+        onFork={canFork ? () => {
+          if (!messageAction?.reply || messageAction.scope !== conversationLive.current.scope) return;
+          setForkTarget({...messageAction.reply, scope: sendScope}); setMessageAction(null);
+        } : undefined}
       />
+      <ConfirmSheet visible={!!forkTarget && forkTarget.scope === sendScope && active && foreground}
+        title="从此回答分叉继续？"
+        message="新会话会保留到这轮回答结束时的对话。原会话和草稿会保留，项目文件不会回滚。创建后不会自动发送消息。"
+        confirmText={forking ? '正在创建…' : '创建分支'} cancelText="取消"
+        onCancel={() => {if (!forkLock.current) setForkTarget(null);}} onConfirm={() => void confirmFork()}/>
+
 
       {/* F-05：移除待发送记录前的明确确认（不会撤回已发送消息） */}
       <ConfirmSheet
@@ -1173,6 +1313,9 @@ function makeStyles(tv: ReturnType<typeof useTheme>) {
     flex: { flex: 1 },
 
     statusRow: {
+      width: '100%',
+      maxWidth: layout.chatMaxWidth,
+      alignSelf: 'center',
       flexDirection: 'row',
       alignItems: 'center',
       justifyContent: 'space-between',
@@ -1182,8 +1325,9 @@ function makeStyles(tv: ReturnType<typeof useTheme>) {
       borderBottomWidth: StyleSheet.hairlineWidth,
       borderBottomColor: C.border,
     },
+    headerMeta: {flexDirection: 'row', alignItems: 'center', maxWidth: '100%', gap: space.xs},
     statusLeft: { flexDirection: 'row', alignItems: 'center' },
-    statusText: { color: C.textTertiary, fontSize: type.xs, marginLeft: 2 },
+    statusText: { color: C.textSecondary, fontSize: type.xs, marginLeft: 2 },
 
     noticeBar: {
       flexDirection: 'row',
@@ -1211,9 +1355,9 @@ function makeStyles(tv: ReturnType<typeof useTheme>) {
     errorText: { color: C.danger, fontSize: type.xs },
 
     scroll: { flex: 1 },
-    scrollContent: { paddingTop: space.md, paddingBottom: space.md },
+    scrollContent: { paddingTop: space.md, paddingBottom: space.md, width: '100%', maxWidth: layout.chatMaxWidth, alignSelf: 'center' },
     loadOlder: { alignItems: 'center', paddingVertical: space.md },
-    loadOlderText: { color: C.textTertiary, fontSize: type.xs },
+    loadOlderText: { color: C.textSecondary, fontSize: type.xs },
 
     loadingBox: { alignItems: 'center', paddingVertical: space.xxxl },
     loadingText: { color: C.textTertiary, fontSize: type.sm, marginTop: space.md },
@@ -1249,7 +1393,7 @@ function makeStyles(tv: ReturnType<typeof useTheme>) {
       paddingHorizontal: layout.screenPadding + 2,
       paddingVertical: space.sm,
     },
-    liveText: { color: C.textTertiary, fontSize: type.xs, marginLeft: 6 },
+    liveText: { color: C.textSecondary, fontSize: type.xs, marginLeft: 6 },
 
     // 顶栏「切换项目」
     headerRight: { flexDirection: 'row', alignItems: 'center', maxWidth: '100%', gap: 6 },
@@ -1278,6 +1422,9 @@ function makeStyles(tv: ReturnType<typeof useTheme>) {
     fileBlockWrap: { paddingHorizontal: layout.screenPadding },
 
     composerWrap: {
+      width: '100%',
+      maxWidth: layout.chatMaxWidth,
+      alignSelf: 'center',
       borderTopWidth: StyleSheet.hairlineWidth,
       borderTopColor: C.border,
       paddingTop: space.sm,

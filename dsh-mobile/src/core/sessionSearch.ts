@@ -31,6 +31,8 @@ export interface GlobalSessionResult<T = unknown> {
   session: T;
   workspacePath: string;
   workspaceName: string;
+  /** Host-provided message excerpt; absent for local-only matches. */
+  snippet?: string;
 }
 
 /**
@@ -64,6 +66,29 @@ export function searchSessionsAcrossWorkspaces<
         });
       }
     }
+  }
+  return results;
+}
+
+/** Keep local ordering, append ranked content hits only for still-visible sessions. */
+export function mergeContentSearch<
+  T extends {sessionId: string; cwd?: string; projections?: {values?: {title?: unknown}}},
+  W extends {path: string; name: string; sessions: T[]},
+>(workspaces: readonly W[], query: string, hits: readonly {sessionId: string; snippet: string}[]): GlobalSessionResult<T>[] {
+  if (!query.trim()) return [];
+  const results = searchSessionsAcrossWorkspaces<T, W>(workspaces, query);
+  const present = new Map(results.map(result => [result.session.sessionId, result]));
+  const visible = new Map<string, GlobalSessionResult<T>>();
+  for (const workspace of workspaces) for (const session of workspace.sessions) {
+    visible.set(session.sessionId, {session, workspacePath: workspace.path, workspaceName: workspace.name});
+  }
+  for (const hit of hits) {
+    const existing = present.get(hit.sessionId);
+    if (existing) {if (existing.snippet === undefined) existing.snippet = hit.snippet; continue;}
+    const target = visible.get(hit.sessionId);
+    if (!target) continue;
+    const result = {...target, snippet: hit.snippet};
+    results.push(result); present.set(hit.sessionId, result);
   }
   return results;
 }

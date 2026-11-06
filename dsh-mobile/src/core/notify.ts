@@ -29,12 +29,18 @@
 
 import { AppState, Platform, Vibration } from 'react-native';
 import { notifyBucketKey, type NotifyKind } from './notifyBuckets';
+import { LatestNotification } from './latestNotification';
+import { butlerActivityText, type ButlerActivity } from './butlerActivity';
 
 export { notifyBucketKey, shouldThrottleNotify, type NotifyKind } from './notifyBuckets';
 
 // 延迟加载原生模块：加载失败时降级，而不是整个 App 起不来
 type NotifeeModule = {
   requestPermission: () => Promise<{ authorizationStatus: number }>;
+  getNotificationSettings: () => Promise<{ authorizationStatus: number }>;
+  onBackgroundEvent?: (callback: (event: {
+    type: number; detail?: { notification?: { data?: Record<string, string> } };
+  }) => Promise<void>) => void;
   createChannel: (c: {
     id: string;
     name: string;
@@ -42,7 +48,9 @@ type NotifeeModule = {
     vibration?: boolean;
     sound?: string;
   }) => Promise<string>;
+  cancelNotification: (id: string) => Promise<void>;
   displayNotification: (n: {
+    id?: string;
     title: string;
     body: string;
     data?: Record<string, string>;
@@ -52,6 +60,10 @@ type NotifeeModule = {
       pressAction?: { id: string };
       importance?: number;
       autoCancel?: boolean;
+      ongoing?: boolean;
+      onlyAlertOnce?: boolean;
+      timeoutAfter?: number;
+      visibility?: number;
     };
   }) => Promise<string>;
   getInitialNotification: () => Promise<{
@@ -75,6 +87,7 @@ type NotifeeModule = {
  */
 const ANDROID_IMPORTANCE_HIGH = 4;
 const EVENT_TYPE_PRESS = 1;
+const notificationOpenListeners = new Set<(sessionId: string) => void>();
 
 let notifee: NotifeeModule | null = null;
 let notifeeTried = false;
@@ -98,6 +111,12 @@ async function getNotifee(): Promise<NotifeeModule | null> {
     const mod = await import('react-native-notify-kit');
     const m = (mod as { default?: unknown }).default ?? mod;
     notifee = m as NotifeeModule;
+    // Warm-process background presses can arrive before the Activity becomes RESUMED.
+    notifee.onBackgroundEvent?.(async (event) => {
+      if (event.type !== EVENT_TYPE_PRESS) return;
+      const sid = notificationSession(event.detail?.notification?.data);
+      if (sid) for (const listener of notificationOpenListeners) listener(sid);
+    });
     return notifee;
   } catch {
     notifee = null;
@@ -107,6 +126,75 @@ async function getNotifee(): Promise<NotifeeModule | null> {
 
 /** 通知通道 id（Android 8+ 必须建通道才能弹通知） */
 const CHANNEL_ID = 'dsh-task';
+const ACTIVITY_CHANNEL_ID = 'dsh-butler-status';
+const ACTIVITY_NOTIFICATION_ID = 'dsh-butler-activity';
+interface ActivityBinding {
+  token: string; sessionId: string; isCurrent: () => boolean; canOpen: () => boolean;
+}
+let activityBinding: ActivityBinding | null = null;
+// A press already queued by Android can race the reconnect triggered by Activity resume.
+let retiredActivityBinding: (ActivityBinding & { expiresAt: number }) | null = null;
+let activityGeneration = 0;
+
+const activityWriter = new LatestNotification<{
+  token: string; sessionId: string; value: ButlerActivity; lease: string;
+}>(async (item) => {
+  const nf = await getNotifee();
+  if (!nf) return;
+  if (!item || !enabled || activityBinding?.token !== item.token || !activityBinding.isCurrent()) {
+    await nf.cancelNotification(ACTIVITY_NOTIFICATION_ID);
+    return;
+  }
+  if (!channelReady) throw new Error('Notifications not ready');
+  const { title, body, ongoing } = butlerActivityText(item.value);
+  await nf.displayNotification({
+    id: ACTIVITY_NOTIFICATION_ID, title, body,
+    data: { kind: 'butler-activity', binding: item.token, sessionId: item.sessionId },
+    android: {
+      channelId: ACTIVITY_CHANNEL_ID, smallIcon: 'ic_launcher',
+      pressAction: { id: 'default' }, importance: 2, visibility: 0,
+      ongoing, onlyAlertOnce: true, autoCancel: !ongoing,
+      // Refresh the active lease every 30 seconds; a dead process leaves no permanent status.
+      timeoutAfter: ongoing ? 90_000 : 30_000,
+    },
+  });
+});
+
+/** A notification owns one live service/project/session scope, never a reusable session name. */
+export function beginButlerActivity(
+  sessionId: string, isCurrent: () => boolean = () => true, canOpen?: () => boolean,
+): {
+  publish: (value: ButlerActivity | null) => void;
+  close: () => void;
+} {
+  const token = `${Date.now()}-${++activityGeneration}-${Math.random().toString(36).slice(2)}`;
+  activityBinding = { token, sessionId, isCurrent, canOpen: canOpen ?? isCurrent };
+  void activityWriter.set(null);
+  return {
+    publish(value) {
+      if (activityBinding?.token !== token) return;
+      void activityWriter.set(enabled && value ? {
+        token, sessionId, value,
+        lease: value.running || value.waiting ? String(Math.floor(Date.now() / 30_000)) : 'ended',
+      } : null);
+    },
+    close() {
+      if (activityBinding?.token !== token) return;
+      retiredActivityBinding = canOpen?.() ? { ...activityBinding, expiresAt: Date.now() + 5000 } : null;
+      activityBinding = null;
+      void activityWriter.set(null);
+    },
+  };
+}
+
+function notificationSession(data?: Record<string, string>): string | undefined {
+  if (data?.kind === 'butler-activity') {
+    const binding = activityBinding?.token === data.binding ? activityBinding :
+      retiredActivityBinding?.token === data.binding && Date.now() < retiredActivityBinding.expiresAt ? retiredActivityBinding : null;
+    if (!enabled || !binding || !binding.canOpen() || data.sessionId !== binding.sessionId) return undefined;
+  }
+  return data?.sessionId;
+}
 
 /** 通知开关（用户可在设置里关掉） */
 let enabled = true;
@@ -115,8 +203,16 @@ let enabled = true;
 const lastAtByBucket = new Map<string, number>();
 const MIN_GAP_MS = 3000;
 
+const enabledListeners = new Set<() => void>();
+export function subscribeNotifyEnabled(listener: () => void): () => void {
+  enabledListeners.add(listener);
+  return () => { enabledListeners.delete(listener); };
+}
+
 export function setNotifyEnabled(v: boolean): void {
   enabled = v;
+  if (!v) void activityWriter.set(null);
+  for (const listener of enabledListeners) listener();
 }
 
 export function isNotifyEnabled(): boolean {
@@ -141,13 +237,28 @@ export async function initNotifications(): Promise<boolean> {
         importance: ANDROID_IMPORTANCE_HIGH,
         vibration: true,
       });
+      await nf.createChannel({
+        id: ACTIVITY_CHANNEL_ID, name: '管家任务状态', importance: 2, vibration: false,
+      });
     }
+    if (!activityBinding) await activityWriter.set(null);
     channelReady = true;
     lastError = '';
     // 授权状态：1 = 已授权
     return (perm?.authorizationStatus ?? 0) >= 1;
   } catch (e) {
     lastError = e instanceof Error ? e.message : String(e);
+    return false;
+  }
+}
+
+/** Recheck system settings on resume without requesting permission or reconnecting approvals. */
+export async function refreshNotificationPermission(): Promise<boolean> {
+  const nf = await getNotifee();
+  if (!nf || !channelReady) return false;
+  try {
+    return (await nf.getNotificationSettings()).authorizationStatus >= 1;
+  } catch {
     return false;
   }
 }
@@ -262,24 +373,26 @@ export async function onNotificationOpen(
 ): Promise<() => void> {
   const nf = await getNotifee();
   if (!nf) return () => undefined;
+  notificationOpenListeners.add(onOpen);
 
   // 冷启动：App 是被通知点开的
   try {
     const initial = await nf.getInitialNotification();
-    const sid = initial?.notification?.data?.sessionId;
+    const sid = notificationSession(initial?.notification?.data);
     if (sid) onOpen(sid);
   } catch {
     /* ignore */
   }
 
-  // 前台/后台点击
+  // Foreground presses; background delivery is registered once with the lazy native module.
   try {
-    return nf.onForegroundEvent((evt) => {
+    const off = nf.onForegroundEvent((evt) => {
       if (evt.type !== EVENT_TYPE_PRESS) return;
-      const sid = evt.detail?.notification?.data?.sessionId;
+      const sid = notificationSession(evt.detail?.notification?.data);
       if (sid) onOpen(sid);
     });
+    return () => { notificationOpenListeners.delete(onOpen); off(); };
   } catch {
-    return () => undefined;
+    return () => { notificationOpenListeners.delete(onOpen); };
   }
 }

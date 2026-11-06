@@ -20,6 +20,7 @@ import { flattenCatalog, findCatalogModel, type CatalogModel, type ModelCatalog 
 
 export interface ModelSwitcherProps {
   sessionId: string;
+  compact?: boolean;
   currentProvider?: string | null;
   currentModel?: string | null;
   /** 当前思考强度（模型不支持时为 null/undefined） */
@@ -44,6 +45,7 @@ function fmt(n: number | undefined): string {
 
 export function ModelSwitcher({
   sessionId,
+  compact = false,
   currentProvider,
   currentModel,
   currentReasoningEffort,
@@ -152,14 +154,18 @@ export function ModelSwitcher({
     <>
       <Pressable
         onPress={() => setOpen(true)}
-        style={({ pressed }: { pressed: boolean }) => [styles.trigger, pressed && styles.triggerPressed]}
+        accessibilityRole="button"
+        accessibilityLabel="模型与上下文"
+        accessibilityValue={{text: `${effectiveModel ?? '默认模型'}，上下文 ${pct}%`}}
+        accessibilityHint="查看模型、思考强度和用量"
+        hitSlop={compact ? {top: 10, bottom: 10} : undefined}
+        style={({ pressed }: { pressed: boolean }) => [styles.trigger, compact && styles.triggerCompact, pressed && styles.triggerPressed]}
       >
         {/* 第一行：模型名 */}
         <Text style={styles.modelName} numberOfLines={1}>
           {effectiveModel ? String(effectiveModel).split('/').pop() : '默认模型'}
         </Text>
-        {/* 第二行：上下文用量条 + 百分比 */}
-        <View style={styles.gaugeRow}>
+        {compact ? <Text style={[styles.compactPct, ratio > 0.75 && {color: gaugeColor}]}>{pct}% ⌄</Text> : <View style={styles.gaugeRow}>
           <View style={styles.gaugeTrack}>
             <View
               style={[
@@ -169,7 +175,7 @@ export function ModelSwitcher({
             />
           </View>
           <Text style={[styles.pct, { color: gaugeColor }]}>{pct}%</Text>
-        </View>
+        </View>}
       </Pressable>
 
       <Modal visible={open} animationType="slide" transparent onRequestClose={() => setOpen(false)}>
@@ -325,6 +331,8 @@ function makeStyles(tv: ReturnType<typeof useTheme>) {
       paddingVertical: 3,
       borderRadius: radius.sm,
     },
+    triggerCompact: {flexDirection: 'row', alignItems: 'center', minHeight: 24, flexShrink: 1, gap: space.xs, paddingVertical: 0},
+    compactPct: {color: C.textSecondary, fontSize: type.xs, fontVariant: ['tabular-nums']},
     triggerPressed: { backgroundColor: C.bgOverlay },
     gaugeRow: { flexDirection: 'row', alignItems: 'center', marginTop: 3 },
     gaugeTrack: {
@@ -336,8 +344,8 @@ function makeStyles(tv: ReturnType<typeof useTheme>) {
       marginRight: space.xs,
     },
     gaugeFill: { height: 4 },
-    pct: { fontSize: 9, marginLeft: 5, fontVariant: ['tabular-nums'] },
-    modelName: { color: C.textSecondary, fontSize: type.xs, maxWidth: 130 },
+    pct: { fontSize: type.xs, marginLeft: 5, fontVariant: ['tabular-nums'] },
+    modelName: { color: C.textSecondary, fontSize: type.xs, maxWidth: 130, flexShrink: 1 },
 
     backdrop: { flex: 1, backgroundColor: C.scrim, justifyContent: 'flex-end' },
     backdropFill: { flex: 1 },

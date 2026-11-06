@@ -51,13 +51,16 @@ import {
 import { revokeOwnDeviceDetailed } from './core/deviceAuth';
 import { WORKSPACE_CUSTOM_KEY, type WorkspaceCustom } from './core/workspace-custom';
 import { draftStore } from './core/draftStore';
+import {withdrawalRecovery} from './core/withdrawalRecovery';
 import { sessionPinStore } from './core/sessionPins';
 import { ThemeProvider, useTheme } from './design/theme';
 import { MotionProvider } from './design/motion';
 import { themeLabels, type ThemeMode } from './design/tokens';
 import { buildButlerPrime, BUTLER_PRIME_VERSION } from './core/butler';
 import { NavHost, type Screen } from './nav/NavHost';
+import { SharedInboxHost } from './components/SharedInboxHost';
 import { NoticeHost } from './components/NoticeHost';
+import { useButlerActivity } from './components/useButlerActivity';
 import { PairScreen } from './screens/PairScreen';
 import { HomeScreen } from './screens/HomeScreen';
 import { SessionsScreen } from './screens/SessionsScreen';
@@ -1014,6 +1017,11 @@ export default function App() {
     } catch {
       drafts = 'failed';
     }
+    try {
+      await withdrawalRecovery.clearAll();
+    } catch {
+      drafts = 'failed';
+    }
 
     // ── 登录意图也要处理 ──────────────────────────────────────
     //
@@ -1381,9 +1389,10 @@ export default function App() {
             <MotionProvider>
               <BottomSheetModalProvider>
                 <ThemedStatusBar />
-                {authed ? <NavHost initial={{ name: 'Home' }} render={renderScreen} /> : <PairScreen />}
+                {authed ? <NavHost initial={{ name: 'Home' }} render={renderScreen} rootIsList={!butlerMode} /> : <PairScreen />}
                 {/* 全局通知横幅：盖在导航之上，任意页面都能看到 */}
                 {authed ? <GlobalNotices /> : null}
+                {authed ? <SharedInboxHost /> : null}
               </BottomSheetModalProvider>
             </MotionProvider>
           </AppContext.Provider>
@@ -1401,8 +1410,13 @@ export default function App() {
  * 由 NavHost 里的页面消费——见 store.pendingOpenSession。
  */
 function GlobalNotices() {
-  const { store, baseUrl, approvalRevoked } = useApp();
+  const { store, baseUrl, approvalRevoked, butlerMode, butlerWorkspace, butlerSessionId } = useApp();
   const [, force] = React.useState(0);
+  const [notificationsReady, setNotificationsReady] = React.useState(false);
+  useButlerActivity({
+    store, baseUrl, workspace: butlerWorkspace, sessionId: butlerSessionId,
+    enabled: notificationsReady && butlerMode && !approvalRevoked,
+  });
 
   React.useEffect(() => {
     const unsub = store.subscribe(() => force((n) => n + 1));
@@ -1440,15 +1454,22 @@ function GlobalNotices() {
 
   // P0-2：App 从后台切回前台时，立即重置可能假死的半开 WebSocket 并恢复当前打开的会话流与审批网关。
   React.useEffect(() => {
+    let alive = true;
+    let permissionCheck = 0;
     let lastState: AppStateStatus = AppState.currentState ?? 'active';
     const sub = AppState.addEventListener('change', (nextState: AppStateStatus) => {
       const wasBackground = lastState === 'background' || lastState === 'inactive';
       lastState = nextState;
       if (wasBackground && nextState === 'active') {
         store.handleAppForeground(baseUrl);
+        const check = ++permissionCheck;
+        void import('./core/notify').then(module => module.refreshNotificationPermission()).then(ready => {
+          if (alive && check === permissionCheck) setNotificationsReady(ready);
+        }).catch(() => { if (alive && check === permissionCheck) setNotificationsReady(false); });
       }
     });
     return () => {
+      alive = false;
       sub.remove();
     };
   }, [store, baseUrl]);
@@ -1456,18 +1477,26 @@ function GlobalNotices() {
   // 通知初始化 + 点通知跳转。
   // initNotifications 会申请权限、建通道；原生模块缺失时静默降级。
   React.useEffect(() => {
+    let alive = true;
     let off: (() => void) | undefined;
+    setNotificationsReady(false);
     void (async () => {
       try {
         const { initNotifications, onNotificationOpen } = await import('./core/notify');
-        await initNotifications();
-        off = await onNotificationOpen((sid) => store.requestOpenSession(sid));
+        const ready = await initNotifications();
+        if (!alive) return;
+        setNotificationsReady(ready);
+        const unsubscribe = await onNotificationOpen((sid) => {
+          if (alive) store.requestOpenSession(sid);
+        });
+        if (alive) off = unsubscribe;
+        else unsubscribe();
       } catch (e) {
         // 不能让通知初始化把整个 App 拖垮
         console.warn('[dsh] 通知初始化失败', e);
       }
     })();
-    return () => off?.();
+    return () => { alive = false; off?.(); };
   }, [store]);
 
   return (
@@ -1498,6 +1527,10 @@ function renderScreen(screen: Screen, active: boolean) {
           sessionId={String(screen.params?.sessionId ?? '')}
           title={screen.params?.title ? String(screen.params.title) : undefined}
           butler={screen.params?.butler === true}
+          forkSource={typeof screen.params?.forkSourceSessionId === 'string' ? {
+            sessionId: screen.params.forkSourceSessionId,
+            title: typeof screen.params.forkSourceTitle === 'string' ? screen.params.forkSourceTitle : undefined,
+          } : undefined}
         />
       );
     case 'Workspaces':

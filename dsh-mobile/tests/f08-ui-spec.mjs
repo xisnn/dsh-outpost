@@ -128,8 +128,9 @@ const reduce = readFileSync('src/design/useReduceMotion.ts', 'utf8');
 check('NavHost 使用 useWindowDimensions 动态宽度，不再依赖模块级 Dimensions', () =>
   /useWindowDimensions/.test(nav) &&
   /widthRef/.test(nav) &&
-  /width=\{width\}/.test(nav) &&
-  !/Dimensions\.get\('window'\)/.test(nav) &&
+  /width=\{isMaster && columns \? columns\.masterWidth : paneWidth\}/.test(nav) &&
+  /const paneWidth = columns\?\.detailWidth \?\? width/.test(nav) &&
+  /width, height, fontScale.*useWindowDimensions\(\)/.test(nav) &&
   !/SCREEN_WIDTH/.test(nav)
     ? true
     : 'NavHost 仍使用静态屏宽',
@@ -163,8 +164,9 @@ check('ToolCard / WorkGroupCard 折叠头保留展开状态无障碍属性', () 
     : '工具/执行组折叠头无障碍缺失',
 );
 check('发送按钮提供无障碍角色、标签与禁用状态', () =>
-  /<ChatComposer/.test(chat) && /onSend=\{\(\) => void send\(\)\}/.test(chat) &&
-  /accessibilityRole="button"\s+accessibilityLabel="发送消息"\s+accessibilityState=\{\{ disabled: !canSend, busy: sending \}\}/.test(composer)
+  /<ChatComposer/.test(chat) && /onSend=\{\(mode\) => void send\(mode\)\}/.test(chat) &&
+  /accessibilityRole="button"\s+accessibilityLabel="发送消息"/.test(composer) &&
+  /accessibilityState=\{\{ disabled: !canSend, busy: sending \}\}/.test(composer)
     ? true : '发送按钮无障碍缺失',
 );
 check('useReduceMotion 监听系统减少动态效果设置', () =>

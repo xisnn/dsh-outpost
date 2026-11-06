@@ -13,6 +13,7 @@
 import ReactNativeBlobUtil from 'react-native-blob-util';
 import { assertSecureUrl } from './net-security';
 import { isInstallablePackage } from './installable';
+import { sha256Hex } from './pendingSend/fingerprint';
 
 /** 把路径转成一个安全的本地文件名（避免中文/冒号在文件系统里出问题） */
 function cacheName(path: string): string {
@@ -42,10 +43,12 @@ export async function fetchRemoteFile(
   baseUrl: string,
   cookie: string | undefined,
   remotePath: string,
-  options?: { forceDownload?: boolean },
+  options?: { forceDownload?: boolean; maxBytes?: number },
 ): Promise<RemoteFile> {
   const dir = ReactNativeBlobUtil.fs.dirs.CacheDir;
-  const name = cacheName(remotePath);
+  // A cache entry belongs to one authenticated service, not just a remote path.
+  const scope = sha256Hex(JSON.stringify([baseUrl, cookie ?? '', remotePath]));
+  const name = `${scope}-${cacheName(remotePath)}`;
   const fsPath = `${dir}/${name}`;
   // 这条路径直接用 blob-util 发（不经过 DshConnection.call），带的是 Cookie，
   // 所以出口校验要自己补一次。
@@ -72,17 +75,44 @@ export async function fetchRemoteFile(
     }
   }
 
+  if (usable && options?.maxBytes !== undefined) {
+    const stat = await ReactNativeBlobUtil.fs.stat(fsPath);
+    if (Number(stat.size) > options.maxBytes) throw new Error('文件较大，点击后查看完整内容');
+  }
+
   if (!usable) {
     const headers: Record<string, string> = {};
     if (cookie) headers.Cookie = cookie;
     // 必须 fileCache: true。设成 false 时 blob-util 只把响应留在内存，
     // 不会写进 path 指定的文件 —— 后面 Image 读 file:// 拿到的是空文件，
     // 界面上就是一块灰色空白（用户报的「图片看不见」）。
-    const res = await ReactNativeBlobUtil.config({ fileCache: true, path: fsPath }).fetch(
+    const request = ReactNativeBlobUtil.config({ fileCache: true, path: fsPath }).fetch(
       'GET',
       url,
       headers,
     );
+    let tooLarge = false;
+    if (options?.maxBytes !== undefined) {
+      request.progress({ interval: 50 }, (received, total) => {
+        if (received > options.maxBytes! || total > options.maxBytes!) {
+          tooLarge = true;
+          request.cancel();
+        }
+      });
+    }
+    let res;
+    try {
+      res = await request;
+      if (options?.maxBytes !== undefined && res.info().status === 200) {
+        const stat = await ReactNativeBlobUtil.fs.stat(fsPath);
+        tooLarge ||= Number(stat.size) > options.maxBytes;
+      }
+      if (tooLarge) throw new Error('文件较大，点击后查看完整内容');
+    } catch (error) {
+      await ReactNativeBlobUtil.fs.unlink(fsPath).catch(() => undefined);
+      if (tooLarge) throw new Error('文件较大，点击后查看完整内容');
+      throw error;
+    }
     const status = res.info().status;
     if (status !== 200) {
       // 失败清掉半截文件，避免下次误判为「已缓存」

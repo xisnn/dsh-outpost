@@ -70,7 +70,8 @@ export async function listButlerTasks(
 ): Promise<ButlerTask[]> {
   const query = status ? `?status=${encodeURIComponent(status)}` : '';
   const res = await conn.request<{ tasks: ButlerTask[] }>(`${BASE}/tasks${query}`);
-  return res.tasks ?? [];
+  if (!Array.isArray(res?.tasks)) throw new Error('Invalid butler task snapshot');
+  return res.tasks;
 }
 
 export async function getButlerTask(conn: DshConnection, id: string): Promise<ButlerTask> {

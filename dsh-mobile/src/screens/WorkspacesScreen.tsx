@@ -6,7 +6,7 @@
  *
  * 改名 / 换头像：长按某一行打开底部弹层（纯客户端覆盖，不改真实目录）。
  */
-import React, { useCallback, useEffect, useMemo, useState } from 'react';
+import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { ActivityIndicator, FlatList, RefreshControl, StyleSheet, Text, TextInput, View } from 'react-native';
 import { MotionPressable as Pressable } from '../components/MotionPressable';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
@@ -25,7 +25,10 @@ import { CompatBanner } from '../components/CompatBanner';
 import { ConnectionBanner } from '../components/ConnectionBanner';
 import { ApprovalReminderStrip } from '../components/ApprovalBanner';
 import { draftStore } from '../core/draftStore';
-import { searchSessionsAcrossWorkspaces } from '../core/sessionSearch';
+import { mergeContentSearch } from '../core/sessionSearch';
+import { useContentSearch } from '../components/useContentSearch';
+import { CredentialText } from '../components/CredentialText';
+import { maskCredentials } from '../core/credentialDisplay';
 import { approvalSessionIds, anySessionInSet, retrySessionIds } from '../core/sessionStatus';
 
 function formatAgo(ts: number): string {
@@ -48,7 +51,7 @@ const RECENT_WS_KEY = '@dsh/recentWorkspaces';
 type HomeListItem = Workspace | GlobalSessionResult<SessionSummary>;
 
 export function WorkspacesScreen() {
-  const { store, butlerSessionId } = useApp();
+  const { store, baseUrl, butlerSessionId } = useApp();
   const nav = useNav();
   const insets = useSafeAreaInsets();
   const tv = useTheme();
@@ -63,6 +66,16 @@ export function WorkspacesScreen() {
   const [recentPaths, setRecentPaths] = useState<string[]>([]);
   // F-07：跨工作区搜索与真实待重试状态
   const [query, setQuery] = useState('');
+  const contentSearch = useContentSearch(store, baseUrl, query);
+  const searchInput = useRef<TextInput>(null);
+  const inputFocused = useRef(false);
+  const searchOnBlur = useRef<boolean | null>(null);
+  const changeQuery = (text: string) => {contentSearch.input(text); setQuery(text);};
+  const submitSearch = (text: string, retry = false) => {changeQuery(text); contentSearch.submit(text, retry);};
+  const requestContentSearch = (retry = false) => {
+    if (inputFocused.current) {searchOnBlur.current = retry; searchInput.current?.blur();}
+    else submitSearch(query, retry);
+  };
   const [retryIds, setRetryIds] = useState<ReadonlySet<string>>(new Set());
 
   useEffect(() => {
@@ -162,8 +175,8 @@ export function WorkspacesScreen() {
   );
   const approvalIds = approvalSessionIds(store.pendingApprovals);
   const globalResults = useMemo<GlobalSessionResult<SessionSummary>[]>(
-    () => searchSessionsAcrossWorkspaces(store.workspaces, query),
-    [store.workspaces, query],
+    () => mergeContentSearch(store.workspaces, query, contentSearch.state.items),
+    [store.workspaces, query, contentSearch.state.items],
   );
   const isSearching = query.trim().length > 0;
   const listData: HomeListItem[] = isSearching ? globalResults : store.workspaces;
@@ -209,8 +222,22 @@ export function WorkspacesScreen() {
       <View style={styles.searchWrap}>
         <Text style={styles.searchIcon}>⌕</Text>
         <TextInput
+          ref={searchInput}
           value={query}
-          onChangeText={setQuery}
+          onChangeText={changeQuery}
+          onFocus={() => {inputFocused.current = true;}}
+          onSubmitEditing={event => {
+            searchOnBlur.current = null;
+            submitSearch(event.nativeEvent.text);
+          }}
+          onEndEditing={event => {
+            inputFocused.current = false;
+            if (searchOnBlur.current !== null) {
+              const retry = searchOnBlur.current;
+              searchOnBlur.current = null;
+              submitSearch(event.nativeEvent.text, retry);
+            }
+          }}
           placeholder="搜索全部会话"
           placeholderTextColor={tv.colors.textFaint}
           style={styles.searchInput}
@@ -221,12 +248,35 @@ export function WorkspacesScreen() {
           accessibilityLabel="搜索全部会话"
         />
         {query ? (
-          <Pressable onPress={() => setQuery('')} hitSlop={10} style={styles.clearBtn}
+          <Pressable onPress={() => {searchOnBlur.current = null; changeQuery('');}} hitSlop={10} style={styles.clearBtn}
             accessibilityRole="button" accessibilityLabel="清空搜索">
             <Text style={styles.clearText}>✕</Text>
           </Pressable>
         ) : null}
       </View>
+      {isSearching ? <View style={styles.contentSearchBar}>
+        <View style={styles.contentSearchBody} accessibilityLiveRegion="polite">
+          {contentSearch.state.status === 'pending' ? <ActivityIndicator size="small" color={tv.colors.accent} /> : null}
+          <Text style={styles.contentSearchHint}>
+            {!contentSearch.available ? '连接恢复后可搜索聊天正文；本地搜索仍可用' :
+              contentSearch.state.status === 'pending' ? '正在搜索聊天正文…' :
+              contentSearch.state.status === 'unsupported' ? '当前 Host 未提供正文搜索；已保留本地结果' :
+              contentSearch.state.status === 'failed' ? '正文搜索失败；可重试，本地结果仍可用' :
+              contentSearch.state.status === 'too-long' ? '正文搜索最多输入 500 字' :
+              contentSearch.state.status === 'ready' ? `正文命中 ${globalResults.filter(result => result.snippet !== undefined).length} 个可见会话${contentSearch.state.hasMore ? '，仅展示前 20 条，可缩小关键词范围' : ''}；点击打开会话` :
+              '本地匹配标题、目录和 ID；提交后搜索聊天正文'}
+          </Text>
+        </View>
+        <Pressable accessibilityRole="button"
+          accessibilityLabel={contentSearch.state.status === 'unsupported' ? '重新检测正文搜索' : contentSearch.state.status === 'failed' ? '重试正文搜索' : '搜索正文'}
+          disabled={!contentSearch.available || contentSearch.state.status === 'pending'}
+          onPress={() => requestContentSearch(['unsupported', 'failed'].includes(contentSearch.state.status))}
+          style={styles.contentSearchButton}>
+          <Text style={[styles.contentSearchButtonText, !contentSearch.available && {color: tv.colors.textFaint}]}>
+            {contentSearch.state.status === 'unsupported' ? '重新检测' : contentSearch.state.status === 'failed' ? '重试' : '搜索正文'}
+          </Text>
+        </Pressable>
+      </View> : null}
     </View>
   );
 
@@ -264,6 +314,7 @@ export function WorkspacesScreen() {
   return (
     <View style={styles.root}>
       {header}
+      <View style={styles.pageContent}>
       <ConnectionBanner
         connection={store.connection}
         hint={store.connectionHint}
@@ -275,6 +326,7 @@ export function WorkspacesScreen() {
         onOpenSession={(sid, title) => nav.push('Chat', { sessionId: sid, title })}
       />
       <CompatBanner summary={store.compatSummary} missing={store.compatMissing} />
+      </View>
       <FlatList<HomeListItem>
         contentContainerStyle={styles.content}
         data={listData}
@@ -295,7 +347,7 @@ export function WorkspacesScreen() {
           <View style={styles.center}>
             <Text style={styles.emptyIcon}>{isSearching ? '⌕' : '◫'}</Text>
             <Text style={styles.empty}>
-              {isSearching ? `没找到匹配「${query.trim()}」的会话` : '还没有会话'}
+              {isSearching ? '当前没有匹配的会话' : '还没有会话'}
             </Text>
             <Text style={styles.emptyHint}>
               {isSearching ? '可搜索标题、工作区、目录或会话 ID' : '在电脑上开一个 DSH 会话就会出现在这里'}
@@ -319,12 +371,12 @@ export function WorkspacesScreen() {
                 ]}
                 onPress={() => nav.push('Chat', { sessionId: session.sessionId, title })}
                 accessibilityRole="button"
-                accessibilityLabel={`打开会话：${title}`}
+                accessibilityLabel={`打开会话：${maskCredentials(title)}`}
               >
-                <View style={styles.rowBody}>
+                <View style={[styles.rowBody, styles.searchBody]}>
                   <View style={styles.rowTop}>
                     <Text style={styles.name} numberOfLines={1}>
-                      {title}
+                      {maskCredentials(title)}
                     </Text>
                     <Text style={styles.time}>{formatAgo(session.updatedAt)}</Text>
                   </View>
@@ -341,9 +393,10 @@ export function WorkspacesScreen() {
                   </View>
                   <View style={styles.rowBottom}>
                     <Text style={styles.path} numberOfLines={1}>
-                      {item.workspaceName} · {item.workspacePath || '未记录目录'}
+                      {maskCredentials(`${item.workspaceName} · ${item.workspacePath || '未记录目录'}`)}
                     </Text>
                   </View>
+                  {item.snippet ? <CredentialText text={item.snippet} style={styles.snippet} /> : null}
                 </View>
                 <Text style={styles.chevron}>›</Text>
               </Pressable>
@@ -409,7 +462,7 @@ export function WorkspacesScreen() {
             </Pressable>
           );
         }}
-        ItemSeparatorComponent={() => <View style={styles.sep} />}
+        ItemSeparatorComponent={() => <View style={[styles.sep, isSearching && styles.searchSep]} />}
       />
 
       <WorkspaceSheet
@@ -471,6 +524,7 @@ function makeStyles(tv: ReturnType<typeof useTheme>) {
     },
 
     header: {
+      width: '100%', maxWidth: layout.chatMaxWidth, alignSelf: 'center',
       paddingHorizontal: layout.screenPadding,
       paddingBottom: space.md,
       backgroundColor: C.bg,
@@ -492,7 +546,7 @@ function makeStyles(tv: ReturnType<typeof useTheme>) {
       fontWeight: weight.bold,
       letterSpacing: 1.4,
     },
-    headerSub: { color: C.textTertiary, fontSize: type.xs, marginTop: 2 },
+    headerSub: { color: C.textSecondary, fontSize: type.xs, marginTop: 2 },
     searchWrap: {
       flexDirection: 'row',
       alignItems: 'center',
@@ -510,10 +564,17 @@ function makeStyles(tv: ReturnType<typeof useTheme>) {
       fontSize: type.sm,
       paddingVertical: 8,
     },
+    contentSearchBar: { flexDirection: 'row', alignItems: 'center', gap: space.sm, marginTop: space.xs },
+    contentSearchBody: { flex: 1, flexDirection: 'row', alignItems: 'center', gap: space.xs },
+    contentSearchHint: { flex: 1, color: C.textSecondary, fontSize: type.xs, lineHeight: 18 },
+    contentSearchButton: { minHeight: 44, minWidth: 72, justifyContent: 'center', alignItems: 'center' },
+    contentSearchButtonText: { color: C.accentBright, fontSize: type.sm, fontWeight: weight.medium },
+    snippet: { color: C.textSecondary, fontSize: type.sm, lineHeight: 21, marginTop: space.sm },
     clearBtn: { padding: 6 },
     clearText: { color: C.textFaint, fontSize: type.sm },
 
-    content: { paddingTop: space.sm, paddingBottom: space.xl },
+    pageContent: {width: '100%', maxWidth: layout.chatMaxWidth, alignSelf: 'center'},
+    content: { paddingTop: space.sm, paddingBottom: space.xl, width: '100%', maxWidth: layout.chatMaxWidth, alignSelf: 'center' },
     center: { alignItems: 'center', justifyContent: 'center', padding: space.xxxl },
     loadingText: { color: C.textTertiary, fontSize: type.sm, marginTop: space.md },
     emptyIcon: { color: C.textFaint, fontSize: 40, marginBottom: space.md },
@@ -551,6 +612,8 @@ function makeStyles(tv: ReturnType<typeof useTheme>) {
     },
     rowPressed: { backgroundColor: C.bgRaised },
     rowBody: { flex: 1, marginLeft: space.md, minWidth: 0 },
+    searchBody: {marginLeft: 0},
+    searchSep: {marginLeft: layout.screenPadding},
     newBtn: {
       width: 34,
       height: 34,
@@ -570,7 +633,7 @@ function makeStyles(tv: ReturnType<typeof useTheme>) {
       flex: 1,
       marginRight: space.sm,
     },
-    time: { color: C.textFaint, fontSize: type.xs },
+    time: { color: C.textSecondary, fontSize: type.xs },
     rowMid: { flexDirection: 'row', alignItems: 'center', marginTop: 3 },
     runningWrap: { flexDirection: 'row', alignItems: 'center', marginRight: space.sm },
     runningText: { color: C.success, fontSize: type.xs, marginLeft: 4 },
@@ -594,7 +657,7 @@ function makeStyles(tv: ReturnType<typeof useTheme>) {
     },
     preview: { color: C.textSecondary, fontSize: type.sm, flex: 1 },
     rowBottom: { flexDirection: 'row', alignItems: 'center', marginTop: 5 },
-    path: { color: C.textFaint, fontSize: type.micro, flex: 1, marginRight: space.sm },
+    path: { color: C.textSecondary, fontSize: type.xs, flex: 1, marginRight: space.sm },
     countWrap: {
       minWidth: 22,
       paddingHorizontal: 6,
@@ -612,8 +675,8 @@ function makeStyles(tv: ReturnType<typeof useTheme>) {
       marginLeft: layout.screenPadding + layout.avatarMd + space.md,
     },
     footerHint: {
-      color: C.textFaint,
-      fontSize: type.micro,
+      color: C.textSecondary,
+      fontSize: type.xs,
       textAlign: 'center',
       marginTop: space.xl,
     },

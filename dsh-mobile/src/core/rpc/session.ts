@@ -7,6 +7,7 @@
 
 import type { DshConnection, StreamHandle } from '../transport';
 import { isTempWorkspace } from '../workspaceFilter';
+import { parseContentSearch, type ContentSearchPage } from '../contentSearch';
 import type {
   EventRecord,
   FollowSnapshot,
@@ -32,6 +33,13 @@ export class SessionApi {
   async list(): Promise<SessionSummary[]> {
     const res = await this.conn.call<SessionListResult>('session/list', { _request: {} });
     return res?.items ?? [];
+  }
+
+  /** Read-only, optional Host FTS index. An unavailable index is handled by the search UI. */
+  async search(text: string): Promise<ContentSearchPage> {
+    const query = text.trim();
+    if (!query || query.length > 500) throw new Error('正文搜索需要 1 至 500 字的关键词');
+    return parseContentSearch(await this.conn.call('session/search', {request: {query}, __timeoutMs: 20_000}));
   }
 
   /**

@@ -156,7 +156,7 @@ export function PendingSendBubble({
         ) : null}
         <View style={styles.footer}>
           <DelayedSpinner record={record} />
-          <Text style={[styles.status, { color: toneColor }]} accessibilityLiveRegion="polite">{status.label}</Text>
+          <Text style={[styles.status, { color: toneColor }]} accessibilityLiveRegion="polite">{record.mode === 'steer' ? '插话 · ' : ''}{status.label}</Text>
         </View>
         {retryable || removable ? <View style={styles.actions}>
           {retryable ? (

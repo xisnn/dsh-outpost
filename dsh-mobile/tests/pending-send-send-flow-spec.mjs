@@ -131,6 +131,31 @@ await check('sendPending：先持久化再 prompt，accepted 记录可见', asyn
   assert.equal(stored.text, 'hello');
 });
 
+await check('插话模式先持久化，未知后重启恢复并重试仍复用模式与 requestId', async () => {
+  const h = await setup();
+  h.store.api.prompt = async params => {
+    h.prompts.push(params);
+    const disk = JSON.parse(h.backend.value);
+    assert.equal(disk.records.find(r => r.requestId === params.requestId).mode, 'steer');
+    throw new Error('Network request failed');
+  };
+  await assert.rejects(h.store.sendPending('s1', '先检查配置', [], 'steer'));
+  const before = (await h.pending.list('s1'))[0];
+  assert.equal(before.state, 'unknown');
+  const restored = new PendingSendStore({ persistence: h.backend, now: () => clock });
+  await restored.hydrate();
+  const store = new Store(new DshConnection({ baseUrl: 'http://127.0.0.1:1', cookie: 'dsh-auth-test=v1' }), {
+    pendingSendStore: restored, loadPendingBinding: async () => binding, verifyPendingBinding: async () => undefined,
+  });
+  const retryCalls = [];
+  store.api.prompt = async params => { retryCalls.push(params); };
+  await store.retryPending('s1', before.requestId);
+  assert.equal(retryCalls.length, 1);
+  assert.equal(retryCalls[0].requestId, before.requestId);
+  assert.equal(retryCalls[0].mode, 'steer');
+  assert.equal((await restored.get(before.requestId)).mode, 'steer');
+});
+
 await check('同文本连续两次新发送：两个不同 requestId，两次 prompt', async () => {
   const { store, prompts } = await setup();
   const a = await store.sendPending('s1', 'same');

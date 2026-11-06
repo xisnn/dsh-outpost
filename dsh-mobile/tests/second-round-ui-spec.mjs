@@ -44,11 +44,13 @@ function approval(item, extra = {}) {
 }
 function hasBackground(h, color) { return h.nodes().some(n => flatten(typeof n.props.style === 'function' ? n.props.style({ pressed: false }) : n.props.style).backgroundColor === color); }
 
-test('normal approvals use warning tone, high-risk approvals retain red and two-step authorization', () => {
-  const normalView = approval(normal);assert.ok(hasBackground(normalView, normalView.theme.colors.warningWash));
+test('approval cards stay neutral with risk accents and high-risk two-step authorization', () => {
+  const normalView = approval(normal);assert.ok(hasBackground(normalView, normalView.theme.colors.bgRaised));
+  assert.ok(hasBackground(normalView, normalView.theme.colors.warningWash), 'warning wash is limited to the risk summary');
   assert.match(normalView.text(), /需要授权/);assert.doesNotMatch(normalView.text(), /高危操作需要授权/);
   normalView.button('收起审批卡片').props.onPress();normalView.render();assert.ok(normalView.button('展开待审批：read'));
-  assert.ok(hasBackground(normalView, normalView.theme.colors.warningWash));
+  assert.ok(hasBackground(normalView, normalView.theme.colors.bgRaised));
+  assert.match(normalView.text(), /风险提示/);
   let sent = 0;
   const dangerView = approval(high, { onAnswer() { sent++; } });assert.ok(hasBackground(dangerView, dangerView.theme.colors.dangerWash));
   assert.match(dangerView.text(), /高危操作需要授权/);

@@ -3,6 +3,7 @@ import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import vm from 'node:vm';
 import ts from 'typescript';
+import { createHash } from 'node:crypto';
 
 const flush = () => new Promise(resolve => setImmediate(resolve));
 function load(file, modules, globals = {}) {
@@ -18,8 +19,8 @@ function load(file, modules, globals = {}) {
   return exports;
 }
 function hooks() {
-  const states = [], effects = [], refs = [];
-  let cursor = 0, refCursor = 0;
+  const states = [], effects = [], refs = [], memos = [];
+  let cursor = 0, refCursor = 0, memoCursor = 0;
   const react = {
     createElement: (type, props, ...children) => ({ type, props: props || {}, children }),
     useState(initial) {
@@ -27,11 +28,15 @@ function hooks() {
       if (!(i in states)) states[i] = initial;
       return [states[i], value => { states[i] = typeof value === 'function' ? value(states[i]) : value; }];
     },
-    useMemo: fn => fn(), useCallback: fn => fn, memo: fn => fn,
+    useMemo(fn, deps) {
+      const i = memoCursor++, old = memos[i];
+      if (!old || !deps || !old.deps || deps.length !== old.deps.length || deps.some((value, index) => !Object.is(value, old.deps[index]))) memos[i] = { deps, value: fn() };
+      return memos[i].value;
+    }, useCallback: fn => fn, memo: fn => fn,
     useEffect: fn => effects.push(fn),
     useRef(initial) { const i = refCursor++; return refs[i] ??= { current: initial }; },
   };
-  return { states, effects, react: { ...react, default: react }, begin() { cursor = refCursor = 0; } };
+  return { states, effects, react: { ...react, default: react }, begin() { cursor = refCursor = memoCursor = 0; } };
 }
 const theme = { colors: {}, radius: {}, space: {}, type: {}, weight: {}, layout: { screenPadding: 10 } };
 function native(extra = {}) {
@@ -88,6 +93,7 @@ function fileCardHarness(fetchRemoteFile, fileSystem = {}, props = {}) {
     '../App': { useApp: () => ({ store: { fileBaseUrl: 'http://127.0.0.1:9', gatewayChannel: null }, butlerWorkspace: '/workspace' }) },
     '../core/fileUrl': { fetchRemoteFile, openLocalFile: async () => assert.fail('Images must use their viewer') },
     '../core/gatewayFiles': { downloadWorkspaceFile: async () => assert.fail('Gateway is offline') },
+    '../core/filePreview': { isTextPreviewable: () => false },
     './FileTypeBadge': { FileTypeBadge: 'FileTypeBadge' },
     '../core/picker': { formatBytes: bytes => `${bytes} B` },
     './ImageViewer': { ImageViewer: 'ImageViewer' },
@@ -166,6 +172,7 @@ for (const serverDigest of ['expected', 'tampered']) {
       return file;
     }, openLocalFile: async () => assert.fail('Markdown must use its viewer') },
     '../core/gatewayFiles': { downloadWorkspaceFile: async () => assert.fail('Gateway is offline') },
+    '../core/filePreview': { isTextPreviewable: () => false },
     './FileTypeBadge': { FileTypeBadge: 'FileTypeBadge' },
     '../core/picker': { formatBytes: bytes => `${bytes} B` },
     './ImageViewer': { ImageViewer: 'ImageViewer' }, './DocumentViewer': { DocumentViewer: 'DocumentViewer', canPreviewInside: () => true },
@@ -289,6 +296,7 @@ for (const mismatch of ['size', 'sha256']) {
       fs: { dirs: { CacheDir: '/cache' }, exists: async () => exists, stat: async () => ({ size: 3 }), unlink: async () => { deletes++; exists = false; } },
       config: () => ({ fetch: async () => { downloads++; exists = true; return { info: () => ({ status: 200 }) }; } }),
     } }, './net-security': { assertSecureUrl() {} }, './installable': { isInstallablePackage: () => false },
+    './pendingSend/fingerprint': { sha256Hex: value => createHash('sha256').update(value).digest('hex') },
   }, { URLSearchParams });
   await fetchRemoteFile('http://127.0.0.1:9', undefined, '/workspace/result.md');
   assert.equal(downloads, 0);

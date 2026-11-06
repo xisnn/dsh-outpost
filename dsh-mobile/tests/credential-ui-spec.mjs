@@ -131,6 +131,7 @@ test('pending text stays masked while safety retry receives the unchanged origin
 function sheet(text = original, write = () => true) {
   const copied = []; const h = harness('components/MessageActionSheet.tsx', 'MessageActionSheet', { visible: true, text, onClose() {} }, {
     './clipboard': { copyTextToClipboard(value) { copied.push(value); return write(value); } },
+    './LocalExportPanel': { LocalExportPanel: 'LocalExportPanel' },
   });
   return { ...h, copied };
 }

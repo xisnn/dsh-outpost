@@ -1,8 +1,8 @@
 /**
- * F-01 底部停靠式审批面板（升级自 ApprovalBanner）与列表待审批提醒条。
+ * 聊天内审批卡片（管家）/ 输入框上方审批面板（普通会话）。
  *
  * 关键特性：
- *   1. 停靠在聊天输入框正上方，支持收起为单行状态条、展开查看完整上下文；
+ *   1. 管家请求直接在主聊天流处理，提交后收起，失败或结果未知时在原位置提示；
  *   2. 多条待审批支持 `‹ 1 / N ›` 队列切换；
  *   3. 严格按 `sessionId` 隔离当前会话审批，其他会话待审批显示独立跳转入口；
  *   4. 完整展示待执行命令、目标路径、附加参数与风险说明，不隐藏关键参数；
@@ -10,8 +10,9 @@
  *   6. 提交失败 / 断线 / 401 / 403 / 超时未确认时自动恢复待审批状态并明确报错。
  */
 import React, { useEffect, useMemo, useRef, useState } from 'react';
-import { Platform, ScrollView, StyleSheet, Text, View } from 'react-native';
+import { Platform, ScrollView, StyleSheet, Text, View, useWindowDimensions } from 'react-native';
 import { MotionPressable as Pressable } from './MotionPressable';
+import { Collapse } from './ui';
 
 import {
   APPROVAL_COMMIT_TIMEOUT_MS,
@@ -46,6 +47,8 @@ export function ApprovalBanner({
   sessions = [],
   onAnswer,
   onOpenSession,
+  relatedSessionIds,
+  inline = false,
 }: {
   approvals: ReadonlyApproval[];
   readonlyApprovals?: ReadonlyApproval[];
@@ -60,6 +63,10 @@ export function ApprovalBanner({
   sessions?: readonly SessionTitleLike[];
   onAnswer?: (a: ReadonlyApproval, outcome: ApprovalDecision) => boolean | void;
   onOpenSession?: (sessionId: string, title: string) => void;
+  /** Verified task/team sessions handled inside the main butler conversation. */
+  relatedSessionIds?: ReadonlySet<string>;
+  /** Chat-flow presentation, with no separate page or cross-session navigation. */
+  inline?: boolean;
 }) {
   const tv = useTheme();
   const styles = useMemo(() => makeStyles(tv), [tv]);
@@ -68,6 +75,8 @@ export function ApprovalBanner({
   const [, bump] = useState(0);
   const [collapsed, setCollapsed] = useState(false);
   const [queueIndex, setQueueIndex] = useState(0);
+  const [expandedRequestId, setExpandedRequestId] = useState<string | null>(null);
+  const { height: windowHeight } = useWindowDimensions();
 
   // 保存最新的权威待审批列表、网关在线状态与鉴权终止态供所有超时回调使用，避免闭包捕获旧值。
   const latestStateRef = useRef({
@@ -106,19 +115,35 @@ export function ApprovalBanner({
   const partitioned = partitionApprovalsBySession(approvals, sessionId, {
     inFlightIds: controller.inFlightIds,
     sessions,
+    relatedSessionIds,
   });
 
   const answerable = partitioned.current;
   const answerableIds = new Set(answerable.map((a) => a.id));
-  const readOnly = readonlyApprovals.filter(
-    (r) => !answerableIds.has(r.id) && !controller.inFlightIds.has(r.id),
-  );
+  // Event history uses approvalId; gateway decisions use rpcId. They are one
+  // request, including while its response is in flight or authoritatively resolved.
+  const aliasScope = useRef({ sessionId, aliases: new Map<string, string>() });
+  if (aliasScope.current.sessionId !== sessionId) aliasScope.current = { sessionId, aliases: new Map() };
+  const aliases = aliasScope.current.aliases;
+  for (const a of approvals) {
+    if (a.sessionId === sessionId && a.approvalId) aliases.set(a.approvalId, a.id);
+  }
+  while (aliases.size > 200) aliases.delete(aliases.keys().next().value!);
+  const readOnly = readonlyApprovals.filter((r) => {
+    const rpcId = aliases.get(r.id) ?? r.id;
+    return !answerableIds.has(rpcId) && !controller.inFlightIds.has(rpcId) &&
+      !serverResolvedIds?.has(rpcId) && !approvals.some(a => a.sessionId === sessionId && (a.id === r.id || a.approvalId === r.id));
+  });
   const unknownApprovals = partitioned.unknown.filter((a) => !controller.inFlightIds.has(a.id));
   const unknownApprovalIds = new Set(unknownApprovals.map((a) => a.id));
   const currentList = [...answerable, ...readOnly, ...unknownApprovals];
   const total = currentList.length;
   const safeIndex = clampQueueIndex(queueIndex, total);
   const current = currentList[safeIndex];
+  const detailsExpanded = !!current && expandedRequestId === current.id;
+  useEffect(() => {
+    setExpandedRequestId(null);
+  }, [current?.id]);
   const isCurrentAnswerable = !!current && answerableIds.has(current.id);
   const canAnswer = isCurrentAnswerable && gatewayOnline && !authInvalidated && !!onAnswer;
   /** 当前条目来源不明（缺少 sessionId）时仅展示，不提供任何审批操作 */
@@ -137,7 +162,7 @@ export function ApprovalBanner({
     return () => clearTimeout(timer);
   }, [armed, controller]);
 
-  if (total === 0 && partitioned.otherGroups.length === 0) {
+  if (total === 0 && (inline || partitioned.otherGroups.length === 0)) {
     return null;
   }
 
@@ -175,18 +200,22 @@ export function ApprovalBanner({
   const switchQueue = (delta: number) => {
     if (total <= 1) return;
     controller.disarm();
+    setExpandedRequestId(null);
     const next = (safeIndex + delta + total) % total;
     setQueueIndex(next);
   };
 
   const details = current ? extractApprovalDetails(current) : null;
+  const requestTarget = details?.targetPath ?? details?.extraEntries.find(entry =>
+    /^(?:url|uri|host|hostname|domain|target|resource|地址|域名)$/i.test(entry.key),
+  )?.value;
   const risk = current ? assessApprovalRisk(current) : null;
   const submitError = current ? controller.errorFor(current.id) : null;
 
   return (
-    <View style={styles.dockContainer}>
-      {/* 其他会话待审批跳转入口（严格按 sessionId 隔离，不混入当前会话卡片） */}
-      {partitioned.otherGroups.map((group) => (
+    <View testID={inline ? 'chat-approval-card' : 'approval-dock'} style={styles.dockContainer}>
+      {/* 管家主聊天只展示已核实归属的请求，不要求切到其他审批会话。 */}
+      {(inline ? [] : partitioned.otherGroups).map((group) => (
         <Pressable
           key={group.sessionId}
           onPress={() => onOpenSession?.(group.sessionId, group.title)}
@@ -219,12 +248,18 @@ export function ApprovalBanner({
             accessibilityState={{ expanded: false }}
             accessibilityLabel={`展开${risk.highRisk ? '高危' : ''}待审批：${current.toolName}`}
           >
-            <Text style={[styles.icon, risk.highRisk ? styles.highRiskText : null]}>{risk.highRisk ? '⛔' : '⚠'}</Text>
-            <Text style={styles.collapsedTitle} numberOfLines={1}>
-              {risk.highRisk ? '高危待授权' : '等待授权'} ({safeIndex + 1}/{total}) · {current.toolName}
-              {details.command ? ` · ${details.command}` : details.targetPath ? ` · ${details.targetPath}` : ''}
+            <View style={styles.collapsedRow}>
+              <Text style={[styles.icon, risk.highRisk ? styles.highRiskText : null]}>{risk.highRisk ? '⛔' : '⚠'}</Text>
+              <Text style={styles.collapsedTitle} numberOfLines={1}>
+                {risk.highRisk ? '高危待授权' : '等待授权'} ({safeIndex + 1}/{total}) · {current.toolName}
+                {details.command ? ` · ${details.command}` : details.targetPath ? ` · ${details.targetPath}` : ''}
+              </Text>
+              <Text style={styles.collapseToggleText}>展开 ⌃</Text>
+            </View>
+            <Text style={[styles.riskTitle, risk.highRisk ? styles.highRiskText : null]}>
+              {risk.highRisk ? `高危风险：${risk.riskReasons.join('；')}` : '风险提示：仅授权本次请求。'}
             </Text>
-            <Text style={styles.collapseToggleText}>展开 ⌃</Text>
+            {submitError ? <Text style={styles.errorText} accessibilityRole="alert">{submitError}</Text> : null}
           </Pressable>
         ) : (
           <View style={[styles.wrap, risk.highRisk ? styles.wrapHighRisk : null]}>
@@ -283,69 +318,105 @@ export function ApprovalBanner({
               </View>
             </View>
 
-            {/* 完整命令、目标路径与关键参数（可滚动、可选择，绝不隐藏关键参数） */}
+            {/* 请求摘要始终展示；长上下文只在卡片内滚动，不挤走操作按钮。 */}
             <ScrollView
-              style={styles.specScroll}
-              contentContainerStyle={styles.specBox}
+              style={[styles.contextScroll, { maxHeight: Math.min(220, windowHeight * 0.3) }]}
+              contentContainerStyle={styles.contextBody}
               nestedScrollEnabled
+              key={current.id}
             >
               {details.command ? (
                 <View style={styles.specSection}>
                   <Text style={styles.specLabel}>待执行命令</Text>
-                  <Text style={styles.specCode} selectable>
-                    {details.command}
-                  </Text>
+                  <Text style={styles.specCode} numberOfLines={3} selectable>{details.command}</Text>
                 </View>
               ) : null}
-
-              {details.targetPath ? (
+              {requestTarget ? (
                 <View style={styles.specSection}>
-                  <Text style={styles.specLabel}>目标路径</Text>
-                  <Text style={styles.specCode} selectable>
-                    {details.targetPath}
-                  </Text>
+                  <Text style={styles.specLabel}>{details.targetPath ? '目标路径' : '请求目标'}</Text>
+                  <Text style={styles.detail} numberOfLines={2} ellipsizeMode="middle">{requestTarget}</Text>
                 </View>
               ) : null}
-
-              {details.extraEntries.map((entry) => (
-                <View key={entry.key} style={styles.specSection}>
-                  <Text style={styles.specLabel}>{entry.key}</Text>
-                  <Text style={styles.specCode} selectable>
-                    {entry.value}
-                  </Text>
-                </View>
-              ))}
-
               {details.reasonText ? (
                 <View style={styles.specSection}>
                   <Text style={styles.specLabel}>原因说明</Text>
-                  <Text style={styles.detail} selectable>
-                    {details.reasonText}
-                  </Text>
+                  <Text style={styles.detail} numberOfLines={2}>{details.reasonText}</Text>
                 </View>
               ) : null}
-
-              {!details.command &&
-              !details.targetPath &&
-              details.extraEntries.length === 0 &&
-              !details.reasonText ? (
-                <Text style={styles.detail} selectable>
-                  工具：{current.toolName}
-                </Text>
+              {!details.command && !requestTarget && !details.reasonText ? (
+                <Text style={styles.detail}>请求使用 {current.toolName}</Text>
               ) : null}
+              <Pressable
+                onPress={() => setExpandedRequestId(detailsExpanded ? null : current.id)}
+                style={styles.detailsToggle}
+                accessibilityRole="button"
+                accessibilityState={{ expanded: detailsExpanded }}
+                accessibilityLabel={detailsExpanded ? '收起详情' : '查看详情'}
+                accessibilityHint="查看完整命令、目标路径与全部附加参数"
+              >
+                <Text style={styles.detailsToggleText}>{detailsExpanded ? '收起详情 ⌃' : '查看详情 ⌄'}</Text>
+              </Pressable>
+              <Collapse open={detailsExpanded}>
+                <View style={styles.specBox}>
+                  {details.command ? (
+                    <View style={styles.specSection}>
+                      <Text style={styles.specLabel}>待执行命令</Text>
+                      <Text style={styles.specCode} selectable>
+                        {details.command}
+                      </Text>
+                    </View>
+                  ) : null}
+
+                  {details.targetPath ? (
+                    <View style={styles.specSection}>
+                      <Text style={styles.specLabel}>目标路径</Text>
+                      <Text style={styles.specCode} selectable>
+                        {details.targetPath}
+                      </Text>
+                    </View>
+                  ) : null}
+
+                  {details.extraEntries.map((entry) => (
+                    <View key={entry.key} style={styles.specSection}>
+                      <Text style={styles.specLabel}>{entry.key}</Text>
+                      <Text style={styles.specCode} selectable>
+                        {entry.value}
+                      </Text>
+                    </View>
+                  ))}
+
+                  {details.reasonText ? (
+                    <View style={styles.specSection}>
+                      <Text style={styles.specLabel}>原因说明</Text>
+                      <Text style={styles.detail} selectable>
+                        {details.reasonText}
+                      </Text>
+                    </View>
+                  ) : null}
+
+                  {!details.command &&
+                  !details.targetPath &&
+                  details.extraEntries.length === 0 &&
+                  !details.reasonText ? (
+                    <Text style={styles.detail} selectable>
+                      工具：{current.toolName}
+                    </Text>
+                  ) : null}
+                </View>
+              </Collapse>
             </ScrollView>
 
-            {/* 高危风险说明条 */}
-            {risk.highRisk ? (
-              <View style={styles.riskBox}>
-                <Text style={styles.riskTitle}>
-                  ⚠ 风险说明：{risk.riskReasons.join('；')}
-                </Text>
-                <Text style={styles.riskSub}>
-                  已启用防误触二次确认（仅作客户端额外确认，不替代服务端安全权限校验）。
-                </Text>
-              </View>
-            ) : null}
+            {/* 风险摘要不随详情折叠，也不随长命令滚出可视区。 */}
+            <View style={[styles.riskBox, risk.highRisk ? styles.riskBoxHighRisk : null]}>
+              <Text style={[styles.riskTitle, risk.highRisk ? styles.highRiskText : null]}>
+                {risk.highRisk
+                  ? `高危风险：${risk.riskReasons.join('；')}`
+                  : '风险提示：请核对操作内容，仅授权本次请求。'}
+              </Text>
+              {risk.highRisk ? (
+                <Text style={styles.riskSub}>允许前需再次点击确认。</Text>
+              ) : null}
+            </View>
 
             {/* 来源不明（缺少 sessionId）的安全禁用提示 */}
             {unknownSession ? (
@@ -367,18 +438,6 @@ export function ApprovalBanner({
             {canAnswer && !unknownSession && !isCurrentUnconfirmed ? (
               <View style={styles.actions}>
                 <Pressable
-                  onPress={() => press('rejected')}
-                  style={({ pressed }: { pressed: boolean }) => [
-                    actions.base,
-                    actions.quiet,
-                    pressed ? { opacity: tv.motion.pressOpacity } : null,
-                  ]}
-                  accessibilityRole="button"
-                  accessibilityLabel="拒绝"
-                >
-                  <Text style={actions.dangerText}>拒绝</Text>
-                </Pressable>
-                <Pressable
                   onPress={() => press('allowed-once')}
                   style={({ pressed }: { pressed: boolean }) => [
                     actions.base,
@@ -391,6 +450,18 @@ export function ApprovalBanner({
                   <Text style={risk.highRisk ? actions.dangerFillText : actions.primaryText}>
                     {armed ? '再次点击确认允许' : '允许一次'}
                   </Text>
+                </Pressable>
+                <Pressable
+                  onPress={() => press('rejected')}
+                  style={({ pressed }: { pressed: boolean }) => [
+                    actions.base,
+                    styles.rejectAction,
+                    pressed ? { opacity: tv.motion.pressOpacity } : null,
+                  ]}
+                  accessibilityRole="button"
+                  accessibilityLabel="拒绝"
+                >
+                  <Text style={actions.quietText}>拒绝</Text>
                 </Pressable>
               </View>
             ) : (
@@ -523,21 +594,17 @@ function makeStyles(tv: ReturnType<typeof useTheme>) {
       marginLeft: tv.space.sm,
     },
     collapsedBar: {
-      flexDirection: 'row',
-      alignItems: 'center',
+      minHeight: 44,
+      gap: tv.space.xs,
       paddingHorizontal: tv.space.md,
-      paddingVertical: 9,
+      paddingVertical: tv.space.sm,
       borderRadius: tv.radius.md,
-      backgroundColor: C.warningWash,
-      borderLeftWidth: 3,
-      borderLeftColor: C.warning,
+      backgroundColor: C.bgRaised,
+      borderWidth: StyleSheet.hairlineWidth,
+      borderColor: C.border,
     },
-    collapsedBarHighRisk: {
-      backgroundColor: C.dangerWash,
-      borderLeftColor: C.danger,
-      borderWidth: 1,
-      borderColor: C.danger,
-    },
+    collapsedRow: { flexDirection: 'row', alignItems: 'center' },
+    collapsedBarHighRisk: { borderColor: C.danger },
     collapsedTitle: {
       flex: 1,
       color: C.text,
@@ -559,16 +626,11 @@ function makeStyles(tv: ReturnType<typeof useTheme>) {
       paddingHorizontal: tv.space.md,
       paddingVertical: tv.space.sm,
       borderRadius: tv.radius.md,
-      backgroundColor: C.warningWash,
-      borderLeftWidth: 3,
-      borderLeftColor: C.warning,
+      backgroundColor: C.bgRaised,
+      borderWidth: StyleSheet.hairlineWidth,
+      borderColor: C.border,
     },
-    wrapHighRisk: {
-      backgroundColor: C.dangerWash,
-      borderLeftColor: C.danger,
-      borderWidth: 1,
-      borderColor: C.danger,
-    },
+    wrapHighRisk: { borderColor: C.danger },
     headerRow: { gap: tv.space.xs },
     headerLeft: {
       flexDirection: 'row',
@@ -633,25 +695,27 @@ function makeStyles(tv: ReturnType<typeof useTheme>) {
       fontSize: tv.type.micro,
       marginHorizontal: 2,
     },
-    specScroll: {
-      maxHeight: 132,
-      marginTop: tv.space.xs,
-      borderRadius: tv.radius.sm,
-      backgroundColor: C.bgRaised,
-      borderWidth: StyleSheet.hairlineWidth,
-      borderColor: C.border,
-    },
-    specBox: {
+    contextScroll: { marginTop: tv.space.xs },
+    contextBody: { gap: tv.space.sm },
+    detailsToggle: {
+      minHeight: 44,
+      justifyContent: 'center',
+      alignSelf: 'flex-start',
       paddingHorizontal: tv.space.sm,
-      paddingVertical: 6,
-      gap: 4,
+    },
+    detailsToggleText: { color: C.accent, fontSize: tv.type.sm, fontWeight: tv.weight.medium },
+    specBox: {
+      padding: tv.space.sm,
+      borderRadius: tv.radius.sm,
+      backgroundColor: C.bgCard,
+      gap: tv.space.sm,
     },
     specSection: {
       gap: 1,
     },
     specLabel: {
-      color: C.textFaint,
-      fontSize: tv.type.micro,
+      color: C.textSecondary,
+      fontSize: tv.type.xs,
     },
     specCode: {
       color: C.text,
@@ -669,11 +733,12 @@ function makeStyles(tv: ReturnType<typeof useTheme>) {
       paddingHorizontal: tv.space.sm,
       paddingVertical: 6,
       borderRadius: tv.radius.sm,
-      backgroundColor: C.dangerWash,
+      backgroundColor: C.warningWash,
     },
+    riskBoxHighRisk: { backgroundColor: C.dangerWash },
     riskTitle: {
-      color: C.danger,
-      fontSize: tv.type.micro,
+      color: C.warning,
+      fontSize: tv.type.xs,
       fontWeight: tv.weight.semibold,
     },
     riskSub: {
@@ -696,11 +761,11 @@ function makeStyles(tv: ReturnType<typeof useTheme>) {
       fontWeight: tv.weight.medium,
     },
     actions: {
-      flexDirection: 'row',
-      justifyContent: 'flex-end',
-      gap: tv.space.sm,
+      alignItems: 'stretch',
+      gap: tv.space.xs,
       marginTop: tv.space.sm,
     },
+    rejectAction: { backgroundColor: C.bgCard },
     help: {
       color: C.textTertiary,
       fontSize: tv.type.micro,

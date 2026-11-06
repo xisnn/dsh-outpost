@@ -235,5 +235,115 @@ console.log('\n=== 真实 DSH tool-call.id 与 tool/call.callId 合并去重\n')
 check('goal_round 续轮提示被当作注入消息过滤', isInjectedMessage('<goal_round>\nObjective: "x"') === true);
 check('普通用户消息不会被过滤', isInjectedMessage('请继续整理发布记录') === false);
 
+// ── 完成卡：派活不等于完成，历史计数来自本轮通知 ─────────────────
+console.log('\n=== 管家完成汇总投影\n');
+{
+  const { buildButlerWake } = await import('../src/core/butler.ts');
+  const { foldEventsIncremental, createIncrementalFoldCache, stabilizeTurns, stabilizeChatItems } =
+    await import('../src/core/fold/index.ts');
+  const cards = (rows) => rows.filter((i) => i.kind === 'assistant' && i.completionTaskCount > 0);
+  let seq = 0;
+  const event = (type, data) => ev(type, ++seq, data);
+  const message = (turn, step, text) => event('assistant/message', {
+    turn, step, message: { content: [{ type: 'text', text }] },
+  });
+  const history = [
+    event('turn/start', { turn: 1 }),
+    event('user/message', { turn: 1, content: [{ type: 'text', text: '帮我检查项目' }] }),
+    event('assistant/message', { turn: 1, step: 1, message: { content: [
+      { type: 'reasoning', text: '先安排检查' },
+      { type: 'tool-call', id: 'spawn', name: 'spawn_teammate', arguments: '{}' },
+    ] } }),
+    event('tool/call', { turn: 1, step: 1, callId: 'spawn', name: 'spawn_teammate', arguments: '{}' }),
+    event('tool/result', { turn: 1, message: { toolCallId: 'spawn', content: [{ type: 'text', text: 'started' }] } }),
+    event('tool/call', { turn: 1, step: 2, callId: 'task', name: 'team_task_create', arguments: '{}' }),
+    event('tool/result', { turn: 1, message: { toolCallId: 'task', content: [{ type: 'text', text: 'created' }] } }),
+    message(1, 3, '已安排检查，结果回来再汇总。'),
+    event('deliverables/presented', { turn: 1, step: 3, files: [{ path: '/tmp/plan.pdf' }] }),
+    event('turn/end', { turn: 1, reason: { kind: 'completed' } }),
+  ];
+  const dispatchTurns = foldEvents(history);
+  const dispatchItems = toChatItems(dispatchTurns);
+  check('普通会话派活、多步工具和答复不产生完成卡',
+    dispatchTurns[0].delegated === true && cards(dispatchItems).length === 0);
+  check('派活工具去重且结果、正文、附件全部保留',
+    dispatchItems.filter((i) => i.kind === 'assistant').flatMap((i) => i.blocks).length === 5 &&
+    dispatchItems.some((i) => i.kind === 'assistant' && i.blocks.some((b) => b.kind === 'file')) &&
+    dispatchItems.some((i) => i.kind === 'assistant' && i.blocks.some((b) => b.kind === 'tool' && b.output === 'started')));
+
+  history.push(
+    event('turn/start', { turn: 2 }),
+    event('user/message', { turn: 2, content: [{ type: 'text', text: buildButlerWake(['检查源码', '运行测试']) }] }),
+    message(2, 1, '我来整理结果。'),
+    event('tool/call', { turn: 2, step: 2, callId: 'read', name: 'read', arguments: '{}' }),
+    event('tool/result', { turn: 2, message: { toolCallId: 'read', content: [{ type: 'text', text: '报告内容' }] } }),
+    message(2, 3, '检查和测试均完成，报告已附上。'),
+    event('deliverables/presented', { turn: 2, step: 3, files: [{ path: '/tmp/report.pdf' }] }),
+  );
+  const cache = createIncrementalFoldCache();
+  const running = foldEventsIncremental(history, cache);
+  check('正在汇总时不宣告完成', cards(running.items).length === 0);
+  history.push(event('turn/end', { turn: 2, reason: { kind: 'completed' } }));
+  const completed = foldEventsIncremental(history, cache);
+  const summary = cards(completed.items);
+  check('真实完成通知仅在最后汇总 step 产生一张卡，计数为本轮的两项',
+    summary.length === 1 && summary[0].key === 'a-2-3' && summary[0].completionTaskCount === 2);
+  check('隐藏完成通知本身，保留中间回复、工具和最终交付物',
+    !completed.items.some((i) => i.kind === 'user' && i.turn === 2) &&
+    completed.items.filter((i) => i.kind === 'assistant' && i.turn === 2).length === 3 &&
+    summary[0].blocks.some((b) => b.kind === 'file' && b.path === '/tmp/report.pdf'));
+  const full = toChatItems(foldEvents(history));
+  check('增量流结束后的完成卡与全量历史投影一致', JSON.stringify(completed.items) === JSON.stringify(full));
+  check('乱序重放不会重复完成卡', cards(toChatItems(foldEvents([...history].reverse().concat(history)))).length === 1);
+
+  const aborted = foldEvents(history);
+  aborted[1].reason = 'aborted';
+  check('打断、报错或工具仍在等待时不宣告完成', cards(toChatItems(aborted)).length === 0);
+  aborted[1].reason = 'error';
+  check('失败汇总不显示绿色完成卡', cards(toChatItems(aborted)).length === 0);
+  aborted[1].reason = 'completed';
+  aborted[1].steps[1].blocks[0].pending = true;
+  check('未收到工具结果不显示完成卡', cards(toChatItems(aborted)).length === 0);
+
+  // 新的任务轮次不能改写旧汇总计数，也不能让旧派活轮次凭空变成完成卡。
+  history.push(
+    event('turn/start', { turn: 3 }),
+    event('user/message', { turn: 3, content: [{ type: 'text', text: buildButlerWake(['新任务']) }] }),
+    message(3, 1, '新任务也完成了。'),
+    event('turn/end', { turn: 3, reason: { kind: 'completed' } }),
+    event('turn/start', { turn: 4 }),
+    event('user/message', { turn: 4, content: [{ type: 'text', text: '普通后续问题〔模式:计划〕' }] }),
+    message(4, 1, '普通回复。'),
+    event('turn/end', { turn: 4, reason: { kind: 'completed' } }),
+  );
+  const later = foldEventsIncremental(history, cache);
+  check('后续轮次不更改旧卡计数，普通计划模式消息仍是普通回复',
+    JSON.stringify(cards(later.items).map((i) => i.completionTaskCount)) === '[2,1]' &&
+    !cards(later.items).some((i) => i.turn === 1 || i.turn === 4));
+  const oldTurns = foldEvents(history);
+  const changedTurns = foldEvents(history);
+  changedTurns[1].completionTaskCount = 3;
+  const oldItems = toChatItems(oldTurns);
+  const changedItems = toChatItems(changedTurns);
+  check('通知计数变化不会误复用旧 Turn 或汇总行引用',
+    stabilizeTurns(oldTurns, changedTurns)[1] !== oldTurns[1] &&
+    stabilizeChatItems(oldItems, changedItems).find((i) => i.key === 'a-2-3') !== oldItems.find((i) => i.key === 'a-2-3'));
+  const noTasks = foldEvents([
+    ev('turn/start', 1, { turn: 1 }),
+    ev('user/message', 2, { turn: 1, content: [{ type: 'text', text: buildButlerWake([]) }] }),
+    ev('assistant/message', 3, { turn: 1, step: 1, message: { content: [{ type: 'text', text: '没有任务' }] } }),
+    ev('turn/end', 4, { turn: 1, reason: { kind: 'completed' } }),
+  ]);
+  check('空完成通知不产生零任务完成卡', cards(toChatItems(noTasks)).length === 0);
+
+  const chatSource = fs.readFileSync(new URL('../src/screens/ChatScreen.tsx', import.meta.url), 'utf8');
+  const noticeSource = fs.readFileSync(new URL('../src/components/CompletionNotice.tsx', import.meta.url), 'utf8');
+  check('完成卡仅接收管家会话本轮计数，不读取当前团队总数或输入模式',
+    /doneTaskCount=\{butler && item.kind === 'assistant' \? item.completionTaskCount \?\? 0 : 0\}/.test(chatSource) &&
+    !chatSource.includes('completedTaskCount') && /if \(doneTaskCount > 0 && !turnRunning\)/.test(chatSource));
+  check('完成卡组件对零或无效计数保留原正文',
+    /if \(!Number.isFinite\(taskCount\) \|\| taskCount <= 0\) return <>\{children\}<\/>/.test(noticeSource));
+}
+
 console.log(`\n结果：${pass} 通过，${fail} 失败`);
 process.exit(fail === 0 ? 0 : 1);
