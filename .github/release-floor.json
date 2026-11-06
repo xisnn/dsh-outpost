@@ -12,10 +12,10 @@
     "维护方式：每次正式发布后，把 minVersionCode 抬到刚发布的那个值。",
     "只增不减。"
   ],
-  "minVersionCode": 180100,
-  "publishedVersion": "0.18.1",
+  "minVersionCode": 180200,
+  "publishedVersion": "0.18.2",
   "note": [
-    "当前水位线来自 GitHub 正式版 v0.18.1 的 APK，已用 aapt2 核验 versionCode=180100。",
+    "当前水位线来自 GitHub 正式版 v0.18.2 的 APK，已用 aapt2 核验 versionCode=180200。",
     "",
     "以下为早期 16200 水位线的历史依据：",
     "",
