@@ -152,7 +152,14 @@ export function AgentSettingsScreen() {
       );
       setHasKey(settings.hasKey);
       setApiKey('');
-      setSaved(true);
+      if (hasKey && !apiKey.trim() && !settings.hasKey) {
+        // The native store drops the saved credential when the endpoint identity
+        // changes, so the previous provider's key can never be sent to the new one.
+        setError('服务商地址已变更，原 API Key 已清除；请重新填写后再运行云端任务');
+        setSaved(false);
+      } else {
+        setSaved(true);
+      }
     } catch (failure) {
       setError(String((failure as Error)?.message ?? failure));
     } finally {

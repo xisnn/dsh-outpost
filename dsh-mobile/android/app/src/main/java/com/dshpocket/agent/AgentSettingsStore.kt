@@ -8,6 +8,7 @@ import com.dshpocket.agent.core.ModelConfig
 import com.dshpocket.agent.core.ModelProtocol
 import com.dshpocket.agent.core.modelBaseUrlAllowed
 import org.json.JSONObject
+import java.net.URI
 import java.security.KeyStore
 import javax.crypto.Cipher
 import javax.crypto.KeyGenerator
@@ -53,15 +54,34 @@ class AgentSettingsStore(context: Context) {
             "baseUrl must use HTTPS, or HTTP on loopback for local testing"
         }
         require(model.isNotBlank()) { "model required" }
+        val previousEndpoint = endpointIdentity(prefs.getString(KEY_BASE_URL, null))
         val edit = prefs.edit()
             .putString(KEY_PROTOCOL, parsed.name)
             .putString(KEY_BASE_URL, baseUrl.trim())
             .putString(KEY_MODEL, model.trim())
         if (!apiKey.isNullOrBlank()) {
             edit.putString(KEY_CIPHER, encrypt(apiKey))
+        } else if (previousEndpoint != endpointIdentity(baseUrl)) {
+            // Saving a different provider without a new key must not leave the
+            // previous credential behind: modelConfig() would pair it with the new
+            // endpoint and hand one operator's secret to another.
+            edit.remove(KEY_CIPHER)
         }
         check(edit.commit()) { "could not persist model settings" }
         return read()
+    }
+
+    /**
+     * Identity of the party that would receive the API key. A different scheme,
+     * host or port is a different trust boundary.
+     */
+    private fun endpointIdentity(baseUrl: String?): String? {
+        val raw = baseUrl?.trim()?.takeIf { it.isNotEmpty() } ?: return null
+        val uri = runCatching { URI(raw) }.getOrNull()
+        // An unparseable endpoint falls back to the raw string so it still compares
+        // unequal to a parseable one instead of both collapsing to the same value.
+        if (uri?.host == null) return raw.lowercase()
+        return "${uri.scheme?.lowercase()}://${uri.host.lowercase()}:${uri.port}"
     }
 
     @Synchronized
