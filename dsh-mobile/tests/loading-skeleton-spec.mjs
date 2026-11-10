@@ -46,6 +46,9 @@ function fixture() {
     '../components/TaskMotion': { TaskPressable: 'Pressable', TaskStatus: 'Status', TaskDisclosure: 'Disclosure', TaskSection: 'Section' },
     '../nav/NavHost': { useNav: () => nav }, 'react-native-safe-area-context': { useSafeAreaInsets: () => ({ bottom: 0 }) },
     '../core/butlerTaskList': load('core/butlerTaskList.ts', {}),
+    // The task screen now goes through ButlerClient; load the real desktop
+    // adapter so the skeleton assertions still exercise actual component wiring.
+    '../core/butlerClient': load('core/butlerClient.ts', { './localRuntime': load('core/localRuntime.ts', {}) }),
     '../core/rpc/model': { flattenCatalog: c => c.rows, findCatalogModel: () => null },
   };
   return { app, native, modules, announcements,
