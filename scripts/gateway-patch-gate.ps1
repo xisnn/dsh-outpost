@@ -133,25 +133,52 @@ function Test-GatewayPatchApplied {
 .DESCRIPTION
     把提示文案集中在一处，测试可以断言措辞而不必跑整个启动流程。
 
+    文案分两种场景，因为「能不能跳过」在两种场景下答案不同：
+
+      · 局域网（默认）—— 暴露面限于同网段，所以保留 -SkipGatewayPatchCheck
+        这个经过权衡的 opt-out（不用手机审批的人可以强行启动）。
+      · 公网隧道（-Public）—— 服务会被发布到公网 URL，此时 /mgw/* 无认证
+        意味着配对码铸造对**整个互联网**可达。**不提供跳过开关**，也不在
+        拒绝提示里提到它 —— 否则等于在最危险的入口教用户怎么关掉鉴权。
+
 .PARAMETER Detail
     apply.mjs --check 的原始输出，附在提示里便于排查。
 
+.PARAMETER Public
+    当前启动路径会把服务暴露到公网（start-tunnel.ps1）。切换文案：
+    说明公网可达、并且**不打印**跳过开关的提示。
+
 .EXAMPLE
     Write-GatewayPatchRefusal -Detail $result.Output
+    Write-GatewayPatchRefusal -Public -Detail $result.Output
 #>
 function Write-GatewayPatchRefusal {
     [CmdletBinding()]
-    param([string]$Detail = '')
+    param(
+        [string]$Detail = '',
+        [switch]$Public
+    )
 
     Write-Host ''
     Write-Host '[!] 网关管理接口认证补丁未生效 —— 拒绝启动。' -ForegroundColor Red
     if ($Detail) { Write-Host $Detail.Trim() -ForegroundColor DarkGray }
     Write-Host ''
     Write-Host '    原因：插件可能刚被升级/重装，补丁被覆盖掉了。' -ForegroundColor Yellow
-    Write-Host '    此时 /mgw/* 管理接口没有认证，配对码铸造对同网段可达。' -ForegroundColor Yellow
+    if ($Public) {
+        Write-Host '    此时 /mgw/* 管理接口没有认证，而隧道会把服务发布到公网 ——' -ForegroundColor Yellow
+        Write-Host '    配对码铸造对**整个互联网**可达，不只是同网段。' -ForegroundColor Yellow
+    } else {
+        Write-Host '    此时 /mgw/* 管理接口没有认证，配对码铸造对同网段可达。' -ForegroundColor Yellow
+    }
     Write-Host ''
     Write-Host '    修复：node patches\mobile-gateway-mgmt-auth\apply.mjs --apply' -ForegroundColor Cyan
     Write-Host '    或重跑：.\setup-gateway.ps1' -ForegroundColor Cyan
     Write-Host ''
-    Write-Host '    确认不需要手机审批、想强行启动：加 -SkipGatewayPatchCheck' -ForegroundColor DarkGray
+    if ($Public) {
+        # 刻意不提 -SkipGatewayPatchCheck：公网路径没有这个退出口。
+        Write-Host '    公网隧道不提供跳过开关。请先修好补丁；' -ForegroundColor DarkGray
+        Write-Host '    确实不需要手机审批时，改用局域网路径 .\start-dsh-web.ps1。' -ForegroundColor DarkGray
+    } else {
+        Write-Host '    确认不需要手机审批、想强行启动：加 -SkipGatewayPatchCheck' -ForegroundColor DarkGray
+    }
 }

@@ -199,6 +199,61 @@ if (-not (Test-Path $Cloudflared)) {
     exit 1
 }
 
+# ── 网关管理接口认证补丁门禁（公网路径，不可跳过）─────────────────
+#
+# 这个脚本会把 DSH 发布到公网 cloudflared URL，是**暴露面最大**的启动路径，
+# 却原先完全跳过了 start-dsh-web.ps1 那道「补丁未应用就拒绝启动」的门禁。
+# 补丁一旦失效（插件升级/重装就会抹掉它），/mgw/* 管理接口就没有认证，
+# 而 setup-gateway.ps1 已经把 adminLoopbackOnly 写成 false ——
+# 配对码铸造会对整个互联网可达。
+#
+# 与局域网路径的两点**刻意**差异：
+#   1. **不提供 -SkipGatewayPatchCheck**。门禁模块的拒绝文案里本来写着
+#      「想强行启动：加 -SkipGatewayPatchCheck」，那句在局域网是经过权衡的
+#      opt-out，但在公网等于教用户怎么关掉鉴权。所以这里显式传 -Skip:$false，
+#      并用 -Public 文案变体（不打印那句提示）。
+#   2. 门禁放在**两处** DSH 启动（下方的 schtasks /Create）与「定位 dsh」
+#      **之前** —— 否则环境缺失会先 exit，门禁根本执行不到。这正是
+#      scripts/gateway-patch-gate.ps1 头部注释记录过的历史坑。
+#
+# -Stop / -Status 是只读操作，已在上面早退，不受门禁影响。
+$gatePath = Join-Path $RepoRoot 'scripts\gateway-patch-gate.ps1'
+if (Test-Path -LiteralPath $gatePath) {
+    . $gatePath
+} else {
+    Write-Err '缺少 scripts\gateway-patch-gate.ps1，无法校验网关认证补丁。'
+    Write-Host '    这是仓库文件，请重新拉取；拒绝在无法校验的情况下启动。' -ForegroundColor Yellow
+    exit 1
+}
+
+# 本脚本没有 -Profile 参数，DSH 一律以 web profile 启动（见下方两处 --profile web）。
+# 注意不能直接用 $Profile —— 那是 PowerShell 的自动变量（当前 profile 脚本路径），
+# 拼进 Join-Path 会得到一个无意义的路径，使门禁静默判定为「插件未安装」。
+$patchScript = Join-Path $RepoRoot 'patches\mobile-gateway-mgmt-auth\apply.mjs'
+$tunnelDshHome = if ($env:DSH_HOME) { $env:DSH_HOME } else { Join-Path $env:USERPROFILE '.dsh' }
+$gatewayDir = Join-Path $tunnelDshHome 'profiles\web\node_modules\dsh-plugin-mobile-gateway'
+$gatewayIndex = Join-Path $gatewayDir 'lib\index.mjs'
+$gate = Test-GatewayPatchApplied -PatchScript $patchScript -Skip:$false `
+    -PluginInstalled:(Test-Path -LiteralPath (Join-Path $gatewayDir 'package.json')) -CheckRunner {
+        param($script)
+        $previous = $ErrorActionPreference
+        $ErrorActionPreference = 'Continue'
+        try {
+            $global:LASTEXITCODE = $null
+            $output = (& node $script --check "--path=$gatewayIndex" 2>&1 | Out-String)
+            $code = $global:LASTEXITCODE
+            if ($null -eq $code) { $code = 1 }
+            return @{ ExitCode = $code; Output = $output }
+        } finally { $ErrorActionPreference = $previous }
+    }
+if ($gate.ShouldCheck) {
+    if ($gate.ExitCode -ne 0) {
+        Write-GatewayPatchRefusal -Public -Detail $gate.Output
+        exit 1
+    }
+    Write-Step '网关认证补丁：已生效'
+}
+
 # 先停掉旧的，避免端口/域名冲突
 if (Test-Path $PidFile) {
     $oldPid = (Get-Content $PidFile -Raw).Trim()

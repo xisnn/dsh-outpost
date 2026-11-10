@@ -343,5 +343,152 @@ console.log('── 7. 全仓库测试不再硬编码 powershell.exe ──');
 }
 
 console.log('');
+console.log('── 8. 公网隧道启动路径必须过同一道门禁，且不得可跳过（SEC-01）──');
+
+// `start-tunnel.ps1` 会启动 DSH 并把它发布到公网 cloudflared URL，却完全
+// 跳过了 `start-dsh-web.ps1` 那道「补丁未应用就拒绝启动」的门禁。
+//
+// 公网是暴露面最大的路径，所以这里的要求比局域网**更严**：
+//   · 必须过门禁（fail-closed）
+//   · **不得**提供 -SkipGatewayPatchCheck 旁路 —— 门禁模块的拒绝文案里
+//     本来就写着「想强行启动：加 -SkipGatewayPatchCheck」，那句话在局域网
+//     是经过权衡的 opt-out，搬到公网就等于教用户怎么关掉鉴权。
+//     因此公网路径用 -Public 变体，不打印这句。
+const tunnelScript = path.join(repo, 'start-tunnel.ps1');
+const tunnelSrc = read('start-tunnel.ps1');
+
+// §7 已经踩过同一个坑：注释里出现被断言搜索的字面量会造成误判。
+// 隧道脚本的门禁注释**故意**解释了「为什么这里不提供 -SkipGatewayPatchCheck」，
+// 那段文字本身就含这个词，也含 `schtasks /Create`。所以位置与"不得出现"类
+// 断言必须跑在剥掉注释的源码上，否则断言的是注释而不是代码。
+const stripPsComments = (s) =>
+  s
+    .replace(/<#[\s\S]*?#>/g, '')
+    .split('\n')
+    .filter((l) => !/^\s*#/.test(l))
+    .join('\n');
+const tunnelCode = stripPsComments(tunnelSrc);
+
+check(existsSync(tunnelScript), 'start-tunnel.ps1 存在');
+check(
+  /\.\s*\$gatePath/.test(tunnelCode),
+  '隧道脚本 dot-source 门禁模块',
+);
+check(/Test-GatewayPatchApplied/.test(tunnelCode), '隧道脚本调用门禁判定函数');
+check(/Write-GatewayPatchRefusal/.test(tunnelCode), '隧道脚本调用提示函数');
+check(
+  /if \(\$gate\.ExitCode -ne 0\)[\s\S]{0,200}?exit 1/.test(tunnelCode),
+  '隧道脚本在门禁未通过时 exit 1（fail-closed）',
+);
+check(
+  !/SkipGatewayPatchCheck/.test(tunnelCode),
+  '隧道脚本的代码里不含 SkipGatewayPatchCheck（公网路径不得可跳过）',
+  '找到了跳过旁路',
+);
+check(/-Skip:\$false/.test(tunnelCode), '隧道脚本显式传 -Skip:$false（把"永不跳过"写成代码事实）');
+check(/Write-GatewayPatchRefusal -Public/.test(tunnelCode), '隧道脚本用 -Public 文案变体');
+
+// 顺序：门禁必须在两处 DSH 启动（schtasks /Create）与「定位 dsh」之前，
+// 否则环境缺失会先 exit，门禁根本执行不到 —— 这正是 gateway-patch-gate.ps1
+// 头部注释记录过的历史坑。
+{
+  const gateIdx = tunnelCode.indexOf('Test-GatewayPatchApplied');
+  const firstCreate = tunnelCode.indexOf('schtasks /Create');
+  const lastCreate = tunnelCode.lastIndexOf('schtasks /Create');
+  const dshIdx = tunnelCode.indexOf("Write-Err '找不到 dsh'");
+  check(
+    gateIdx > 0 && firstCreate > 0 && gateIdx < firstCreate,
+    '门禁位于首个 schtasks /Create（DSH 启动点）之前',
+    `gate=${gateIdx} create=${firstCreate}`,
+  );
+  check(
+    lastCreate > firstCreate && gateIdx < lastCreate,
+    '门禁同时位于第二个 schtasks /Create 之前（两处启动点都被覆盖）',
+    `gate=${gateIdx} first=${firstCreate} last=${lastCreate}`,
+  );
+  check(
+    gateIdx > 0 && dshIdx > 0 && gateIdx < dshIdx,
+    '门禁位于「定位 dsh」之前',
+    `gate=${gateIdx} dsh=${dshIdx}`,
+  );
+}
+
+// -Status / -Stop 是只读操作，不该被门禁挡住
+{
+  const stopIdx = tunnelCode.indexOf('if ($Stop)');
+  const statusIdx = tunnelCode.indexOf('if ($Status)');
+  const gateIdx = tunnelCode.indexOf('Test-GatewayPatchApplied');
+  check(
+    stopIdx > 0 && statusIdx > 0 && gateIdx > statusIdx,
+    '门禁位于 -Stop / -Status 早退之后（只读操作不被挡）',
+    `stop=${stopIdx} status=${statusIdx} gate=${gateIdx}`,
+  );
+}
+
+console.log('');
+console.log('── 9. -Public 拒绝文案：不广告跳过开关，但不削弱局域网 opt-out ──');
+
+if (!ps.ok) {
+  if (process.env.CI) bad('CI 必须有 PowerShell');
+  else console.log('  SKIP  本机无 PowerShell');
+} else {
+  const tmp = mkdtempSync(path.join(os.tmpdir(), 'public-'));
+  try {
+    const driver = path.join(tmp, 'public.ps1');
+    writePowerShellScript(
+      driver,
+      [
+        `. '${gateModule.replace(/'/g, "''")}'`,
+        "Write-Output '---PUBLIC-BEGIN---'",
+        'Write-GatewayPatchRefusal -Public -Detail "PUB_MARKER_QQ"',
+        "Write-Output '---PUBLIC-END---'",
+        "Write-Output '---LAN-BEGIN---'",
+        'Write-GatewayPatchRefusal -Detail "LAN_MARKER_QQ"',
+        "Write-Output '---LAN-END---'",
+      ].join('\n'),
+      'utf8',
+    );
+    let out = '';
+    try {
+      out = execFileSync(
+        ps.exe,
+        ['-NoProfile', '-NonInteractive', '-ExecutionPolicy', 'Bypass', '-File', driver],
+        { encoding: 'utf8', timeout: 120000, stdio: ['ignore', 'pipe', 'pipe'] },
+      );
+    } catch (e) {
+      out = String(e.stdout || '') + String(e.stderr || '');
+    }
+
+    const between = (s, a, b) => {
+      const i = s.indexOf(a);
+      const j = s.indexOf(b);
+      return i >= 0 && j > i ? s.slice(i + a.length, j) : '';
+    };
+    const pub = between(out, '---PUBLIC-BEGIN---', '---PUBLIC-END---');
+    const lan = between(out, '---LAN-BEGIN---', '---LAN-END---');
+
+    check(pub.length > 0 && lan.length > 0, '两段文案都被捕获', `pub=${pub.length} lan=${lan.length}`);
+
+    // 公网：仍然是明确的拒绝 + 可操作的修复命令
+    check(/认证补丁未生效/.test(pub), '公网文案：说明「认证补丁未生效」');
+    check(/拒绝启动/.test(pub), '公网文案：明确「拒绝启动」');
+    check(/apply\.mjs --apply/.test(pub), '公网文案：给出可执行的修复命令');
+    check(/PUB_MARKER_QQ/.test(pub), '公网文案：附带 apply.mjs 原始输出');
+    // **核心**：公网不得广告跳过开关
+    check(
+      !/SkipGatewayPatchCheck/.test(pub),
+      '公网文案不含 SkipGatewayPatchCheck（不教用户绕过鉴权门禁）',
+      '公网拒绝提示里出现了跳过开关',
+    );
+
+    // 局域网：opt-out 必须保留，不能被这次收紧顺带削掉
+    check(/SkipGatewayPatchCheck/.test(lan), '局域网文案仍说明可显式跳过（opt-out 未被削弱）');
+    check(/LAN_MARKER_QQ/.test(lan), '局域网文案：附带 apply.mjs 原始输出');
+  } finally {
+    rmSync(tmp, { recursive: true, force: true });
+  }
+}
+
+console.log('');
 console.log(`结果：${pass} 通过，${fail} 失败`);
 process.exitCode = fail === 0 ? 0 : 1;
