@@ -29,13 +29,19 @@ object RunRecovery {
                 run.lastToolStatus == "STARTED" -> "process-interrupted: read-only tool was interrupted; not replayed"
                 else -> "process-interrupted: run was not resumed"
             }
-            store.transition(
-                runId = run.id,
-                phase = RunPhase.INTERRUPTED,
-                reason = reason,
-                requiresReconciliation = unknownTool,
-            )
-            store.snapshot(run.id)?.let { recovered += it }
+            // Recovery is all-or-nothing if it throws: one unwritable run file
+            // would leave every other interrupted run looking active forever.
+            // Reconcile what can be reconciled and leave the rest as found.
+            val reconciled = runCatching {
+                store.transition(
+                    runId = run.id,
+                    phase = RunPhase.INTERRUPTED,
+                    reason = reason,
+                    requiresReconciliation = unknownTool,
+                )
+                store.snapshot(run.id)
+            }.getOrNull()
+            reconciled?.let { recovered += it }
         }
         return recovered.maxByOrNull { it.updatedAt }
     }

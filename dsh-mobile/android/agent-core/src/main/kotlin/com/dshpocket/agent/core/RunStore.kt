@@ -115,6 +115,26 @@ class FileRunStore(root: Path) : RunStore {
     @Synchronized
     override fun begin(spec: RunSpec) {
         write(RunSnapshot(spec.id, RunPhase.QUEUED, goal = spec.goal))
+        prune()
+    }
+
+    /**
+     * Run files otherwise accumulate for the life of the install. Pruning runs
+     * once per run rather than once per write, since a write happens on every
+     * step and every tool call.
+     *
+     * Only terminal runs are candidates, and never one still carrying
+     * requiresReconciliation: that flag is the only evidence that a tool's side
+     * effect is unknown, so it outlives the cap. Corrupt files report that flag
+     * too and are therefore kept.
+     */
+    private fun prune() {
+        val candidates = list().filter { it.phase in TERMINAL_PHASES && !it.requiresReconciliation }
+        if (candidates.size <= MAX_RUN_FILES) return
+        // list() is sorted ascending by updatedAt, so the overflow is the oldest.
+        candidates.take(candidates.size - MAX_RUN_FILES).forEach { run ->
+            runCatching { Files.deleteIfExists(fileFor(run.id)) }
+        }
     }
 
     @Synchronized
@@ -195,24 +215,49 @@ class FileRunStore(root: Path) : RunStore {
     override fun snapshot(runId: String): RunSnapshot? {
         val file = fileFor(runId)
         if (!Files.isRegularFile(file)) return null
-        val properties = Properties()
-        FileInputStream(file.toFile()).use { properties.load(it) }
-        return RunSnapshot(
-            id = properties.getProperty("id") ?: runId,
-            phase = RunPhase.valueOf(properties.getProperty("phase") ?: RunPhase.QUEUED.name),
-            step = (properties.getProperty("step") ?: "0").toIntOrNull() ?: 0,
-            reason = properties.getProperty("reason"),
-            requiresReconciliation = properties.getProperty("requiresReconciliation") == "true",
-            updatedAt = (properties.getProperty("updatedAt") ?: "0").toLongOrNull() ?: 0L,
-            goal = properties.getProperty("goal"),
-            lastToolCallId = properties.getProperty("lastToolCallId"),
-            lastToolName = properties.getProperty("lastToolName"),
-            lastToolDigest = properties.getProperty("lastToolDigest"),
-            lastToolMayHaveSideEffect = properties.getProperty("lastToolMayHaveSideEffect") == "true",
-            lastToolStatus = properties.getProperty("lastToolStatus"),
-            resultText = properties.getProperty("resultText"),
-        )
+        return try {
+            val properties = Properties()
+            FileInputStream(file.toFile()).use { properties.load(it) }
+            // write() always records a phase, so a missing or unknown value means
+            // the file is truncated or corrupt. Falling back to an active phase
+            // would hand startup recovery a run it believes is resumable.
+            val phase = parsePhase(properties.getProperty("phase")) ?: return corrupt(runId)
+            RunSnapshot(
+                id = properties.getProperty("id") ?: runId,
+                phase = phase,
+                step = (properties.getProperty("step") ?: "0").toIntOrNull() ?: 0,
+                reason = properties.getProperty("reason"),
+                requiresReconciliation = properties.getProperty("requiresReconciliation") == "true",
+                updatedAt = (properties.getProperty("updatedAt") ?: "0").toLongOrNull() ?: 0L,
+                goal = properties.getProperty("goal"),
+                lastToolCallId = properties.getProperty("lastToolCallId"),
+                lastToolName = properties.getProperty("lastToolName"),
+                lastToolDigest = properties.getProperty("lastToolDigest"),
+                lastToolMayHaveSideEffect = properties.getProperty("lastToolMayHaveSideEffect") == "true",
+                lastToolStatus = properties.getProperty("lastToolStatus"),
+                resultText = properties.getProperty("resultText"),
+            )
+        } catch (error: Exception) {
+            corrupt(runId)
+        }
     }
+
+    /**
+     * One unreadable state file must not take the whole store down with it:
+     * [list] feeds [RunRecovery], so a single bad file would otherwise stop
+     * every other run from being reconciled at startup. FAILED keeps the run
+     * out of the active set, and requiresReconciliation surfaces it to the user
+     * instead of hiding it.
+     */
+    private fun corrupt(runId: String): RunSnapshot = RunSnapshot(
+        id = runId,
+        phase = RunPhase.FAILED,
+        reason = "run-state-unreadable",
+        requiresReconciliation = true,
+    )
+
+    private fun parsePhase(raw: String?): RunPhase? =
+        raw?.let { value -> RunPhase.values().firstOrNull { it.name == value } }
 
     @Synchronized
     override fun list(): List<RunSnapshot> {
@@ -222,7 +267,9 @@ class FileRunStore(root: Path) : RunStore {
         }
         return files.mapNotNull { file ->
             val name = file.fileName.toString().removeSuffix(".properties")
-            snapshot(name)
+            // A stray or oddly named file in the directory is not a reason to
+            // abandon recovery for the runs that are still readable.
+            runCatching { snapshot(name) }.getOrNull()
         }.sortedBy { it.updatedAt }
     }
 
@@ -262,5 +309,11 @@ class FileRunStore(root: Path) : RunStore {
     private fun fileFor(runId: String): Path {
         require(runId.matches(Regex("[A-Za-z0-9._-]{1,100}"))) { "unsafe run id" }
         return directory.resolve("$runId.properties")
+    }
+
+    companion object {
+        /** The run history screen only ever shows the most recent 30. */
+        const val MAX_RUN_FILES = 60
+        val TERMINAL_PHASES = setOf(RunPhase.COMPLETED, RunPhase.FAILED, RunPhase.INTERRUPTED)
     }
 }

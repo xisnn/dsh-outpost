@@ -279,4 +279,108 @@ class AgentLoopTest {
         assertEquals(RunPhase.RUNNING, snapshot?.phase)
         assertEquals(2, snapshot?.step)
     }
+
+    private class EchoTool(private val payloadFor: (ToolCall) -> String) : AgentTool {
+        override val risk = ToolRisk.READ
+        override val spec = ToolSpec(
+            name = "echo",
+            description = "returns a fixed payload",
+            parameters = mapOf("type" to "object"),
+        )
+
+        override fun execute(call: ToolCall): ToolOutput = ToolOutput(ToolStatus.OK, payloadFor(call))
+    }
+
+    private fun echoRun(payloadFor: (ToolCall) -> String, vararg replies: ModelReply): Pair<FakeModel, RunResult> {
+        val model = FakeModel(*replies)
+        val result = AgentLoop(
+            model,
+            ActionExecutor(ToolRegistry(listOf(EchoTool(payloadFor))), RecordingGate(ApprovalDecision.ALLOW_ONCE)),
+            MemoryRunStore(),
+        ).run(RunSpec("run-context", "context", maxSteps = replies.size + 1))
+        return model to result
+    }
+
+    @Test
+    fun `oversized tool result is clipped for the model but kept whole in the run result`() {
+        val payload = "x".repeat(AgentLoop.MAX_TOOL_RESULT_CHARS + 5_000)
+        val (model, result) = echoRun(
+            { payload },
+            ModelReply.Calls(listOf(ToolCall("c1", "echo"))),
+            ModelReply.Text("done"),
+        )
+
+        // The UI and the run store must still see exactly what the tool returned.
+        assertEquals(payload, result.toolResults.single().content)
+
+        val sent = model.requests[1].messages.filterIsInstance<AgentMessage.Tool>().single().content
+        assertTrue(sent.length < payload.length)
+        assertTrue(sent.startsWith(payload.take(AgentLoop.MAX_TOOL_RESULT_CHARS)))
+        assertTrue(sent.contains("truncated 5000 chars"))
+    }
+
+    @Test
+    fun `a tool result exactly at the budget is sent verbatim`() {
+        val payload = "y".repeat(AgentLoop.MAX_TOOL_RESULT_CHARS)
+        val (model, result) = echoRun(
+            { payload },
+            ModelReply.Calls(listOf(ToolCall("c1", "echo"))),
+            ModelReply.Text("done"),
+        )
+
+        assertEquals(payload, model.requests[1].messages.filterIsInstance<AgentMessage.Tool>().single().content)
+        assertEquals(payload, result.toolResults.single().content)
+    }
+
+    @Test
+    fun `older tool results age out of the model request but stay in the run transcript`() {
+        val (model, result) = echoRun(
+            { call -> "payload-${call.id}" },
+            ModelReply.Calls(listOf(ToolCall("c1", "echo"))),
+            ModelReply.Calls(listOf(ToolCall("c2", "echo"))),
+            ModelReply.Calls(listOf(ToolCall("c3", "echo"))),
+            ModelReply.Calls(listOf(ToolCall("c4", "echo"))),
+            ModelReply.Calls(listOf(ToolCall("c5", "echo"))),
+            ModelReply.Calls(listOf(ToolCall("c6", "echo"))),
+            ModelReply.Text("done"),
+        )
+        assertEquals(RunPhase.COMPLETED, result.phase)
+
+        val sent = model.requests.last().messages.filterIsInstance<AgentMessage.Tool>()
+        assertEquals(6, sent.size)
+        // Providers pair a tool result with its call by id, so ids and names must
+        // survive aging or the transcript becomes malformed and the request fails.
+        assertEquals((1..6).map { "c$it" }, sent.map { it.callId })
+        assertEquals(List(6) { "echo" }, sent.map { it.name })
+        assertEquals(
+            (3..6).map { "payload-c$it" },
+            sent.takeLast(AgentLoop.RECENT_TOOL_RESULTS).map { it.content },
+        )
+        assertTrue(
+            sent.dropLast(AgentLoop.RECENT_TOOL_RESULTS)
+                .all { it.content.contains("omitted to fit the context window") },
+        )
+
+        val assistants = model.requests.last().messages.filterIsInstance<AgentMessage.Assistant>()
+        assertEquals((1..6).map { "c$it" }, assistants.flatMap { it.calls }.map { it.id })
+
+        // Aging is a property of the request only; the run keeps its own history.
+        assertEquals(
+            (1..6).map { "payload-c$it" },
+            result.messages.filterIsInstance<AgentMessage.Tool>().map { it.content },
+        )
+    }
+
+    @Test
+    fun `a run within the recent-result budget sends every tool result verbatim`() {
+        val (model, _) = echoRun(
+            { call -> "payload-${call.id}" },
+            ModelReply.Calls(listOf(ToolCall("c1", "echo"))),
+            ModelReply.Calls(listOf(ToolCall("c2", "echo"))),
+            ModelReply.Text("done"),
+        )
+
+        val sent = model.requests.last().messages.filterIsInstance<AgentMessage.Tool>()
+        assertEquals(listOf("payload-c1", "payload-c2"), sent.map { it.content })
+    }
 }

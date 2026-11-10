@@ -27,7 +27,7 @@ class AgentLoop(
             if (!control.beforeStep()) return interrupted(spec, messages, toolResults)
             store.step(spec.id, step)
             val reply = try {
-                val request = ModelRequest(messages.toList(), executor.registry.specs)
+                val request = ModelRequest(compact(messages), executor.registry.specs)
                 if (model is StreamingModelClient) {
                     model.complete(request) { observer.onText(it) }
                 } else {
@@ -78,13 +78,51 @@ class AgentLoop(
                             ToolStatus.DENIED -> "DENIED: ${result.content}"
                             ToolStatus.ERROR -> "ERROR: ${result.content}"
                         }
-                        messages += AgentMessage.Tool(result.callId, result.name, content)
+                        messages += AgentMessage.Tool(result.callId, result.name, clip(content))
                     }
                 }
             }
         }
         store.transition(spec.id, RunPhase.FAILED, "step-limit")
         return RunResult(spec.id, RunPhase.FAILED, null, "step-limit", messages.toList(), toolResults.toList())
+    }
+
+    /**
+     * Only the model request is trimmed. [RunResult.toolResults] keeps every
+     * full payload, so the UI and the run store still see what really came back.
+     */
+    private fun clip(content: String): String =
+        if (content.length <= MAX_TOOL_RESULT_CHARS) {
+            content
+        } else {
+            content.take(MAX_TOOL_RESULT_CHARS) +
+                "\n…[truncated ${content.length - MAX_TOOL_RESULT_CHARS} chars; re-read a narrower range if you need more]"
+        }
+
+    /**
+     * Tool results accumulate for the whole run, and a single workspace_read can
+     * return hundreds of KB. Without aging, a long run overflows the provider
+     * context and dies with a protocol error instead of finishing. Call ids and
+     * names are preserved so providers that pair tool calls with results by id
+     * still see a well-formed transcript.
+     */
+    private fun compact(messages: List<AgentMessage>): List<AgentMessage> {
+        val stale = messages.indices
+            .filter { messages[it] is AgentMessage.Tool }
+            .dropLast(RECENT_TOOL_RESULTS)
+            .toSet()
+        if (stale.isEmpty()) return messages.toList()
+        return messages.mapIndexed { index, message ->
+            if (index !in stale || message !is AgentMessage.Tool) {
+                message
+            } else {
+                AgentMessage.Tool(
+                    message.callId,
+                    message.name,
+                    "[earlier ${message.name} result omitted to fit the context window]",
+                )
+            }
+        }
     }
 
     private fun interrupted(
@@ -104,6 +142,12 @@ class AgentLoop(
     }
 
     companion object {
+        /** workspace_read alone can return 256KB; one result must not own the window. */
+        const val MAX_TOOL_RESULT_CHARS = 16_000
+
+        /** Tool results kept verbatim; older ones are replaced by a placeholder. */
+        const val RECENT_TOOL_RESULTS = 4
+
         const val DEFAULT_SYSTEM_PROMPT =
             "You are a local phone butler. Use only the provided tools; never claim a tool succeeded unless its result says OK. " +
                 "All file paths are relative to the workspace. Ask for approval through the tool layer, never bypass it."
