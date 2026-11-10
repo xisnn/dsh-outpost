@@ -177,7 +177,7 @@
 | **TEST-13 兼容矩阵** | AGP 8.11.0 + Gradle 8.14.3 + Kotlin 2.1.20 + JDK 21 是否互相支持 | 需要访问外部版本兼容表 |
 | **`07` §一 行为 2** | fold 的逐 `Step` 去重在 `assistant/message` 与 `tool/call` 携带**不同 `data.step`** 时是否产生两个块 | 需要一段**真实的、step 不匹配的**事件轨迹；本轮未抓取任何真实流量，仓库 fixture 里也没有这种样本 |
 | **PERF 全部"静态怀疑"条目** | 单次渲染 / 单次解析的**真实毫秒数** | **本轮未执行任何真机性能测量**。`04` §九 给出了 6 项待执行的测量计划（含工具与阈值） |
-| **测试套件当前是绿是红** | **部分解决（2026-11-11 实施轮）** | 审计轮未执行完整链，故当时不做断言。实施轮为了验证聚合器**本机实跑**了 CI 用的同一条命令 `npm test`：**106 条命令 / 106 通过 / 0 失败 / 433.4s / exit 0**，含末条 `tsc --noEmit`（日志打印"类型检查（tsc --noEmit）：已执行且通过"；Node v24.13.0 / Windows）。**仍不能推断 CI 结果** —— CI 是 Node 20 / ubuntu-latest，两者在 `WebSocket` 全局对象、路径语义、PowerShell 版本（5.1 vs pwsh 7）上有差异，这正是仓库自带 `test:node20` 链的原因 |
+| **测试套件当前是绿是红** | **部分解决（2026-11-11 实施轮）** | 审计轮未执行完整链，故当时不做断言。实施轮为了验证聚合器**本机实跑**了 CI 用的同一条命令 `npm test`：**两次独立完整实跑均 106 条命令 / 106 通过 / 0 失败 / exit 0**（433.4s 与 380.4s），含末条 `tsc --noEmit`（日志打印"类型检查（tsc --noEmit）：已执行且通过"；Node v24.13.0 / Windows）。**仍不能推断 CI 结果** —— CI 是 Node 20 / ubuntu-latest，两者在 `WebSocket` 全局对象、路径语义、PowerShell 版本（5.1 vs pwsh 7）上有差异，这正是仓库自带 `test:node20` 链的原因 |
 
 ---
 
@@ -555,7 +555,7 @@ $ git diff --stat HEAD -- . ':(exclude)docs/audits'
 
 > **注**：下列"未执行"描述的是 **2026-11-10 审计轮**（受"只允许运行不修改业务文件或外部状态的检查"约束）。**2026-11-11 的实施轮**为了验证修复，执行了其中三项，已在下方标注。
 
-- ⚠️ 完整 `npm test` 链、`test:integration`、`test:node20` —— 审计轮未执行；**实施轮三条全部执行**（本机 Node v24.13.0 / Windows）：`npm test` **106 条 / 106 通过 / 433.4s / exit 0**；`test:integration` **5 条 / 5 通过 / 29.3s**（含 2 条真 `tsx`）；`test:node20` **5 条 / 5 通过 / 7.0s**。最后一条是 `--require ./tests/support/node20-sim.cjs` 前缀在 `shell:false` 下仍然生效的**真实证据** —— 若该前缀丢失或路径解析失败，Node 会以 MODULE_NOT_FOUND 非零退出，而它是 exit 0
+- ⚠️ 完整 `npm test` 链、`test:integration`、`test:node20` —— 审计轮未执行；**实施轮三条全部执行**（本机 Node v24.13.0 / Windows）：`npm test` **两次独立实跑均 106 条 / 106 通过 / exit 0**（433.4s、380.4s）；`test:integration` **5 条 / 5 通过 / 29.3s**（含 2 条真 `tsx`）；`test:node20` **5 条 / 5 通过 / 7.0s**。最后一条是 `--require ./tests/support/node20-sim.cjs` 前缀在 `shell:false` 下仍然生效的**真实证据** —— 若该前缀丢失或路径解析失败，Node 会以 MODULE_NOT_FOUND 非零退出，而它是 exit 0
 - ⚠️ `tsc --noEmit` —— 审计轮未执行；**实施轮已执行**（作为 `npm test` 的第 106 条，通过）
 - ⚠️ 任何 `gradlew`（含 `:agent-core:test`）—— 审计轮未执行；**实施轮已执行** `./gradlew :agent-core:test`（BUILD SUCCESSFUL，38/0/0/0）
 - ❌ 任何 `npm ci` / 依赖安装 / 构建（实施轮也未执行；Gradle 为解析 `junit:4.13.2` 做过一次只读依赖拉取，仅写入本地 Gradle 缓存）

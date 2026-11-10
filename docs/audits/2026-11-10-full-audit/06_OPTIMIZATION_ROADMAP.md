@@ -615,6 +615,16 @@ NPM_TEST_EXIT=0
 
 跑的是 CI 调用的**同一条命令** `npm test`（不是直接调聚合器），因此 `package.json` 的脚本改写路径也被覆盖了。
 
+**最终状态已二次确认**：上表是 `9211da8` 时的结果；补上 `fe0b305`（tsc-after-failure 用例）后**重跑了整条链**，结果一致 ——
+
+```
+套件汇总：106 条命令，106 通过，0 失败，耗时 380.4s
+类型检查（tsc --noEmit）：已执行且通过
+NPM_TEST_FINAL_EXIT=0
+```
+
+即两次独立完整运行（433.4s / 380.4s）均为 **106/106 通过、exit 0**，且两次都确认 `tsc --noEmit` 真实执行并通过。
+
 **三条公开脚本全部实跑（本机 Node v24.13.0 / Windows，均为 exit 0）**：
 
 | 脚本 | 命令数 | 结果 | 耗时 | 这条覆盖了什么 |
@@ -644,7 +654,7 @@ NPM_TEST_EXIT=0
 |---|---|---|
 | **CI 上 `jvm-tests` job 是否真的通过** | 本地 `./gradlew :agent-core:test` 已实跑通过（38/0），但 **CI 的 ubuntu-latest 上是否同样通过未验证** —— 特别是 `:agent-core:test` 是否需要 NDK 才能完成 Gradle 配置（`configure-on-demand` 未开启 → 会配置 Android 模块 `:app`，而 `app/build.gradle:86` 声明了 `ndkVersion`）。已采取保守做法：照抄 `build-test` 的 NDK/SDK 准备步骤 | 需要真的触发一次 workflow（tag push 或 `workflow_dispatch`），本轮不推送、不发布 |
 | **`signing-verify.yml` 补上环境变量后是否变红** | 那 15 条契约断言在该 workflow 里**从未真正执行过**；补上后它们会第一次运行。如果上游插件与客户端已经漂移，该 workflow 会**立刻变红** —— 这是期望结果（暴露真实缺陷），但**本轮无法预知** | 同上，需要真的跑一次 |
-| **完整 `npm test` 链在 CI 上是绿是红** | **部分解决**：本机（Node v24.13.0 / Windows）实跑 **106 条 / 106 通过 / 0 失败 / 433.4s / exit 0**，含 `tsc --noEmit`。**但 CI（Node 20 / ubuntu-latest）上仍未验证** —— 两者在 `WebSocket` 全局对象、路径语义、PowerShell 版本（5.1 vs pwsh 7）上有差异 | 需要真的触发一次 workflow，本轮不推送 |
+| **完整 `npm test` 链在 CI 上是绿是红** | **部分解决**：本机（Node v24.13.0 / Windows）**两次独立完整实跑**均 **106 条 / 106 通过 / 0 失败 / exit 0**（433.4s 与 380.4s），含 `tsc --noEmit`。**但 CI（Node 20 / ubuntu-latest）上仍未验证** —— 两者在 `WebSocket` 全局对象、路径语义、PowerShell 版本（5.1 vs pwsh 7）上有差异 | 需要真的触发一次 workflow，本轮不推送 |
 | **Node 20 的 `--test` glob 支持起始版本** | 聚合器**刻意不依赖** glob，所以这个未知项不阻塞实施；仅记录为原审计建议被撤回的理由之一 | 需要查外部版本资料，本轮不访问外部服务 |
 
 ### 回滚顺序
