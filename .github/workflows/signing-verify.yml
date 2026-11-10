@@ -52,6 +52,16 @@ jobs:
   verify-signing:
     runs-on: ubuntu-latest
     timeout-minutes: 45
+    env:
+      # 必须与 android.yml 的 test job 逐字一致。
+      #
+      # 这个 job 跑完整的 `npm test`，其中 protocol-contract-spec.mjs 与
+      # crosscheck-revoke-self-spec.mjs 需要定位真实的 dsh-plugin-mobile-gateway
+      # 才能执行断言。它们的 CANDIDATES 只认这个环境变量与 ~/.dsh/profiles/web，
+      # 而 ubuntu runner 上后者不存在 —— 缺了这个变量，两组共 15 条网关契约
+      # 断言会全部静默 skip 并以 0 退出，本 workflow 报绿却什么都没验证。
+      # 那两个 spec 现在在 CI 下对 skip 是 fail-closed 的，所以这个变量是必需的。
+      DSH_GATEWAY_PLUGIN_DIR: ${{ github.workspace }}/dsh-mobile/node_modules/dsh-plugin-mobile-gateway
 
     steps:
       - uses: actions/checkout@v4

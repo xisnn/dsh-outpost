@@ -104,6 +104,17 @@ console.log('');
 if (!pluginDir) {
   console.log('⚠️  找不到真实网关插件，整组契约测试跳过。');
   console.log('   装了插件后重跑，或用 DSH_GATEWAY_PLUGIN_DIR 指定目录。');
+  // CI 上不允许静默跳过：本组是**唯一**能自动防御 fake-dsh.mjs 与真实网关
+  // 漂移的机制，skip 又不参与退出码 —— 插件解析不到时整组契约会零断言通过，
+  // 而 workflow 仍然报绿。signing-verify.yml 曾经就是这样（它跑完整 npm test
+  // 却不设 DSH_GATEWAY_PLUGIN_DIR）。
+  // 同仓的 approval-gateway-f01-spec.mjs:60-63 一直是 fail-closed 的，这里对齐它。
+  if (process.env.CI) {
+    bad(
+      'CI 必须能解析真实网关插件（DSH_GATEWAY_PLUGIN_DIR）',
+      'CANDIDATES 全部落空 → 整组契约断言会退化为静默 skip',
+    );
+  }
   console.log('');
 }
 
@@ -413,5 +424,12 @@ await check('契约：客户端撤销请求带了 Origin（否则 403）', () =>
 // ══════════════════════════════════════════════════════════════
 
 console.log('');
+// CI 下 skip 计入失败：断言没跑 ≠ 断言通过。这一条覆盖"插件目录解析成功、
+// 但其中某个文件（lib/index.mjs、lib/devices.js）缺失"的残余漏洞 ——
+// 那时 pluginDir 非空，上面的守卫不会触发，只有逐条的 { skip } 会。
+// 本地保留 skip 语义：没装插件的开发者不该被挡在门外。
+if (process.env.CI && skip > 0) {
+  bad(`CI 下不允许 skip（${skip} 条断言没有真正执行）`, '静默 skip 会造成假绿');
+}
 console.log(`结果：${pass} 通过，${fail} 失败，${skip} 跳过`);
 process.exitCode = fail === 0 ? 0 : 1;

@@ -179,6 +179,16 @@ console.log('');
 if (!pluginDir) {
   console.log('⚠️  找不到真实网关插件，整组交叉验证跳过。');
   console.log('   装了插件后重跑，或用 DSH_GATEWAY_PLUGIN_DIR 指定目录。');
+  // CI 上不允许静默跳过：本组的 5 条断言**全部**依赖真实插件（每条开头都是
+  // `if (!pluginDir) return { skip: '插件不可用' }`），而 skip 不参与退出码，
+  // 所以插件解析不到时整组会零断言通过、workflow 仍然报绿。
+  // 同仓的 approval-gateway-f01-spec.mjs:60-63 一直是 fail-closed 的，这里对齐它。
+  if (process.env.CI) {
+    bad(
+      'CI 必须能解析真实网关插件（DSH_GATEWAY_PLUGIN_DIR）',
+      'CANDIDATES 全部落空 → 整组交叉验证会退化为零断言',
+    );
+  }
   console.log('');
 }
 
@@ -311,5 +321,11 @@ await check('isSameDevice 用服务端 UUID 能认出自己', async () => {
 });
 
 console.log('');
+// CI 下 skip 计入失败：断言没跑 ≠ 断言通过。这一条覆盖"插件目录解析成功、
+// 但其中某个文件（本组依赖 lib/devices.js）缺失"的残余漏洞。
+// 本地保留 skip 语义：没装插件的开发者不该被挡在门外。
+if (process.env.CI && skip > 0) {
+  bad(`CI 下不允许 skip（${skip} 条断言没有真正执行）`, '静默 skip 会造成假绿');
+}
 console.log(`结果：${pass} 通过，${fail} 失败，${skip} 跳过`);
 process.exitCode = fail === 0 ? 0 : 1;
