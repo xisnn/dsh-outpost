@@ -197,19 +197,34 @@ class OutpostAccessibilityService : AccessibilityService() {
         if (!node.isEnabled) return "ELEMENT_DISABLED"
 
         var actionAccepted = setTextOnNode(node, text)
-        if (actionAccepted && textMatches(node, text)) {
+        val firstAttempt = matchText(node, text)
+        if (actionAccepted && firstAttempt == TextMatch.EXACT) {
             Log.i("DshPhoneA11y", "type display=$displayId element=${elementId ?: "focused"} result=OK")
             return "OK"
         }
+        if (firstAttempt == TextMatch.CONTAINS) return unverified(displayId, elementId, "field holds extra text")
 
         // Some fields (notably a collapsed Contacts SearchView) do not accept
         // setText until an actual click expands/focuses the real input. Click,
         // wait for the new window, then set text on the focused editable node.
+        val originalPackage = root.packageName?.toString()
         node.performAction(AccessibilityNodeInfo.ACTION_CLICK)
         var current = node
         repeat(10) {
             Thread.sleep(400)
             val freshRoot = rootFor(displayId) ?: return@repeat
+            // The click may have navigated away. Everything below is positional or
+            // "first editable in the window", so continuing would type into an
+            // unrelated field in another app, and nK means something else entirely
+            // in a different tree. Abort before any text is written.
+            val freshPackage = freshRoot.packageName?.toString()
+            if (originalPackage != null && freshPackage != originalPackage) {
+                Log.w(
+                    "DshPhoneA11y",
+                    "type display=$displayId aborted: window changed $originalPackage -> $freshPackage",
+                )
+                return "SCREEN_CHANGED_DURING_TYPE"
+            }
             val fresh = findFocusedEditable(freshRoot)
                 ?: findFirstEditable(freshRoot)
                 ?: (elementId?.let { id -> findElement(freshRoot, id)?.let { findEditableInSubtree(it) } })
@@ -218,10 +233,12 @@ class OutpostAccessibilityService : AccessibilityService() {
             current = fresh
             val ok = setTextOnNode(fresh, text)
             actionAccepted = ok || actionAccepted
-            if (ok && textMatches(fresh, text)) {
+            val afterClick = matchText(fresh, text)
+            if (ok && afterClick == TextMatch.EXACT) {
                 Log.i("DshPhoneA11y", "type display=$displayId result=OK_AFTER_CLICK")
                 return "OK"
             }
+            if (afterClick == TextMatch.CONTAINS) return unverified(displayId, elementId, "field holds extra text after click")
         }
 
         if (pasteText(current, text)) {
@@ -246,6 +263,20 @@ class OutpostAccessibilityService : AccessibilityService() {
         return if (actionAccepted) "SET_TEXT_UNVERIFIED" else "SET_TEXT_FAILED"
     }
 
+    /**
+     * ACTION_SET_TEXT replaces the field, so the extra characters were not
+     * written by this call. Retrying through click, paste or the shell would risk
+     * duplicating or clobbering what the app already put there; report the
+     * unverified state and let the model re-snapshot instead.
+     */
+    private fun unverified(displayId: Int, elementId: String?, detail: String): String {
+        Log.w(
+            "DshPhoneA11y",
+            "type display=$displayId element=${elementId ?: "focused"} result=SET_TEXT_UNVERIFIED ($detail)",
+        )
+        return "SET_TEXT_UNVERIFIED"
+    }
+
     private fun setTextOnNode(node: AccessibilityNodeInfo, text: String): Boolean {
         node.performAction(AccessibilityNodeInfo.ACTION_FOCUS)
         val arguments = Bundle().apply {
@@ -266,11 +297,27 @@ class OutpostAccessibilityService : AccessibilityService() {
         return ok
     }
 
-    private fun textMatches(node: AccessibilityNodeInfo, text: String): Boolean {
+    private enum class TextMatch { EXACT, CONTAINS, MISMATCH }
+
+    /**
+     * [TextMatch.CONTAINS] means the field holds our text plus something else, so
+     * the write cannot be confirmed. Only the two verdict sites in [type] care
+     * about the distinction; the internal retry and paste/shell checks below treat
+     * CONTAINS as success because ACTION_PASTE and `input text` append by design.
+     */
+    private fun matchText(node: AccessibilityNodeInfo, text: String): TextMatch {
         runCatching { node.refresh() }
         val current = node.text?.toString().orEmpty()
-        return if (text.isEmpty()) current.isEmpty() else current == text || current.contains(text)
+        return when {
+            text.isEmpty() -> if (current.isEmpty()) TextMatch.EXACT else TextMatch.MISMATCH
+            current == text -> TextMatch.EXACT
+            current.contains(text) -> TextMatch.CONTAINS
+            else -> TextMatch.MISMATCH
+        }
     }
+
+    private fun textMatches(node: AccessibilityNodeInfo, text: String): Boolean =
+        matchText(node, text) != TextMatch.MISMATCH
 
     private fun waitForText(node: AccessibilityNodeInfo, text: String): Boolean {
         repeat(6) {
@@ -366,10 +413,17 @@ class OutpostAccessibilityService : AccessibilityService() {
         return root
     }
 
+    /**
+     * Resolves a positional id back to a node. The walk must mirror [snapshot]
+     * exactly, caps included: ids only mean something within the traversal that
+     * produced them, so an id past the snapshot's limit would otherwise resolve
+     * to a node the model was never shown and act on it blind.
+     */
     private fun findElement(root: AccessibilityNodeInfo, elementId: String): AccessibilityNodeInfo? {
         var current = 0
-        fun visit(node: AccessibilityNodeInfo?): AccessibilityNodeInfo? {
-            if (node == null) return null
+        fun visit(node: AccessibilityNodeInfo?, depth: Int): AccessibilityNodeInfo? {
+            if (node == null || current >= MAX_ELEMENTS) return null
+            if (depth > MAX_DEPTH) return null
             val bounds = Rect()
             node.getBoundsInScreen(bounds)
             val text = node.text?.toString()?.trim().orEmpty()
@@ -381,11 +435,11 @@ class OutpostAccessibilityService : AccessibilityService() {
                 if ("n$current" == elementId) return node
             }
             for (index in 0 until node.childCount) {
-                visit(node.getChild(index))?.let { return it }
+                visit(node.getChild(index), depth + 1)?.let { return it }
             }
             return null
         }
-        return visit(root)
+        return visit(root, 0)
     }
 
     private fun clickableAncestor(node: AccessibilityNodeInfo): AccessibilityNodeInfo? {
