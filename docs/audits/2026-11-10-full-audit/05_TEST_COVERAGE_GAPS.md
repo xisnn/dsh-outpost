@@ -644,11 +644,11 @@
 
 | 编号 | 严重程度 | 一句话 | 本轮实施 |
 |---|---|---|---|
-| **TEST-03** | **Critical**（↑ 原 High） | **两个契约 spec 在插件不可解析时零断言通过**（已实测复现：`crosscheck` 0 通过 / 5 跳过 / exit 0）——**唯一真正的假绿通道** | **是（本轮已授权，第 3 项）** |
-| **TEST-01 / BUG-01** | **High**（↓ 原 Critical） | 103-spawn `&&` 链**失败即截断**，`tsc` 是最后一环。**不产生假绿**（退出码非零，CI 是红的），危害是诊断不完整 | **是（本轮已授权，第 2 项）** |
+| **TEST-03** | **Critical**（↑ 原 High） | **两个契约 spec 在插件不可解析时零断言通过**（已实测复现：`crosscheck` 0 通过 / 5 跳过 / exit 0）——**唯一真正的假绿通道** | ✅ **已实施** `f38d9e2`（两层守卫 + `signing-verify.yml` 补环境变量 + 新增 `contract-skip-guard-spec.mjs` 28/0） |
+| **TEST-01 / BUG-01** | **High**（↓ 原 Critical） | `&&` 链（审计基线 103 条叶子命令，现 106 条）**失败即截断**，`tsc` 是最后一环 → 前置任何失败都会让类型检查从不执行。**不产生假绿**（退出码非零，CI 是红的），危害是诊断不完整 + 类型错误可长期潜伏 | ✅ **已实施**（`9211da8`：新增 `tests/run-suite.mjs` 聚合器 + `suite-runner-spec.mjs` **75/0**，含"前置失败时 tsc 仍执行"的变异反证；本机 `npm test` 实跑 **106/106 通过**，**CI 上待验证**） |
 | **TEST-02** | **High** | `component-harness.mjs:17-18` 的 `.ts` 硬编码使过期 mock **abort 进程** | 排期（同批） |
 | **TEST-14** | **High** | 发布门禁死代码；CI **不打 gateway 补丁**就跑集成测试；两处 fail-open | 排期（(3) 优先） |
-| **TEST-17** | **Medium-High** | `:agent-core:test` 的 **38 个已有测试从不运行**；`android/app` 覆盖率为零 | **是（本轮已授权，第 4 项）** |
+| **TEST-17** | **Medium-High** | `:agent-core:test` 的 **38 个已有测试从不运行**；`android/app` 覆盖率为零 | ✅ **第 (1) 项已实施** `6a83f2c`（新增 `jvm-tests` job + 门禁 release + `android-jvm-tests-ci-spec.mjs` 31/0；本人实跑 gradlew 得 **38/0/0/0**）。`android/app` 覆盖率为零**仍未解决** |
 | **TEST-16** | **Medium-High** | CI 无 `timeout-minutes`；**所有 `.ps1` 只在 pwsh 7 下验证过，产品跑在 5.1** | 排期（(1) 立即） |
 | **TEST-04** | **Medium-High** | 三个互不同步的 cookie jar；测试跑的是生产不会走的回退路径 | 排期（TEST-09 前置） |
 | **TEST-12** | **Medium-High** | 34 个 `.tsx` 从不渲染；`useEffect` 是空函数 → effect 清理未测 | 不建议（需新增依赖） |

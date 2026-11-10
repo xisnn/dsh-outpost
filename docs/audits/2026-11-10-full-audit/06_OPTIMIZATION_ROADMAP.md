@@ -562,4 +562,118 @@
 
 ---
 
-*本文档由只读审计产生，未修改任何业务代码。所有引用位置均来自本轮真实读取的代码；标注为"待验证"的项已说明未能验证的原因。*
+## 八、本轮实施记录（2026-11-11，分支 `opt/p2-review-remediation`）
+
+审计基线由提交 `ad2a6ab` 冻结（8 份文档的原始交付版本）；复核意见的采纳记录在 `20b65ba`。以下四项修复各自独立提交，可单独 `git revert`。
+
+| 序 | 范围 | 对应条目 | commit | 改动的文件 | 验证 |
+|---|---|---|---|---|---|
+| 1 | 公网启动门禁 | **SEC-01** | `b302501` | `start-tunnel.ps1`、`scripts/gateway-patch-gate.ps1`、`dsh-mobile/tests/gateway-startup-gate-spec.mjs` | 负向测试先行（修前 **13 失败**）→ 修后 **51 通过 / 0 失败**；双向变异反证；PS 5.1 语法解析 OK；4 个相关 spec 无回归 |
+| 2 | 测试聚合器 | **BUG-01 / TEST-01** | `9211da8` + `fe0b305` | `dsh-mobile/tests/run-suite.mjs`（新增）、`dsh-mobile/tests/suite-runner-spec.mjs`（新增）、`dsh-mobile/package.json` | 聚合器 spec **75 通过 / 0 失败**（fixture 用真实子进程 + marker 文件证明"失败之后的命令确实执行了"；`fe0b305` 补上"前置失败时 `tsc --noEmit` 仍执行"，含变异反证 75→**67 通过 / 8 失败**）；三条公开脚本**全部实跑通过**：`npm test` **106 条 / 106 通过 / 433.4s / exit 0**、`test:integration` **5/5 / 29.3s**（含 2 条真 `tsx`）、`test:node20` **5/5 / 7.0s** |
+| 3 | 静默 skip | **TEST-03** | `f38d9e2` | `dsh-mobile/tests/protocol-contract-spec.mjs`、`crosscheck-revoke-self-spec.mjs`、`contract-skip-guard-spec.mjs`（新增）、`package.json`、`.github/workflows/signing-verify.yml` | 假绿已实测复现（`0 通过 / 5 跳过 / exit 0`）→ 修后守卫 spec **28 通过 / 0 失败**；变异反证；两个契约 spec 的正常路径仍 **16 / 5 通过、0 跳过** |
+| 4 | Android JVM 测试接入 | **TEST-17(1)** | `6a83f2c` | `.github/workflows/android.yml`、`dsh-mobile/tests/android-jvm-tests-ci-spec.mjs`（新增）、`package.json` | **本人实跑** `./gradlew :agent-core:test` → BUILD SUCCESSFUL，**38 tests / 0 failures / 0 errors / 0 skipped**；CI 接线 spec 负向先行（修前 2 失败）→ 修后 **31 通过 / 0 失败**；三处变异反证 |
+
+### 补记 · 第 2 项（测试聚合器）的设计与验证
+
+**改动方式**：`package.json` 里三条公开脚本的名字**一个都没改**（CI 调的就是 `npm test` / `npm run test:integration` / `npm run test:node20`），只把「怎么跑」从 `&&` 串联换成聚合器；原来的声明式链条改名为 `test:chain` / `test:integration:chain` / `test:node20:chain` **原样保留**。
+
+这样做的原因是：链条是「跑哪些命令」的**唯一真值来源**，聚合器读它并传递展开，因此**不存在第二份命令清单会漂移**。同时 `npm run test:chain` 仍是旧行为的逃生口。
+
+| 复核约束 | 落实方式 | 证据 |
+|---|---|---|
+| **Node 20 兼容** | 只用 Node 20.0 就有的 API：`spawnSync` / `readFileSync` / `existsSync` / `path` / `fileURLToPath`。**刻意不用 `import.meta.dirname`**（20.11+ 才有），改用 `path.dirname(fileURLToPath(import.meta.url))`；不用 `toSorted` / `findLast` / `Object.hasOwn` / `structuredClone` / `.at()` | 静态扫描 `run-suite.mjs`：上述 API **零命中**（唯一一处 `import.meta.dirname` 出现在解释"为什么不用它"的注释里）。新 spec 也刻意不引入比被测对象更强的版本要求 |
+| **不用 glob** | 命令**全部**来自 `package.json` 的传递展开，不扫描文件系统；执行用 `spawnSync(file, args, { shell: false })`，不经 shell | `--dry-run test:chain` 输出 **106 条**（本轮新增 1 条 spec 后），与 spec 里**独立重写**的展开算法逐字逐序一致 |
+| **保留 tsx / node / npm script 语义** | 只认三种可执行文件并各自解析到 **JS 入口**：`node` → `process.execPath`；`tsx` → `node_modules/tsx/dist/cli.mjs`；`tsc` → `node_modules/typescript/bin/tsc`。`--test` / `--require ./tests/support/node20-sim.cjs` 等前缀**逐字透传** | fixture 里用记录 argv 的桩证明：`tsx f/args.mjs --test` → 桩收到 `["f/args.mjs","--test"]`；`node f/args.mjs --test --require ./x.cjs` → argv 个数、顺序、内容全对。真实链的 5 条 `--require node20-sim.cjs` 命令在 `--dry-run` 里前缀完整 |
+| **收集全部失败** | 跑完全部再汇总；每条失败保留**各自的**退出码；末尾单独报告 `tsc --noEmit` 是否执行 | fixture ①：`pass → fail1(1) → fail2(2) → after` 四条，`&&` 链会在 fail1 处截断；聚合器**四条全部执行**（marker 文件为证）、失败清单列出**两个**、保留 fail2 的退出码 2、自身退出码 1。fixture ②（`fe0b305` 补）：`node f/fail1.mjs && tsc --noEmit` —— 前置必失败时 **tsc 桩仍被调用**、仍收到原样 `--noEmit`、汇总单独打印类型检查状态。**变异反证**：给执行循环插入 `if (code !== 0) break;` 模拟 `&&` 截断，spec 从 75 通过变成 **67 通过 / 8 失败**，两条 fixture 的关键断言全部转红 |
+| **不并行** | 保持串行 | 现有 spec 共享 `globalThis` shim 状态（TEST-04 的三个 cookie jar），并行会引入与本改动无关的失败 |
+| **失败即拒绝，绝不静默** | 未知可执行文件、含 shell 元字符的命令、缺失 script、循环引用、展开为空 —— **全部在规划阶段抛错退出**，不跳过、不猜测 | 6 个响亮失败用例全部通过；并额外验证「坏命令混在好命令里」时**前面的好命令不会被执行**（规划阶段就拒绝，避免跑一半才炸）。前提已核实：106 条命令**零**引号、**零** shell 元字符、简单分词可逆，所以 `shell:false` 与旧链语义相同 |
+
+**为什么绕开 `node_modules/.bin`**：Node 20.12+ 出于 CVE-2024-27980 拒绝在没有 `shell: true` 时 spawn `.cmd`/`.bat`，而开 shell 就得自己处理引号注入。走 JS 入口在 Windows 与 Linux 上行为一致。**这个坑是在本轮开发中被真实触发的** —— 守卫 spec 最初用 `.bin/tsx.cmd`，子进程全部返回 -1，而"非零退出"那条断言因此**假通过**；是"退出必须由守卫导致、而非别的崩溃"那条标记断言把它抓出来的。
+
+**关于命令条数（避免与审计正文的"103"冲突）**：审计报告里的 **103** 是 **2026-11-10 审计基线**的真实数字，历史准确。实施轮往链上**新增了 3 条**，所以现在逐次是：
+
+| 时点 | `test:chain` 叶子命令数 | 变化 |
+|---|---|---|
+| 审计基线 `2325d34` | **103** | —— |
+| + `test:contractSkipGuard`（`f38d9e2`，TEST-03 守卫） | 104 | +1 |
+| + `test:agentCoreCi`（`6a83f2c`，CI 接线守卫） | 105 | +1 |
+| + `test:suiteRunner`（聚合器自身的 spec，置于链首，`9211da8`） | **106** | +1 —— **本机实跑的就是这 106 条** |
+
+链首是聚合器自己的 spec，链尾仍是 `tsc --noEmit`：**聚合器坏了就不必再跑后面 105 条**，而类型检查不再因前置失败被跳过。
+
+**完整链实跑结果（本地 Node v24.13.0 / Windows，非 CI 环境）**：
+
+```
+── [106/106] tsc --noEmit ──
+
+套件汇总：106 条命令，106 通过，0 失败，耗时 433.4s
+
+全部通过。
+类型检查（tsc --noEmit）：已执行且通过
+NPM_TEST_EXIT=0
+```
+
+跑的是 CI 调用的**同一条命令** `npm test`（不是直接调聚合器），因此 `package.json` 的脚本改写路径也被覆盖了。
+
+**三条公开脚本全部实跑（本机 Node v24.13.0 / Windows，均为 exit 0）**：
+
+| 脚本 | 命令数 | 结果 | 耗时 | 这条覆盖了什么 |
+|---|---|---|---|---|
+| `npm test` | 106 | **106 通过 / 0 失败** | 433.4s | 全链，含链尾 `tsc --noEmit`（日志明确打印"已执行且通过"） |
+| `npm run test:integration` | 5 | **5 通过 / 0 失败** | 29.3s | 含 **2 条真 `tsx`**（`integration-product` / `integration-gateway-reconnect`），证明 tsx 走 JS 入口在真实场景可用，不只是 fixture 桩 |
+| `npm run test:node20` | 5 | **5 通过 / 0 失败** | 7.0s | 含 **5 条 `--require ./tests/support/node20-sim.cjs`**（3 条 `node`、2 条 `tsx`）。这是"前缀在 `shell:false` 下仍然生效"的**硬证据**：若该前缀被丢弃或相对路径解析失败，Node 会以 `MODULE_NOT_FOUND` 非零退出，而实际 exit 0 |
+
+**注意 `test:node20` 的局限**：它是用 `node20-sim.cjs` 在 **Node 24 上模拟** Node 20 的环境（主要是抹掉 Node 21+ 才有的全局 API），**不是真的 Node 20**。真 Node 20 的行为仍然只能在 CI 上验证 —— 见下方"仍待验证"。
+
+这同时解决了原审计的一个**待验证项**：「测试套件当前是绿是红」——在本机上是**绿的**，且 `tsc --noEmit` 确实执行并通过。**但这不能推断 CI 结果**：CI 是 Node 20 / ubuntu-latest，本机是 Node 24 / Windows，两者在 `WebSocket` 全局对象、路径语义、PowerShell 版本（5.1 vs pwsh 7）上都有差异 —— 这正是仓库自带 `test:node20` 链的原因。
+
+### 未触碰的区域（本轮硬约束的落实情况）
+
+| 约束 | 落实 |
+|---|---|
+| 不改动 fold / pendingSend / stream 核心业务逻辑 | ✅ `src/core/fold/`、`src/core/store.ts`、`src/core/transport/`、`pendingSend*` **零改动**（`git diff --stat` 可验证） |
+| 不新增功能、不做架构重构 | ✅ 四项全部是测试/CI/启动脚本层面的改动；`src/` 下**零文件改动** |
+| 不触碰正式签名材料、不自动发布版本 | ✅ 未改 keystore / 证书 / `release-signing.json`；`release` job 的 `if: startsWith(github.ref, 'refs/tags/v')` 与 job 级 `permissions: contents: write` **原样保留**；新增的 `jvm-tests` job **不引用任何 secrets、不含任何发布动作、不声明 job 级 permissions**（由 spec §4 断言守住） |
+| 每项独立提交、可单独回滚 | ✅ 见下方"回滚顺序"，每个 commit 只承载一项修复 |
+| 改前先建立失败复现或负向测试 | ✅ 四项**全部**先有红：SEC-01 **13 失败** → `b302501`；TEST-03 **12 失败**（且假绿本身已实测复现：`0 通过 / 5 跳过 / exit 0`）→ `f38d9e2`；JVM 接线 **2 失败** → `6a83f2c`。聚合器一项**没有"改动前的红"**（它不是修 bug，是新增基础设施），改用**变异反证**：给执行循环插入 `&&` 式截断后 spec 从 75 通过变成 **67/8 失败**（`fe0b305`） |
+| 无法验证的标记待验证 | ✅ 见下方"仍待验证"清单 |
+
+### 仍待验证（本轮无法确认，未编造结论）
+
+| 项 | 待验证什么 | 为什么无法验证 |
+|---|---|---|
+| **CI 上 `jvm-tests` job 是否真的通过** | 本地 `./gradlew :agent-core:test` 已实跑通过（38/0），但 **CI 的 ubuntu-latest 上是否同样通过未验证** —— 特别是 `:agent-core:test` 是否需要 NDK 才能完成 Gradle 配置（`configure-on-demand` 未开启 → 会配置 Android 模块 `:app`，而 `app/build.gradle:86` 声明了 `ndkVersion`）。已采取保守做法：照抄 `build-test` 的 NDK/SDK 准备步骤 | 需要真的触发一次 workflow（tag push 或 `workflow_dispatch`），本轮不推送、不发布 |
+| **`signing-verify.yml` 补上环境变量后是否变红** | 那 15 条契约断言在该 workflow 里**从未真正执行过**；补上后它们会第一次运行。如果上游插件与客户端已经漂移，该 workflow 会**立刻变红** —— 这是期望结果（暴露真实缺陷），但**本轮无法预知** | 同上，需要真的跑一次 |
+| **完整 `npm test` 链在 CI 上是绿是红** | **部分解决**：本机（Node v24.13.0 / Windows）实跑 **106 条 / 106 通过 / 0 失败 / 433.4s / exit 0**，含 `tsc --noEmit`。**但 CI（Node 20 / ubuntu-latest）上仍未验证** —— 两者在 `WebSocket` 全局对象、路径语义、PowerShell 版本（5.1 vs pwsh 7）上有差异 | 需要真的触发一次 workflow，本轮不推送 |
+| **Node 20 的 `--test` glob 支持起始版本** | 聚合器**刻意不依赖** glob，所以这个未知项不阻塞实施；仅记录为原审计建议被撤回的理由之一 | 需要查外部版本资料，本轮不访问外部服务 |
+
+### 回滚顺序
+
+下列 6 个 commit 互相独立，可任意单独 `git revert`（不含 `ad2a6ab` 与本次实施记录的文档提交）。若要全部回退，按**逆序**执行 —— 这不是形式要求：`9211da8` 把三个公开脚本改成了调聚合器、并把原链改名为 `test:chain` 等，而 `6a83f2c` / `f38d9e2` 各自往**当时的** `test` 链里插过脚本名。先退聚合器，`package.json` 回到旧形状，后面两个 revert 才能干净落地。同理 `fe0b305` 必须先于 `9211da8` 回退，否则后者删除 `suite-runner-spec.mjs` 时会撞上修改冲突。
+
+```
+git revert fe0b305   # 聚合器 spec 的 tsc-after-failure 用例（纯测试）
+git revert 9211da8   # 测试聚合器（纯测试基础设施，src/ 零改动）
+git revert 6a83f2c   # CI: agent-core JVM 测试接入
+git revert f38d9e2   # 契约测试静默 skip 守卫
+git revert b302501   # 公网隧道门禁
+git revert 20b65ba   # 审计文档的复核修订（可选，纯文档）
+```
+
+`ad2a6ab`（审计基线冻结）**不要回滚** —— 它是原始审计版本的唯一存档。
+
+**回滚后的已知后果**：
+
+| revert | 后果 | 严重度 |
+|---|---|---|
+| `b302501` | 公网隧道重新绕过鉴权门禁 → 配对码铸造对**整个互联网**可达 | **高**，应视为临时回退 |
+| `f38d9e2` | 同时移除 `signing-verify.yml` 的 `DSH_GATEWAY_PLUGIN_DIR`，该 workflow 回到"契约断言静默跳过"的假绿状态 | **高**，应视为临时回退 |
+| `6a83f2c` | `release` job 的 `needs` 退回 `[test, desktop]`，38 个 JVM 测试重新不被 CI 执行 | 中 |
+| `9211da8` | 测试链退回 `&&` 串联，第一个失败之后的结果全部丢失（回到 BUG-01 描述的行为） | 中 |
+| `fe0b305` | 仅移除一条 spec 用例；聚合器行为不变，但"tsc 在前置失败时仍执行"失去回归保护 | 低 |
+| `20b65ba` | 仅文档；三条被复核推翻的审计结论会恢复成原样 | 低 |
+
+---
+
+*§一~§七 由只读审计产生，未修改任何业务代码；所有引用位置均来自真实读取的代码，标注为"待验证"的项已说明未能验证的原因。*
+*§八 是 2026-11-11 复核后实施轮的记录：该轮改动了测试、CI 与启动脚本，但 `dsh-mobile/src/` 下零文件改动。原始审计版本由 `ad2a6ab` 冻结，本文档的修订发生在独立分支 `opt/p2-review-remediation` 上。*

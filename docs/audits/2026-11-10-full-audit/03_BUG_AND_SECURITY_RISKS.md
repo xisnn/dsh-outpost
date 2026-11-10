@@ -52,7 +52,8 @@ return loadSource(path.posix.normalize(path.posix.join(path.posix.dirname(file),
 > 3. `--test` 的 glob 位置参数支持是**版本相关**的；`package.json` 的 `engines` 是 `>=20`，CI 固定在 **20**。**具体从哪个 Node 版本起支持，本轮无法在不访问外部资料的前提下确认 → 标记待验证**，因此不得依赖它。
 
 **修订后的方案**：新增一个**聚合器脚本**，它
-- **不重新发明命令**：仍然从 `package.json` 的 `scripts` 出发，按 `&&` 与 `npm run X` **传递展开**出与今天**逐字相同**的 103 条叶子命令，然后用 `spawnSync` **原样执行**（`tsx` 走 `node_modules/.bin/tsx`，`node --require …` 前缀原样保留）；
+- **不重新发明命令**：仍然从 `package.json` 的 `scripts` 出发，按 `&&` 与 `npm run X` **传递展开**出与今天**逐字相同**的叶子命令，然后用 `spawnSync(file, args, { shell: false })` **原样执行**（`node --require …` / `--test` 等前缀原样透传）；
+- **`tsx` 与 `tsc` 走各自的 JS 入口，而不是 `node_modules/.bin`**：`tsx` → `node_modules/tsx/dist/cli.mjs`、`tsc` → `node_modules/typescript/bin/tsc`，都用 `process.execPath` 启动。原因是 Node 20.12+ 出于 **CVE-2024-27980** 拒绝在没有 `shell: true` 时 spawn `.cmd`/`.bat`，而开 shell 就得自己处理引号注入。**这个坑在本轮开发中被真实触发过**（子进程全部返回 -1，而"非零退出"断言因此假通过，是靠"退出必须由守卫导致"那条标记断言抓出来的）；
 - **只改失败处理**：把"首个失败即停"改成"**跑完全部、收集每一条的退出码与输出、最后汇总并以非零退出**"；
 - **不使用 glob、不使用 shell 通配**：文件枚举用 `fs.readdirSync`（Node 20/24 行为一致），命令枚举用 `package.json` 解析；
 - **保留 `tsc --noEmit` 必跑**：它不再因为前面失败而被跳过。
@@ -64,7 +65,11 @@ return loadSource(path.posix.normalize(path.posix.join(path.posix.dirname(file),
 - 断言聚合器展开出的命令列表与旧链**逐字一致**（防止漏跑或多跑）。
 - 断言 `tsc --noEmit` 在前置 spec 失败时**仍然执行**。
 
-**本轮实施建议**：**已获授权实施**（复核后范围第 2 项）。
+**本轮实施建议**：**已实施**（复核授权范围第 2 项，commit `9211da8`）。实施记录、设计与验证证据见 `06_OPTIMIZATION_ROADMAP.md` §八「补记 · 第 2 项」。要点：`package.json` 三条公开脚本名未改，声明式链条改名为 `*:chain` 原样保留并作为唯一真值来源；新增 `tests/run-suite.mjs` 传递展开后逐条 `spawnSync(shell:false)` 执行，跑完全部再汇总。
+
+上面三条「验证方法」**全部落实**，其中第三条（`tsc --noEmit` 在前置失败时仍然执行）值得单独说明：这是 BUG-01 的**真正**危害所在，所以 `suite-runner-spec.mjs` §4 专门造了一条前置必失败的 fixture 链 `node f/fail1.mjs && tsc --noEmit`，断言 tsc 桩仍被调用、仍收到原样 `--noEmit`、且汇总单独报告了类型检查状态。**变异反证**：给聚合器的执行循环插入 `if (code !== 0) break;` 模拟 `&&` 截断后，该 spec 从 75 通过变成 **67 通过 / 8 失败**，新增的 3 条 tsc 断言**全部转红** —— 说明它们不是空断言。
+
+本机实跑 **`npm test` 106 条命令 / 106 通过 / 0 失败 / 433.4s / exit 0**（含末条 `tsc --noEmit`，日志明确打印"类型检查（tsc --noEmit）：已执行且通过"）。**CI 上（Node 20 / ubuntu）仍未验证。**
 
 
 ---
@@ -310,7 +315,7 @@ JS 侧无门控直达：`src/core/agent.ts:223-226`、`src/screens/AgentMemorySc
 - **行为**：真实 PowerShell 下调用 `Write-GatewayPatchRefusal -Public`，断言输出**不含** `SkipGatewayPatchCheck`、但**仍含** `apply.mjs --apply` 与"拒绝启动"；同时断言不带 `-Public` 时**仍含** `SkipGatewayPatchCheck`（局域网路径的 opt-out 不被削弱）；
 - **反证**：沿用该 spec §5 的既有手法，构造坏门禁确认断言不是恒真。
 
-**本轮实施建议**：**已获授权实施，且按复核意见列为本轮第一优先**（复核范围第 1 项）。
+**本轮实施建议**：✅ **已实施**（复核范围第 1 项，commit `b302501`）。门禁在 `start-tunnel.ps1` 里**只调用一次**，位置在 cloudflared 检查之后、两处 `schtasks /Create`（`:334`、`:530`）与「定位 dsh」之前 —— 单点调用即覆盖两处启动点，避免把门禁逻辑复制两份（那正是 CQ-01 的债务类型）。`-Stop` / `-Status` 在此之前已早退，只读操作不受影响。**`Test-GatewayPatchApplied` 的判定逻辑零改动**，`start-dsh-web.ps1` 行为完全不变。负向测试先行（修前 13 失败 → 修后 51 通过 / 0 失败），双向变异反证，PS 5.1 语法解析通过。详见 `06` §八。
 
 
 ---
@@ -504,7 +509,7 @@ if (!pluginDir) {
 - 静态：`signing-verify.yml` 含 `DSH_GATEWAY_PLUGIN_DIR`，且与 `android.yml` 的值一致。
 - 反证：把守卫去掉，负向测试必须重新变绿（证明守卫是被测对象，不是恒真断言）。
 
-**本轮实施建议**：✅ **已获授权实施（复核范围第 3 项），按严重度排第 1 优先。**
+**本轮实施建议**：✅ **已实施**（复核范围第 3 项，commit `f38d9e2`）。两个 spec 各加**两层**守卫：解析点 fail-closed（照抄 `approval-gateway-f01-spec.mjs:60-63`）+ `CI && skip > 0` 计入失败（覆盖"目录解析成功但单个文件缺失"的残余漏洞）。`signing-verify.yml` 补上与 `android.yml` **逐字相同**的 `DSH_GATEWAY_PLUGIN_DIR`。新增 `tests/contract-skip-guard-spec.mjs` 以**真实子进程**驱动两个 spec 做负向/正向验证（修前 12 失败 → 修后 28 通过 / 0 失败）。**断言逻辑与 `CANDIDATES` 顺序零改动**，本地无插件仍 SKIP。**CI 上补了环境变量后那 15 条断言会第一次真正执行 —— 若上游已漂移，`signing-verify.yml` 会立刻变红，这是期望结果，但本轮无法预知（待验证）。**
 
 ---
 

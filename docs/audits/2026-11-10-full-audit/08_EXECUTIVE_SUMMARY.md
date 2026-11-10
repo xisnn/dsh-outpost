@@ -177,7 +177,7 @@
 | **TEST-13 兼容矩阵** | AGP 8.11.0 + Gradle 8.14.3 + Kotlin 2.1.20 + JDK 21 是否互相支持 | 需要访问外部版本兼容表 |
 | **`07` §一 行为 2** | fold 的逐 `Step` 去重在 `assistant/message` 与 `tool/call` 携带**不同 `data.step`** 时是否产生两个块 | 需要一段**真实的、step 不匹配的**事件轨迹；本轮未抓取任何真实流量，仓库 fixture 里也没有这种样本 |
 | **PERF 全部"静态怀疑"条目** | 单次渲染 / 单次解析的**真实毫秒数** | **本轮未执行任何真机性能测量**。`04` §九 给出了 6 项待执行的测量计划（含工具与阈值） |
-| **测试套件当前是绿是红** | —— | **本轮未执行完整 `npm test` / `test:integration` / `test:node20` / `tsc --noEmit`，因此不做任何断言** |
+| **测试套件当前是绿是红** | **部分解决（2026-11-11 实施轮）** | 审计轮未执行完整链，故当时不做断言。实施轮为了验证聚合器**本机实跑**了 CI 用的同一条命令 `npm test`：**106 条命令 / 106 通过 / 0 失败 / 433.4s / exit 0**，含末条 `tsc --noEmit`（日志打印"类型检查（tsc --noEmit）：已执行且通过"；Node v24.13.0 / Windows）。**仍不能推断 CI 结果** —— CI 是 Node 20 / ubuntu-latest，两者在 `WebSocket` 全局对象、路径语义、PowerShell 版本（5.1 vs pwsh 7）上有差异，这正是仓库自带 `test:node20` 链的原因 |
 
 ---
 
@@ -500,7 +500,7 @@ TEST-15：全仓无 c8 / nyc / istanbul / `--experimental-test-coverage` / jacoc
 | `07_REGRESSION_PROTECTION.md` | 宪章点名的**六项受保护行为**逐一核查、**14 项不要重构清单**（含每项的"唯一守卫"）、DSH 层已核查干净的 8 项、**12 项安全上不得简化的控制**、六个原生修复提交的完整性核查、回归测试方案汇总 |
 | `08_EXECUTIVE_SUMMARY.md` | 本文档 |
 
-### 修改
+### 修改（审计轮，2026-11-10）
 
 **无。零个业务文件被修改。** 审计交付时的实测证据：
 
@@ -516,6 +516,23 @@ $ git diff --stat HEAD -- . ':(exclude)docs/audits'
 ```
 
 8 份文档合计 **4 426 行**。
+
+### 复核修订 + 实施轮（2026-11-11，分支 `opt/p2-review-remediation`）
+
+审计基线由 `ad2a6ab` 冻结；随后的改动全部在独立分支上，**未覆盖基线**。完整实施记录、验证证据、仍待验证项与回滚顺序见 `06_OPTIMIZATION_ROADMAP.md` §八。摘要：
+
+| commit | 内容 | 触碰的文件类别 |
+|---|---|---|
+| `ad2a6ab` | 冻结 8 份审计文档的原始交付版本 | 文档 |
+| `20b65ba` | 记录 5 项复核意见与采纳情况；更正 3 处审计表述 | 文档 |
+| `b302501` | **SEC-01**：公网隧道纳入鉴权补丁门禁，且不可跳过 | 启动脚本 + 安全门禁模块 + 测试 |
+| `f38d9e2` | **TEST-03**：契约测试静默 skip 改为 fail-closed；`signing-verify.yml` 补环境变量 | 测试 + CI |
+| `6a83f2c` | **TEST-17(1)**：38 个 agent-core JVM 测试接入 CI 并门禁 release | CI + 测试 |
+| `9211da8` | **BUG-01 / TEST-01**：新增 Node 20 兼容的测试聚合器，跑完全部再汇总失败 | 测试基础设施 + `package.json` |
+| `fe0b305` | 补上"前置失败时 `tsc --noEmit` 仍然执行"的 fixture 用例与变异反证 | 测试 |
+
+> **`dsh-mobile/src/` 下零文件改动** —— fold / pendingSend / stream / transport 核心业务逻辑与全部 `src/` 产品代码均未被触碰，符合本轮硬约束。改动只落在测试、CI workflow 与 PowerShell 启动脚本上。
+
 
 ---
 
@@ -534,17 +551,19 @@ $ git diff --stat HEAD -- . ':(exclude)docs/audits'
 
 **环境声明**：以上 4 次执行在**本地 Node v24.13.0 / Windows**，**不是** CI 的 Node 20 / ubuntu-latest。**因此不能据此推断 CI 结果。**
 
-### 本轮**未执行**的（宪章第 7、9 条）
+### 审计轮**未执行**的（宪章第 7、9 条）
 
-- ❌ 完整 `npm test` 链、`test:integration`、`test:node20`
-- ❌ `tsc --noEmit`
-- ❌ 任何 `gradlew`（含 `:agent-core:test`）
-- ❌ 任何 `npm ci` / 依赖安装 / 构建
+> **注**：下列"未执行"描述的是 **2026-11-10 审计轮**（受"只允许运行不修改业务文件或外部状态的检查"约束）。**2026-11-11 的实施轮**为了验证修复，执行了其中三项，已在下方标注。
+
+- ⚠️ 完整 `npm test` 链、`test:integration`、`test:node20` —— 审计轮未执行；**实施轮三条全部执行**（本机 Node v24.13.0 / Windows）：`npm test` **106 条 / 106 通过 / 433.4s / exit 0**；`test:integration` **5 条 / 5 通过 / 29.3s**（含 2 条真 `tsx`）；`test:node20` **5 条 / 5 通过 / 7.0s**。最后一条是 `--require ./tests/support/node20-sim.cjs` 前缀在 `shell:false` 下仍然生效的**真实证据** —— 若该前缀丢失或路径解析失败，Node 会以 MODULE_NOT_FOUND 非零退出，而它是 exit 0
+- ⚠️ `tsc --noEmit` —— 审计轮未执行；**实施轮已执行**（作为 `npm test` 的第 106 条，通过）
+- ⚠️ 任何 `gradlew`（含 `:agent-core:test`）—— 审计轮未执行；**实施轮已执行** `./gradlew :agent-core:test`（BUILD SUCCESSFUL，38/0/0/0）
+- ❌ 任何 `npm ci` / 依赖安装 / 构建（实施轮也未执行；Gradle 为解析 `junit:4.13.2` 做过一次只读依赖拉取，仅写入本地 Gradle 缓存）
 - ❌ 任何模拟器 / instrumented 测试
 - ❌ 任何真机性能测量
 - ❌ 任何覆盖率工具（**仓库里根本不存在**）
-- ❌ 任何外部服务 / advisory DB / 网络访问
-- ❌ 任何 CI 运行日志 / 产物 / 历史通过失败数据
+- ❌ 任何外部服务 / advisory DB（实施轮同上，仅前述 Maven 依赖解析）
+- ❌ 任何 CI 运行日志 / 产物 / 历史通过失败数据 —— **因此"CI 上是否通过"在两轮之后仍然是待验证**
 
 ### 因此本轮**不包含**以下断言
 

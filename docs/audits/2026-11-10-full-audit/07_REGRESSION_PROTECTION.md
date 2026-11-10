@@ -596,9 +596,9 @@
 |---|---|
 | 位置 | `patches/mobile-gateway-mgmt-auth/`（`patch.mjs` / `apply.mjs`）、`scripts/gateway-patch-gate.ps1`、`start-dsh-web.ps1:140-144` |
 | fail-closed 设计 | 缺少拒绝 hook 时补丁**返回 503**；锚点必须**恰好匹配一次**；`--apply` **拒绝**未知插件版本（`apply.mjs:155-169`）；`--check` 退出 1 → `start-dsh-web` **拒绝启动** |
-| 唯一 opt-out | `-SkipGatewayPatchCheck`（`start-dsh-web.ps1:114-118`），其存在性被 `gateway-startup-gate-spec.mjs:80` 断言 |
+| opt-out（**仅局域网路径**） | `-SkipGatewayPatchCheck`（`start-dsh-web.ps1:114-118`），其存在性被 `gateway-startup-gate-spec.mjs:79` 断言、"门禁默认启用"被 `:80` 断言。**⚠️ 2026-11-11 实施轮后：这个 opt-out 只属于局域网路径。公网隧道路径刻意没有 opt-out** —— `start-tunnel.ps1` 不声明该参数、调用门禁时显式传 `-Skip:$false`，且用 `Write-GatewayPatchRefusal -Public` 变体（**不打印**那句"想强行启动：加 -SkipGatewayPatchCheck"）。理由：`gateway-patch-gate.ps1` 的拒绝文案本来会主动广告这个开关，在暴露面最大的入口等于教用户怎么关掉鉴权。**两条约束都由 `gateway-startup-gate-spec.mjs` §8/§9 断言守住**（含负向断言"`start-tunnel.ps1` 的代码里不含 SkipGatewayPatchCheck"，防止旁路被重新引入）。<br>**不得削弱**：局域网路径的 opt-out 与其文案必须保留（`gateway-startup-gate-spec.mjs:217` 断言提示 3 存在）；`Test-GatewayPatchApplied` 的三个 `ShouldCheck = $false` 分支与 `CheckRunner` 语义**逐字未改** |
 | **本轮已只读核查（本机）** | 插件 **0.10.3** 装在 `%USERPROFILE%\.dsh\profiles\web\node_modules\`；`lib/index.mjs` **恰好 1 个锚点 + 1 个** `DSH_OUTPOST_MGW_AUTH_PATCH` 标记；`index.mjs.orig` 备份存在；`state.json` 哈希与 `apply.mjs:47` 的 `KNOWN_SOURCES` **匹配** ✅ |
-| **必须扩展的地方** | **SEC-01** —— `start-tunnel.ps1` 对这道门禁的引用数是 **0**，而它会启动 DSH 并**发布到公网 cloudflared URL**。**修法是把门禁扩展过去（P0-2），绝不是从 `start-dsh-web.ps1` 移除** |
+| **必须扩展的地方** | ✅ **SEC-01 已于 2026-11-11 实施轮修复**（commit `b302501`）—— 门禁已扩展到 `start-tunnel.ps1`，**且没有从 `start-dsh-web.ps1` 移除任何东西**。门禁在隧道脚本里**只调用一次**，位置在 cloudflared 检查之后、两处 `schtasks /Create`（`:334`、`:530`）与「定位 dsh」之前，单点即覆盖两处 DSH 启动点；`-Stop` / `-Status` 在此之前已早退，只读操作不受影响 |
 | **测试状态** | `mobile-gateway-patch-spec.mjs` 是**真实的强测试**（应用补丁 → `node --check` @ `:133` → 执行打过补丁的路由断言 fail-closed 503/401/403 @ `:211-242` → 断言拒绝未知版本 @ `:310`）。**但没有任何 CI 步骤运行 `apply.mjs --apply`** → CI 的集成测试跑的是**未打补丁的 gateway**（TEST-14(d)） |
 
 ### 8. `loginWithToken` 前清 cookie jar
