@@ -65,6 +65,17 @@ object PhoneBridge {
 
     fun runBackgroundLost(): Boolean = runUsesBackground() && activeDisplayId == Display.DEFAULT_DISPLAY
 
+    /**
+     * home/recents are system global actions, not display-targeted: on a
+     * background display they would leak to the main screen. Single rule shared
+     * by the pre-approval veto and the tool so both normalize case identically.
+     */
+    fun isUnsupportedBackgroundKey(key: String?, displayId: Int): Boolean {
+        val normalized = key?.lowercase() ?: return false
+        return displayId > 0 && displayId != Display.DEFAULT_DISPLAY &&
+            (normalized == "home" || normalized == "recents")
+    }
+
     fun currentDisplayId(): Int =
         if (runActive) {
             if (runBackground) {
@@ -175,15 +186,19 @@ object PhoneBridge {
         return try {
             service.snapshot(displayId)
         } catch (error: Exception) {
-            PhoneSnapshot(0, null, emptyList(), false, null, false, false, "ACCESSIBILITY_ERROR: ${error.message}")
+            PhoneSnapshot(
+                screenId = 0,
+                packageName = null,
+                elements = emptyList(),
+                sensitive = false,
+                sensitiveReason = null,
+                locked = false,
+                truncated = false,
+                error = "ACCESSIBILITY_ERROR: ${error.message}",
+            )
         }
     }
 
-    /**
-     * Windows go through a short no-active-window state after app launches.
-     * Retry a few times rather than turning that transition into a model-visible
-     * failure or (worse) a wrong package.
-     */
     /**
      * phone_open must not return the previous screen just because the launch
      * command succeeded. Wait briefly for the requested package to become the
@@ -204,6 +219,11 @@ object PhoneBridge {
         return last
     }
 
+    /**
+     * Windows go through a short no-active-window state after app transitions.
+     * Retry a few times rather than turning that transition into a model-visible
+     * failure or (worse) a wrong package.
+     */
     fun stableSnapshot(attempts: Int = 6, delayMs: Long = 350): PhoneSnapshot {
         var last = snapshot()
         repeat((attempts - 1).coerceAtLeast(0)) {

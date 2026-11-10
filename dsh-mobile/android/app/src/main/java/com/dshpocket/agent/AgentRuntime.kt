@@ -264,30 +264,30 @@ class AgentRuntime private constructor(context: Context) {
                     ToolRegistry(toolList),
                     gate,
                     preApproval = { tool, call ->
-                        // home/recents are handled by the system and are not
-                        // display-targeted: reject them before asking for an
-                        // approval instead of leaking the key to the main display.
-                        val key = call.arguments["key"] as? String
-                        val displayId = PhoneBridge.currentDisplayId()
-                        if (tool.spec.name == "phone_key" && displayId > 0 &&
-                            displayId != android.view.Display.DEFAULT_DISPLAY &&
-                            (key == "home" || key == "recents")
+                        // Shared rule with PhoneKeyTool: reject unsupported
+                        // background keys before asking the user for approval.
+                        if (tool.spec.name == "phone_key" &&
+                            PhoneBridge.isUnsupportedBackgroundKey(
+                                call.arguments["key"] as? String,
+                                PhoneBridge.currentDisplayId(),
+                            )
                         ) {
                             ToolOutput(ToolStatus.ERROR, "BACKGROUND_KEY_UNSUPPORTED")
                         } else {
                             null
                         }
                     },
-                ) { tool, _ ->
-                    // The approval may have been pending when the background
-                    // display disappeared. Fail closed right before execution;
-                    // the next beforeStep pauses the Run.
-                    if (tool.risk == ToolRisk.PHONE && PhoneBridge.runBackgroundLost()) {
-                        ToolOutput(ToolStatus.ERROR, "BACKGROUND_DISPLAY_LOST")
-                    } else {
-                        null
-                    }
-                },
+                    preExecute = { tool, _ ->
+                        // The approval may have been pending when the background
+                        // display disappeared. Fail closed right before execution;
+                        // the next beforeStep pauses the Run.
+                        if (tool.risk == ToolRisk.PHONE && PhoneBridge.runBackgroundLost()) {
+                            ToolOutput(ToolStatus.ERROR, "BACKGROUND_DISPLAY_LOST")
+                        } else {
+                            null
+                        }
+                    },
+                ),
                 runs,
                 systemPrompt = AgentLoop.DEFAULT_SYSTEM_PROMPT + memory.promptBlock(),
                 control = RunControl { beforeStep() },

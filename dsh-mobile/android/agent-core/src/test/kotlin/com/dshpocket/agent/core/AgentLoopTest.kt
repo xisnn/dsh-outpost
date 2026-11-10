@@ -129,9 +129,9 @@ class AgentLoopTest {
         )
         val result = AgentLoop(
             model,
-            ActionExecutor(registry, gate) { _, _ ->
+            ActionExecutor(registry, gate, preExecute = { _, _ ->
                 ToolOutput(ToolStatus.ERROR, "BACKGROUND_DISPLAY_LOST")
-            },
+            }),
             MemoryRunStore(),
         ).run(RunSpec("run-veto", "veto", maxSteps = 3))
 
@@ -166,6 +166,36 @@ class AgentLoopTest {
         assertEquals("BACKGROUND_KEY_UNSUPPORTED", result.toolResults.single().content)
         assertEquals(RunPhase.COMPLETED, result.phase)
         assertTrue(result.messages.any { it is AgentMessage.Tool && it.content == "ERROR: BACKGROUND_KEY_UNSUPPORTED" })
+    }
+
+    @Test
+    fun `pre-approval veto short-circuits approval and pre-execute`() {
+        val tool = PhoneVetoTool()
+        val registry = ToolRegistry(listOf(tool))
+        val gate = RecordingGate(ApprovalDecision.ALLOW_ONCE)
+        var preExecuteCalls = 0
+        val model = FakeModel(
+            ModelReply.Calls(listOf(ToolCall("c1", "phone_test"))),
+            ModelReply.Text("done"),
+        )
+        val result = AgentLoop(
+            model,
+            ActionExecutor(
+                registry,
+                gate,
+                preApproval = { _, _ -> ToolOutput(ToolStatus.ERROR, "BACKGROUND_KEY_UNSUPPORTED") },
+                preExecute = { _, _ ->
+                    preExecuteCalls += 1
+                    null
+                },
+            ),
+            MemoryRunStore(),
+        ).run(RunSpec("run-veto-order", "veto order", maxSteps = 3))
+
+        assertTrue(gate.requests.isEmpty())
+        assertEquals(0, preExecuteCalls)
+        assertFalse(tool.executed)
+        assertEquals("BACKGROUND_KEY_UNSUPPORTED", result.toolResults.single().content)
     }
 
     @Test

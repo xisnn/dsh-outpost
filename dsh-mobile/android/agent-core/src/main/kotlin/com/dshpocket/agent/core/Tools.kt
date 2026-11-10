@@ -56,17 +56,16 @@ class ActionExecutor(
     val registry: ToolRegistry,
     private val approvals: ApprovalGate,
     /**
-     * Optional defense-in-depth veto checked after the user's decision and
-     * immediately before execution. It lets the Android layer fail closed when
-     * the background display disappeared while the approval was pending. The
-     * default keeps existing call sites and tests source-compatible.
-     */
-    /**
      * Optional veto checked before the approval gate. It lets the Android
      * layer reject an action that cannot be performed safely (for example a
      * background display home/recents key) without asking the user first.
      */
     private val preApproval: ((AgentTool, ToolCall) -> ToolOutput?)? = null,
+    /**
+     * Optional defense-in-depth veto checked after the user's decision and
+     * immediately before execution. It lets the Android layer fail closed when
+     * the background display disappeared while the approval was pending.
+     */
     private val preExecute: ((AgentTool, ToolCall) -> ToolOutput?)? = null,
 ) {
     fun execute(runId: String, call: ToolCall, onExecuting: (() -> Unit)? = null): ToolResult {

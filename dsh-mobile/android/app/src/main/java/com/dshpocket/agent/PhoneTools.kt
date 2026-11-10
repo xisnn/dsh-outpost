@@ -1,7 +1,6 @@
 package com.dshpocket.agent
 
 import android.content.Context
-import android.view.Display
 import com.dshpocket.agent.core.AgentTool
 import com.dshpocket.agent.core.ToolCall
 import com.dshpocket.agent.core.ToolOutput
@@ -65,7 +64,10 @@ private fun screenOutput(prefix: String): ToolOutput {
 private fun keyOutput(prefix: String, displayId: Int): ToolOutput {
     val screen = PhoneBridge.stableSnapshot(attempts = 3, delayMs = 250)
     if (screen.error == null) return ToolOutput(ToolStatus.OK, "$prefix\n" + PhoneBridge.screenJson(screen))
-    if (screen.error == "ACCESSIBILITY_NO_ACTIVE_WINDOW" || screen.error == "ACCESSIBILITY_NOT_CONNECTED") {
+    // Only the legitimate empty-window state gets the empty-screen fallback.
+    // ACCESSIBILITY_NOT_CONNECTED means the service died after injection; that
+    // is an infrastructure failure the model must see, not a fabricated screen.
+    if (screen.error == "ACCESSIBILITY_NO_ACTIVE_WINDOW") {
         val empty = PhoneSnapshot(
             screenId = 0,
             packageName = null,
@@ -144,9 +146,11 @@ private class PhoneOpenTool(
         // to leave the DSH app. Other phone tools still guard the active screen.
         val before = PhoneBridge.stableSnapshot()
         // A live background display may have no application window between
-        // apps. Opening a target is exactly how it gets one, so only fail
-        // when the display itself is unavailable (or this is the main screen).
-        if (before.error != null && (!PhoneBridge.isBackground() || PhoneBridge.currentDisplayId() <= 0)) {
+        // apps. Opening a target is exactly how it gets one, so tolerate only
+        // that specific state; any other error still fails closed.
+        val emptyBackgroundWindow = before.error == "ACCESSIBILITY_NO_ACTIVE_WINDOW" &&
+            PhoneBridge.isBackground() && PhoneBridge.currentDisplayId() > 0
+        if (before.error != null && !emptyBackgroundWindow) {
             return ToolOutput(ToolStatus.ERROR, before.error)
         }
         if (before.error == null && before.locked) {
@@ -289,13 +293,14 @@ private class PhoneKeyTool(private val handoff: HandoffGate) : AgentTool {
 
     override fun execute(call: ToolCall): ToolOutput {
         val key = stringArgument(call, "key") ?: return ToolOutput(ToolStatus.ERROR, "INVALID_KEY")
-        val displayId = PhoneBridge.currentDisplayId()
-        if (displayId > 0 && displayId != Display.DEFAULT_DISPLAY &&
-            (key.lowercase() == "home" || key.lowercase() == "recents")
-        ) {
+        if (PhoneBridge.isUnsupportedBackgroundKey(key, PhoneBridge.currentDisplayId())) {
             return ToolOutput(ToolStatus.ERROR, "BACKGROUND_KEY_UNSUPPORTED")
         }
         guard(handoff)?.let { return it }
+        // Re-read at action time like tap/type/scroll: the display may vanish
+        // during the guard snapshot, and -1 fails closed instead of targeting
+        // a stale display id.
+        val displayId = PhoneBridge.currentDisplayId()
         val result = OutpostAccessibilityService.instance?.key(key, displayId)
             ?: return ToolOutput(ToolStatus.ERROR, "ACCESSIBILITY_NOT_CONNECTED")
         if (result != "OK") return ToolOutput(ToolStatus.ERROR, result)
