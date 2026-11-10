@@ -15,10 +15,16 @@ import com.facebook.react.uimanager.ViewManager
 import com.dshpocket.agent.background.BackgroundDisplayController
 import com.dshpocket.agent.background.BackgroundModeStore
 import org.json.JSONObject
+import java.util.concurrent.Executors
 
 /** P6-0 thin bridge: the native runtime owns the run; RN reads snapshots and decides approvals. */
 class AgentModule(private val react: ReactApplicationContext) : ReactContextBaseJavaModule(react) {
     override fun getName() = "OutpostAgent"
+
+    /** Daemon, so a pending background-display wait can never hold the process open. */
+    private val startExecutor = Executors.newSingleThreadExecutor { runnable ->
+        Thread(runnable, "dsh-agent-start").apply { isDaemon = true }
+    }
 
     @ReactMethod
     fun snapshot(promise: Promise) {
@@ -53,13 +59,26 @@ class AgentModule(private val react: ReactApplicationContext) : ReactContextBase
                 promise.reject("MODEL_NOT_CONFIGURED", "MODEL_NOT_CONFIGURED")
                 return
             }
-            if (BackgroundModeStore(react).enabled()) {
-                // Never pop a permission dialog from send: the task would be
-                // rejected anyway. The chat offers an explicit re-authorize
-                // action; a grant made there or in the manager is detected by
-                // the controller and the next send can use the display.
-                val status = BackgroundDisplayController.get(react)
-                    .startAndWait(5_000, requestPermission = false)
+            if (!BackgroundModeStore(react).enabled()) {
+                launchRun(goal, promise)
+                return
+            }
+            // Never pop a permission dialog from send: the task would be
+            // rejected anyway. The chat offers an explicit re-authorize
+            // action; a grant made there or in the manager is detected by
+            // the controller and the next send can use the display.
+            //
+            // startAndWait polls for up to 5s. Every @ReactMethod here shares the
+            // native-modules queue, so waiting inline would stall snapshot polling
+            // and approval decisions for the whole wait — exactly while the user is
+            // looking at the send they just made.
+            startExecutor.execute {
+                val status = try {
+                    BackgroundDisplayController.get(react).startAndWait(5_000, requestPermission = false)
+                } catch (error: Exception) {
+                    fail(promise, error)
+                    return@execute
+                }
                 if (!status.optBoolean("connected") ||
                     !status.optBoolean("permissionGranted") ||
                     status.optInt("displayId", -1) <= 0
@@ -67,15 +86,23 @@ class AgentModule(private val react: ReactApplicationContext) : ReactContextBase
                     val reason = status.optString("error").ifBlank { "后台模式已开启，但后台屏未就绪" }
                     android.util.Log.w("DshAgentModule", "startCloud rejected BACKGROUND_NOT_READY: $reason")
                     promise.reject("BACKGROUND_NOT_READY", reason)
-                    return
+                    return@execute
+                }
+                try {
+                    launchRun(goal, promise)
+                } catch (error: Exception) {
+                    fail(promise, error)
                 }
             }
-            val intent = Intent(react, AgentService::class.java).setAction(AgentService.ACTION_RUN)
-            if (Build.VERSION.SDK_INT >= 26) react.startForegroundService(intent) else react.startService(intent)
-            promise.resolve(AgentRuntime.get(react).startCloud(goal).toString())
         } catch (error: Exception) {
             fail(promise, error)
         }
+    }
+
+    private fun launchRun(goal: String, promise: Promise) {
+        val intent = Intent(react, AgentService::class.java).setAction(AgentService.ACTION_RUN)
+        if (Build.VERSION.SDK_INT >= 26) react.startForegroundService(intent) else react.startService(intent)
+        promise.resolve(AgentRuntime.get(react).startCloud(goal).toString())
     }
 
     @ReactMethod
@@ -389,6 +416,9 @@ class AgentModule(private val react: ReactApplicationContext) : ReactContextBase
     }
 
     override fun invalidate() {
+        // Interrupts an in-flight startAndWait, which treats interruption as "stop
+        // waiting" and returns rather than blocking on a module being torn down.
+        runCatching { startExecutor.shutdownNow() }
         runCatching { BackgroundDisplayController.close(react) }
         super.invalidate()
     }
