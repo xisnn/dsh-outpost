@@ -128,6 +128,143 @@ function Test-GatewayPatchApplied {
 
 <#
 .SYNOPSIS
+    把 Test-GatewayPatchApplied 的结果翻译成「公网隧道能不能启动」。
+
+.DESCRIPTION
+    ## 为什么需要这个函数（Test-GatewayPatchApplied 不够用）
+
+    `Test-GatewayPatchApplied` 有**四条**返回路径，其中三条是 `ShouldCheck = $false`：
+
+      · `SkipGatewayPatchCheck`  —— 调用方显式要求跳过
+      · `plugin-not-installed`   —— 探测不到插件目录
+      · `patch-script-missing`   —— 找不到 apply.mjs
+
+    局域网路径（start-dsh-web.ps1）写的是 `if ($gate.ShouldCheck) { ... }`，
+    所以这三条**静默放行** —— 对局域网是经过权衡的（暴露面限于同网段，
+    而且插件没装就没有 /mgw/*，上游插件是唯一的路由提供者，见
+    patches/mobile-gateway-mgmt-auth/patch.mjs:6）。
+
+    但公网隧道不能照抄这个判定：它会把服务发布到 cloudflared 公网 URL，
+    而「**无法确认**补丁是否生效」和「**确认**补丁已生效」是两回事。
+    尤其是 `plugin-not-installed` 来自一次**路径探测**，而三处路径来源并不一致：
+
+      · start-tunnel.ps1      → `$env:DSH_HOME`，否则 `%USERPROFILE%\.dsh`
+      · setup-gateway.ps1:35,58 → 硬编码 `%USERPROFILE%\.dsh`
+      · apply.mjs:57-67       → `os.homedir()`
+
+    一旦 DSH_HOME 被设置成别处，探测就会**假阴性**：插件其实装着、/mgw/*
+    其实开着且无认证，门禁却判定「不适用」而放行 —— 直接暴露到公网。
+
+    ## 判定规则
+
+    **只有一条放行路径**：`ShouldCheck = $true` 且 `ExitCode` 严格等于整数 0。
+    其余一切状态（含无法判定、结果畸形、结果为空）全部拒绝。
+
+    刻意**不**改 `Test-GatewayPatchApplied` 的语义 —— 局域网路径依赖它，
+    收紧只发生在公网侧的这个翻译层。
+
+.OUTPUTS
+    PSCustomObject：Allow（bool）、Reason（机器可读的原因码）、Detail（给人看的说明）
+
+.EXAMPLE
+    $d = Resolve-PublicTunnelGatewayGate -Gate $gate
+    if (-not $d.Allow) { Write-GatewayPatchRefusal -Public -Reason $d.Reason -Detail $d.Detail; exit 1 }
+#>
+function Resolve-PublicTunnelGatewayGate {
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory = $true)]
+        [AllowNull()]
+        [psobject]$Gate
+    )
+
+    # 检查过程抛异常时调用方会拿到 $null —— 这也是一种「无法确认」。
+    if ($null -eq $Gate) {
+        return [pscustomobject]@{
+            Allow  = $false
+            Reason = 'gate-result-missing'
+            Detail = '门禁检查过程抛出异常，没有返回结果；无法确认补丁状态。'
+        }
+    }
+
+    $names = @($Gate.PSObject.Properties.Name)
+    foreach ($required in @('ShouldCheck', 'ExitCode', 'Reason')) {
+        if ($names -notcontains $required) {
+            return [pscustomobject]@{
+                Allow  = $false
+                Reason = 'gate-result-malformed'
+                Detail = "门禁结果缺少 $required 字段，无法判定补丁状态。"
+            }
+        }
+    }
+
+    if ($Gate.ShouldCheck) {
+        $raw = $Gate.ExitCode
+        $code = $null
+        if ($raw -is [int] -or $raw -is [long]) {
+            $code = [int]$raw
+        } elseif ($raw -is [string] -and $raw -match '^-?\d+$') {
+            $code = [int]$raw
+        }
+
+        if ($null -eq $code) {
+            # 注意 [int]$null 在 PowerShell 里等于 0 —— 所以这里必须**先**判类型，
+            # 不能直接 [int]$raw，否则「检查器没给退出码」会被折叠成「检查通过」。
+            return [pscustomobject]@{
+                Allow  = $false
+                Reason = 'exit-code-unknown'
+                Detail = "门禁返回的 ExitCode 不是整数（实际类型：$($raw.GetType().Name)），无法判定。"
+            }
+        }
+        if ($code -eq 0) {
+            return [pscustomobject]@{
+                Allow  = $true
+                Reason = 'patch-verified'
+                Detail = 'apply.mjs --check 退出 0，补丁确认已生效。'
+            }
+        }
+        return [pscustomobject]@{
+            Allow  = $false
+            Reason = 'patch-not-applied'
+            Detail = [string]$Gate.Output
+        }
+    }
+
+    switch ([string]$Gate.Reason) {
+        'SkipGatewayPatchCheck' {
+            return [pscustomobject]@{
+                Allow  = $false
+                Reason = 'skip-not-allowed-on-public'
+                Detail = '公网隧道路径不接受跳过门禁（调用方本应显式传 -Skip:$false）。'
+            }
+        }
+        'plugin-not-installed' {
+            return [pscustomobject]@{
+                Allow  = $false
+                Reason = 'plugin-probe-inconclusive'
+                Detail = '按探测路径找不到网关插件。探测路径与实际安装路径来源不一致，' +
+                         '无法据此断定插件真的没装 —— 若插件其实装着，/mgw/* 就是无认证地对公网开放。'
+            }
+        }
+        'patch-script-missing' {
+            return [pscustomobject]@{
+                Allow  = $false
+                Reason = 'patch-script-missing'
+                Detail = '找不到补丁检查脚本 patches\mobile-gateway-mgmt-auth\apply.mjs，无法校验补丁状态。'
+            }
+        }
+        default {
+            return [pscustomobject]@{
+                Allow  = $false
+                Reason = 'unknown-state'
+                Detail = "门禁返回了未识别的状态（Reason='$([string]$Gate.Reason)'）；无法确认补丁是否生效。"
+            }
+        }
+    }
+}
+
+<#
+.SYNOPSIS
     门禁未通过时，向用户打印可操作的说明（并返回退出码 1）。
 
 .DESCRIPTION
@@ -148,22 +285,46 @@ function Test-GatewayPatchApplied {
     当前启动路径会把服务暴露到公网（start-tunnel.ps1）。切换文案：
     说明公网可达、并且**不打印**跳过开关的提示。
 
+.PARAMETER Reason
+    Resolve-PublicTunnelGatewayGate 给出的原因码，仅对 -Public 生效。
+    默认空 = 沿用既有文案（局域网调用方不传这个参数，输出逐字不变）。
+
+    区分的意义在于：`patch-not-applied` 是**确认**补丁没生效，
+    而 patch-script-missing / plugin-probe-inconclusive / unknown-state 等
+    是**无法确认**。对后者说「补丁未生效」是错的（我们并不知道），
+    建议 `apply.mjs --apply` 也是错的（那个脚本本身就不存在）。
+
 .EXAMPLE
     Write-GatewayPatchRefusal -Detail $result.Output
     Write-GatewayPatchRefusal -Public -Detail $result.Output
+    Write-GatewayPatchRefusal -Public -Reason $decision.Reason -Detail $decision.Detail
 #>
 function Write-GatewayPatchRefusal {
     [CmdletBinding()]
     param(
         [string]$Detail = '',
-        [switch]$Public
+        [switch]$Public,
+        [string]$Reason = ''
     )
 
+    # 「无法确认」而不是「确认未生效」—— 只在公网路径且给了原因码时才切换文案，
+    # 所以局域网（不传 -Public）的输出与改动前逐字相同。
+    $unverifiable = $Public.IsPresent -and $Reason -ne '' -and $Reason -ne 'patch-not-applied'
+
     Write-Host ''
-    Write-Host '[!] 网关管理接口认证补丁未生效 —— 拒绝启动。' -ForegroundColor Red
+    if ($unverifiable) {
+        Write-Host '[!] 无法确认网关管理接口认证补丁已生效 —— 拒绝启动。' -ForegroundColor Red
+    } else {
+        Write-Host '[!] 网关管理接口认证补丁未生效 —— 拒绝启动。' -ForegroundColor Red
+    }
     if ($Detail) { Write-Host $Detail.Trim() -ForegroundColor DarkGray }
     Write-Host ''
-    Write-Host '    原因：插件可能刚被升级/重装，补丁被覆盖掉了。' -ForegroundColor Yellow
+    if ($unverifiable) {
+        Write-Host '    原因：不是确认补丁失效，而是**无法验证**它的状态。' -ForegroundColor Yellow
+        Write-Host '    公网路径按「无法确认即拒绝」处理 —— 宁可挡错，不可放过。' -ForegroundColor Yellow
+    } else {
+        Write-Host '    原因：插件可能刚被升级/重装，补丁被覆盖掉了。' -ForegroundColor Yellow
+    }
     if ($Public) {
         Write-Host '    此时 /mgw/* 管理接口没有认证，而隧道会把服务发布到公网 ——' -ForegroundColor Yellow
         Write-Host '    配对码铸造对**整个互联网**可达，不只是同网段。' -ForegroundColor Yellow
@@ -171,8 +332,17 @@ function Write-GatewayPatchRefusal {
         Write-Host '    此时 /mgw/* 管理接口没有认证，配对码铸造对同网段可达。' -ForegroundColor Yellow
     }
     Write-Host ''
-    Write-Host '    修复：node patches\mobile-gateway-mgmt-auth\apply.mjs --apply' -ForegroundColor Cyan
-    Write-Host '    或重跑：.\setup-gateway.ps1' -ForegroundColor Cyan
+    if ($unverifiable -and $Reason -eq 'patch-script-missing') {
+        # 这里不能建议 apply.mjs --apply：那个脚本正是缺失的东西。
+        Write-Host '    修复：这是仓库自带文件，请重新拉取仓库；' -ForegroundColor Cyan
+        Write-Host '    或重跑：.\setup-gateway.ps1' -ForegroundColor Cyan
+    } elseif ($unverifiable -and $Reason -eq 'plugin-probe-inconclusive') {
+        Write-Host '    修复：重跑 .\setup-gateway.ps1（会安装插件并打补丁）' -ForegroundColor Cyan
+        Write-Host '    若确认插件已装：检查 DSH_HOME 是否把探测指到了别的目录' -ForegroundColor Cyan
+    } else {
+        Write-Host '    修复：node patches\mobile-gateway-mgmt-auth\apply.mjs --apply' -ForegroundColor Cyan
+        Write-Host '    或重跑：.\setup-gateway.ps1' -ForegroundColor Cyan
+    }
     Write-Host ''
     if ($Public) {
         # 刻意不提 -SkipGatewayPatchCheck：公网路径没有这个退出口。

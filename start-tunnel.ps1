@@ -207,12 +207,17 @@ if (-not (Test-Path $Cloudflared)) {
 # 而 setup-gateway.ps1 已经把 adminLoopbackOnly 写成 false ——
 # 配对码铸造会对整个互联网可达。
 #
-# 与局域网路径的两点**刻意**差异：
+# 与局域网路径的三点**刻意**差异：
 #   1. **不提供 -SkipGatewayPatchCheck**。门禁模块的拒绝文案里本来写着
 #      「想强行启动：加 -SkipGatewayPatchCheck」，那句在局域网是经过权衡的
 #      opt-out，但在公网等于教用户怎么关掉鉴权。所以这里显式传 -Skip:$false，
 #      并用 -Public 文案变体（不打印那句提示）。
-#   2. 门禁放在**两处** DSH 启动（下方的 schtasks /Create）与「定位 dsh」
+#   2. **「无法确认」也算不通过**。Test-GatewayPatchApplied 有四条返回路径，
+#      其中三条是 ShouldCheck=$false（skip / plugin-not-installed /
+#      patch-script-missing）。局域网写的是 `if ($gate.ShouldCheck)`，那三条
+#      静默放行；公网改成走 Resolve-PublicTunnelGatewayGate，只有
+#      「确实检查过且退出码为 0」才放行。理由见该函数的注释。
+#   3. 门禁放在**两处** DSH 启动（下方的 schtasks /Create）与「定位 dsh」
 #      **之前** —— 否则环境缺失会先 exit，门禁根本执行不到。这正是
 #      scripts/gateway-patch-gate.ps1 头部注释记录过的历史坑。
 #
@@ -233,26 +238,43 @@ $patchScript = Join-Path $RepoRoot 'patches\mobile-gateway-mgmt-auth\apply.mjs'
 $tunnelDshHome = if ($env:DSH_HOME) { $env:DSH_HOME } else { Join-Path $env:USERPROFILE '.dsh' }
 $gatewayDir = Join-Path $tunnelDshHome 'profiles\web\node_modules\dsh-plugin-mobile-gateway'
 $gatewayIndex = Join-Path $gatewayDir 'lib\index.mjs'
-$gate = Test-GatewayPatchApplied -PatchScript $patchScript -Skip:$false `
-    -PluginInstalled:(Test-Path -LiteralPath (Join-Path $gatewayDir 'package.json')) -CheckRunner {
-        param($script)
-        $previous = $ErrorActionPreference
-        $ErrorActionPreference = 'Continue'
-        try {
-            $global:LASTEXITCODE = $null
-            $output = (& node $script --check "--path=$gatewayIndex" 2>&1 | Out-String)
-            $code = $global:LASTEXITCODE
-            if ($null -eq $code) { $code = 1 }
-            return @{ ExitCode = $code; Output = $output }
-        } finally { $ErrorActionPreference = $previous }
-    }
-if ($gate.ShouldCheck) {
-    if ($gate.ExitCode -ne 0) {
-        Write-GatewayPatchRefusal -Public -Detail $gate.Output
-        exit 1
-    }
-    Write-Step '网关认证补丁：已生效'
+$gate = $null
+$gateError = ''
+try {
+    $gate = Test-GatewayPatchApplied -PatchScript $patchScript -Skip:$false `
+        -PluginInstalled:(Test-Path -LiteralPath (Join-Path $gatewayDir 'package.json')) -CheckRunner {
+            param($script)
+            $previous = $ErrorActionPreference
+            $ErrorActionPreference = 'Continue'
+            try {
+                $global:LASTEXITCODE = $null
+                $output = (& node $script --check "--path=$gatewayIndex" 2>&1 | Out-String)
+                $code = $global:LASTEXITCODE
+                if ($null -eq $code) { $code = 1 }
+                return @{ ExitCode = $code; Output = $output }
+            } finally { $ErrorActionPreference = $previous }
+        }
+} catch {
+    # 检查器自己炸了 = 无法确认补丁状态。不能让异常把脚本带走后
+    # 由"未捕获错误"来充当拒绝理由 —— 那不可测，也说不清原因。
+    $gateError = $_.Exception.Message
+    $gate = $null
 }
+if ($gateError) { Write-Err "门禁检查器异常：$gateError" }
+
+# 判定交给 Resolve-PublicTunnelGatewayGate：**只有** ShouldCheck=$true 且
+# ExitCode 严格为整数 0 才放行。patch-script-missing / plugin-not-installed /
+# skip / 结果畸形 / 结果为空 / 状态未识别 —— 一律拒绝。
+#
+# 不能写成 `if ($gate.ShouldCheck) { ... }`：那会让上面三条 ShouldCheck=$false
+# 的路径静默放行，而它们恰恰都是「无法确认补丁是否生效」。局域网路径
+# （start-dsh-web.ps1）保留原判定不变，收紧只发生在这里。
+$decision = Resolve-PublicTunnelGatewayGate -Gate $gate
+if (-not $decision.Allow) {
+    Write-GatewayPatchRefusal -Public -Reason $decision.Reason -Detail $decision.Detail
+    exit 1
+}
+Write-Step '网关认证补丁：已生效'
 
 # 先停掉旧的，避免端口/域名冲突
 if (Test-Path $PidFile) {

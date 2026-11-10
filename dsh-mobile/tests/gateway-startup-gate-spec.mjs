@@ -377,8 +377,23 @@ check(
 check(/Test-GatewayPatchApplied/.test(tunnelCode), '隧道脚本调用门禁判定函数');
 check(/Write-GatewayPatchRefusal/.test(tunnelCode), '隧道脚本调用提示函数');
 check(
-  /if \(\$gate\.ExitCode -ne 0\)[\s\S]{0,200}?exit 1/.test(tunnelCode),
+  /Resolve-PublicTunnelGatewayGate\s+-Gate\s+\$gate/.test(tunnelCode),
+  '隧道脚本把门禁结果交给公网决策函数（不再自己判 ShouldCheck）',
+);
+check(
+  /if \(-not \$decision\.Allow\)[\s\S]{0,200}?exit 1/.test(tunnelCode),
   '隧道脚本在门禁未通过时 exit 1（fail-closed）',
+);
+// 复核发现的那个缺口的**反向**断言：`if ($gate.ShouldCheck)` 会让
+// patch-script-missing / plugin-not-installed / skip 三条路径静默放行。
+// 它一旦被重新引入，这条就红。行为层的证明在 gateway-public-gate-spec.mjs §3。
+check(
+  !/if \(\$gate\.ShouldCheck\)/.test(tunnelCode),
+  '隧道脚本**不再**用 if ($gate.ShouldCheck) 判定（那会放行三条"无法确认"路径）',
+);
+check(
+  /try \{[\s\S]{0,600}?Test-GatewayPatchApplied[\s\S]{0,900}?\} catch \{/.test(tunnelCode),
+  '门禁调用被 try/catch 包住（检查器抛异常 = 无法确认 = 拒绝，而不是让脚本崩掉）',
 );
 check(
   !/SkipGatewayPatchCheck/.test(tunnelCode),
