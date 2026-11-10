@@ -2,7 +2,7 @@
  * P6-0 内核自检页：验证 native AgentService 拥有 Run、RN 只读状态、
  * 审批在执行入口阻塞、RunStore 持久化。模型是固定演示模型。
  */
-import React, { useCallback, useEffect, useMemo, useState } from 'react';
+import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { Alert, ScrollView, StyleSheet, Text, TextInput, View } from 'react-native';
 
 import { Header } from '../components/Header';
@@ -31,6 +31,8 @@ const PHASE_TEXT: Record<AgentSnapshot['phase'], string> = {
   interrupted: '已中断',
 };
 
+const failureText = (failure: unknown): string => String((failure as Error)?.message ?? failure);
+
 export function AgentDemoScreen({ active = true }: { active?: boolean }) {
   const tv = useTheme();
   const nav = useNav();
@@ -44,14 +46,24 @@ export function AgentDemoScreen({ active = true }: { active?: boolean }) {
   const [error, setError] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
   const [cloudBusy, setCloudBusy] = useState(false);
+  // A snapshot read error clears on the next successful read; an action error
+  // has to survive the 500ms poll, or the user sees it flash and vanish.
+  const errorSource = useRef<'read' | 'action' | null>(null);
+  // `busy` only disables the buttons after a re-render; this blocks the second
+  // tap of a double-press synchronously.
+  const deciding = useRef(false);
 
   const refresh = useCallback(async () => {
     try {
       const next = await agentClient.snapshot();
       setSnapshot(next);
-      setError(null);
+      if (errorSource.current === 'read') {
+        errorSource.current = null;
+        setError(null);
+      }
     } catch (failure) {
-      setError(String((failure as Error)?.message ?? failure));
+      errorSource.current = 'read';
+      setError(failureText(failure));
     }
   }, []);
 
@@ -94,11 +106,13 @@ export function AgentDemoScreen({ active = true }: { active?: boolean }) {
 
   const start = useCallback(async () => {
     setBusy(true);
+    errorSource.current = null;
     setError(null);
     try {
       setSnapshot(await agentClient.startDemo());
     } catch (failure) {
-      setError(String((failure as Error)?.message ?? failure));
+      errorSource.current = 'action';
+      setError(failureText(failure));
     } finally {
       setBusy(false);
     }
@@ -106,11 +120,13 @@ export function AgentDemoScreen({ active = true }: { active?: boolean }) {
 
   const runCloud = useCallback(async () => {
     setCloudBusy(true);
+    errorSource.current = null;
     setError(null);
     try {
       setSnapshot(await agentClient.startCloud(goal));
     } catch (failure) {
-      setError(String((failure as Error)?.message ?? failure));
+      errorSource.current = 'action';
+      setError(failureText(failure));
     } finally {
       setCloudBusy(false);
     }
@@ -119,6 +135,7 @@ export function AgentDemoScreen({ active = true }: { active?: boolean }) {
   const confirmCloud = useCallback(() => {
     if (!settings?.hasKey || !settings.model) return;
     if (!goal.trim()) {
+      errorSource.current = 'action';
       setError('请先填写云端任务');
       return;
     }
@@ -134,11 +151,13 @@ export function AgentDemoScreen({ active = true }: { active?: boolean }) {
 
   const togglePause = useCallback(async () => {
     setBusy(true);
+    errorSource.current = null;
     setError(null);
     try {
       setSnapshot(snapshot?.paused ? await agentClient.resume() : await agentClient.pause());
     } catch (failure) {
-      setError(String((failure as Error)?.message ?? failure));
+      errorSource.current = 'action';
+      setError(failureText(failure));
     } finally {
       setBusy(false);
     }
@@ -146,11 +165,13 @@ export function AgentDemoScreen({ active = true }: { active?: boolean }) {
 
   const stopRun = useCallback(async () => {
     setBusy(true);
+    errorSource.current = null;
     setError(null);
     try {
       setSnapshot(await agentClient.stop());
     } catch (failure) {
-      setError(String((failure as Error)?.message ?? failure));
+      errorSource.current = 'action';
+      setError(failureText(failure));
     } finally {
       setBusy(false);
     }
@@ -158,11 +179,13 @@ export function AgentDemoScreen({ active = true }: { active?: boolean }) {
 
   const dismissRecovery = useCallback(async () => {
     setBusy(true);
+    errorSource.current = null;
     setError(null);
     try {
       setSnapshot(await agentClient.dismissRecovery());
     } catch (failure) {
-      setError(String((failure as Error)?.message ?? failure));
+      errorSource.current = 'action';
+      setError(failureText(failure));
     } finally {
       setBusy(false);
     }
@@ -170,11 +193,13 @@ export function AgentDemoScreen({ active = true }: { active?: boolean }) {
 
   const resumeHandoff = useCallback(async () => {
     setBusy(true);
+    errorSource.current = null;
     setError(null);
     try {
       setSnapshot(await agentClient.resumeHandoff());
     } catch (failure) {
-      setError(String((failure as Error)?.message ?? failure));
+      errorSource.current = 'action';
+      setError(failureText(failure));
     } finally {
       setBusy(false);
     }
@@ -182,14 +207,20 @@ export function AgentDemoScreen({ active = true }: { active?: boolean }) {
 
   const decide = useCallback(async (allow: boolean) => {
     const pending = snapshot?.pendingApproval;
-    if (!pending) return;
+    if (!pending || deciding.current) return;
+    deciding.current = true;
     setBusy(true);
+    errorSource.current = null;
     setError(null);
     try {
-      setSnapshot(await agentClient.decide(pending.callId, allow));
+      // The digest the card rendered travels with the decision: native rejects
+      // it if the pending call changed, which a callId alone cannot detect.
+      setSnapshot(await agentClient.decide(pending.callId, pending.digest, allow));
     } catch (failure) {
-      setError(String((failure as Error)?.message ?? failure));
+      errorSource.current = 'action';
+      setError(failureText(failure));
     } finally {
+      deciding.current = false;
       setBusy(false);
     }
   }, [snapshot]);

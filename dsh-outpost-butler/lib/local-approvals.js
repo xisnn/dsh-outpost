@@ -55,6 +55,11 @@ export class LocalApprovals {
       ctx.on('tools/result', exec => {
         const key = keyOf(exec.agent?.session?.id, exec.callId);
         this.executions.delete(key);
+        // The dedupe set has to shrink with the invocation. Left to grow it
+        // reaches the cap and then denies every later call for the life of the
+        // process. Dropping a finished call is safe: a replayed pre-execute is
+        // treated as a new invocation and re-enters the approval chain.
+        this.seenCalls.delete(key);
         for (const entry of this.pending.values()) if (entry.key === key) entry.finish('cancelled');
       }),
       ctx.on('approval/request', (req, next) => this.request(req, next)),
@@ -121,6 +126,7 @@ export class LocalApprovals {
   dispose() {
     for (const entry of this.pending.values()) entry.finish('cancelled');
     this.executions.clear();
+    this.seenCalls.clear();
     for (const off of this.off) off?.();
   }
 }

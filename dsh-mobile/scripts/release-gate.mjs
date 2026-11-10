@@ -10,7 +10,9 @@
  * P6 gate checks ABI coverage, required React Native libraries, the Hermes JS
  * bundle, APK size, and (by default) that the signer matches the recorded
  * release certificate. `--allow-test-signing` accepts the recorded debug certs
- * for test-only builds and marks the result testOnly.
+ * for test-only builds and marks the result testOnly. `--skip-signing` only
+ * avoids running apksigner; it reports signing.skipped and fails the gate,
+ * because an unverified signer is not a passing one.
  *
  * The old DSH runtime/proot assets are no longer required by P6; they are only
  * checked with --legacy-runtime. This keeps the gate aligned with the entry fix
@@ -75,7 +77,10 @@ function findApksigner() {
   return null;
 }
 
-let signing = { checked: false, pass: true, digests: [], testOnly: false };
+// An unchecked signature must not read as a passed one: the overall gate ANDs
+// signing.pass, so skipping the check has to fail the build instead of waving
+// it through. abiPass/sizePass/bundlePass remain available separately.
+let signing = { checked: false, skipped: true, pass: false, digests: [], testOnly: false };
 if (!process.argv.includes('--skip-signing')) {
   try {
     const config = JSON.parse(fs.readFileSync(path.resolve(signingConfigPath), 'utf8'));
@@ -92,12 +97,13 @@ if (!process.argv.includes('--skip-signing')) {
     const knownGoodMatch = digests.some(digest => knownGood.has(digest));
     signing = {
       checked: true,
+      skipped: false,
       digests,
       testOnly,
       pass: knownGoodMatch || (allowTestSigning && testOnly),
     };
   } catch (error) {
-    signing = { checked: true, pass: false, digests: [], testOnly: false, error: String(error.message).slice(0, 300) };
+    signing = { checked: true, skipped: false, pass: false, digests: [], testOnly: false, error: String(error.message).slice(0, 300) };
   }
 }
 

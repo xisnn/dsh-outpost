@@ -281,7 +281,9 @@ export class TaskManager {
     try {
       agent = await this.resolveAgentCold(task);
     } catch (error) {
-      this.activeTaskId = null;
+      // finishLane, not a bare activeTaskId reset: the lane also owns the
+      // approval/completion timers and the pump that starts the next task.
+      this.finishLane(id);
       throw new TaskError('agent-unavailable', error.message, 409);
     }
 
@@ -326,7 +328,7 @@ export class TaskManager {
       try {
         goal = this.goals.resume(agent, { id: goal.id, revision: goal.revision });
       } catch (error) {
-        this.activeTaskId = null;
+        this.finishLane(id);
         throw new TaskError('resume-failed', error.message, 409);
       }
     }

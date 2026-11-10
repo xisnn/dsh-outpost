@@ -47,6 +47,7 @@ export interface AgentRecovery {
 
 export interface AgentSnapshot {
   supported: boolean;
+  /** False only on a refused action; `parse` turns that into a thrown code. */
   ok: boolean;
   runId: string | null;
   phase: AgentPhase;
@@ -152,7 +153,7 @@ interface NativeAgent {
   snapshot(): Promise<string>;
   startDemo(): Promise<string>;
   startCloud(goal: string): Promise<string>;
-  decide(callId: string, allow: boolean): Promise<string>;
+  decide(callId: string, digest: string, allow: boolean): Promise<string>;
   pause(): Promise<string>;
   resume(): Promise<string>;
   stop(): Promise<string>;
@@ -193,7 +194,14 @@ function native(): NativeAgent {
   return bridge;
 }
 
-const parse = (text: string): AgentSnapshot => JSON.parse(text) as AgentSnapshot;
+const parse = (text: string): AgentSnapshot => {
+  const parsed = JSON.parse(text) as AgentSnapshot & { code?: string };
+  // Native reports a refused action as a resolved { ok: false, code } payload
+  // rather than a rejected promise. Without this the caller would render it as
+  // a valid snapshot and, for startCloud, discard the draft that was sent.
+  if (parsed.ok === false) throw new Error(parsed.code ?? 'AGENT_ACTION_REFUSED');
+  return parsed;
+};
 const parseSettings = (text: string): AgentModelSettings =>
   JSON.parse(text) as AgentModelSettings;
 
@@ -202,7 +210,8 @@ export const agentClient = {
   snapshot: async () => parse(await native().snapshot()),
   startDemo: async () => parse(await native().startDemo()),
   startCloud: async (goal: string) => parse(await native().startCloud(goal)),
-  decide: async (callId: string, allow: boolean) => parse(await native().decide(callId, allow)),
+  decide: async (callId: string, digest: string, allow: boolean) =>
+    parse(await native().decide(callId, digest, allow)),
   pause: async () => parse(await native().pause()),
   resume: async () => parse(await native().resume()),
   stop: async () => parse(await native().stop()),

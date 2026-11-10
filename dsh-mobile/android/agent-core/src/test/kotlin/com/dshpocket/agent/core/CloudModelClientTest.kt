@@ -248,7 +248,25 @@ class CloudModelClientTest {
         val call = (reply as ModelReply.Calls).calls.single()
         assertEquals("workspace_read", call.name)
         assertEquals("input.txt", call.arguments["path"])
-        assertEquals("gemini-1", call.id)
+        assertTrue(call.id.startsWith("gemini-"))
+    }
+
+    @Test
+    fun `synthetic call ids never repeat across responses`() {
+        val chunk = "data: {\"candidates\":[{\"content\":{\"parts\":" +
+            "[{\"functionCall\":{\"name\":\"workspace_read\",\"args\":{\"path\":\"a.txt\"}}}," +
+            "{\"functionCall\":{\"name\":\"workspace_read\",\"args\":{\"path\":\"b.txt\"}}}]}" +
+            ",\"finishReason\":\"STOP\"}]}"
+        val ids = (1..2).flatMap {
+            val reply = CloudModelClient(
+                config(ModelProtocol.GEMINI, "https://generativelanguage.googleapis.com"),
+                FakeTransport(HttpResponse(200, chunk)),
+            ).complete(request())
+            ((reply as ModelReply.Calls).calls).map { call -> call.id }
+        }
+        // A repeated id would let an approval decision for one call be replayed
+        // onto a later call that the user never saw.
+        assertEquals(4, ids.toSet().size)
     }
 
     @Test

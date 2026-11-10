@@ -219,6 +219,28 @@ test('human interjection pauses the goal and waits for the user', async () => {
   assert.equal(goals.byAgent.get('session-1').phase, 'active');
 });
 
+test('a failed goal resume releases the whole lane, not just the active task', async (t) => {
+  const { manager, store, goals } = await setup();
+  t.after(() => manager.dispose());
+  const created = await manager.create({ objective: 'o', cwd: WORKSPACE });
+  await waitFor(() => store.get(created.id).status === 'running');
+  await manager.handleSessionEvent(created.id, {
+    type: 'user/message',
+    data: { source: { kind: 'user', rpcId: 'human-1' }, content: [{ type: 'text', text: 'stop' }] },
+  });
+  await waitFor(() => goals.byAgent.get('session-1').phase === 'paused');
+
+  goals.resume = () => { throw new Error('resume failed'); };
+  let pumps = 0;
+  const pump = manager.pump.bind(manager);
+  manager.pump = () => { pumps += 1; return pump(); };
+  await assert.rejects(manager.resume(created.id), { code: 'resume-failed' });
+  // A bare activeTaskId reset never pumps, so a task queued behind this one
+  // would stall until some unrelated event happened to release the lane.
+  assert.equal(manager.activeTaskId, null);
+  assert.equal(pumps, 1);
+});
+
 test('approval timeout pauses the goal and releases the lane', async () => {
   const { manager, store, goals, sessions } = await setup({ approvalTimeoutMs: 20 });
   const created = await manager.create({ objective: 'o', cwd: WORKSPACE });

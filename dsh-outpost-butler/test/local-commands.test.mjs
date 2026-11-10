@@ -843,6 +843,23 @@ test('conflicting duplicate call IDs cannot replace the arguments presented for 
     'a conflicting invocation must not overwrite the original live capability');
 });
 
+test('the call dedupe set is bounded by live invocations, not by process lifetime', async t => {
+  const { runtime: r, sessions } = await fixture(t);
+  const created = await create(r);
+  const task = await running(r, created.taskId);
+  const agent = sessions.get(task.sessionId);
+  let denied = 0;
+  // Past the 4096 budget a set that never shrank denies every later call for
+  // the life of the process, which silently disables all local tools.
+  for (let index = 0; index < 4100; index += 1) {
+    const exec = { agent, name: 'read', callId: `call-${index}`, arguments: { path: 'report.txt' } };
+    if (r.ctx.emit('tools/pre-execute', exec, () => 'continued') !== 'continued') denied += 1;
+    r.ctx.emit('tools/result', exec);
+  }
+  assert.equal(denied, 0, 'a finished call must free its dedupe slot');
+  assert.equal(r.approvals.seenCalls.size, 0);
+});
+
 for (const cancellation of ['abort', 'tool-result']) {
   test(`${cancellation} while an approval intent is appending cannot grant a late allow`, async t => {
     const { runtime: r, domain } = await fixture(t);

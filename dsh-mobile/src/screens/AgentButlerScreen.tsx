@@ -48,6 +48,8 @@ const PHASE_TEXT: Record<AgentSnapshot['phase'], string> = {
   interrupted: '已中断',
 };
 
+const failureText = (failure: unknown): string => String((failure as Error)?.message ?? failure);
+
 export function AgentButlerScreen({ active = true }: { active?: boolean }) {
   const tv = useTheme();
   const nav = useNav();
@@ -65,13 +67,23 @@ export function AgentButlerScreen({ active = true }: { active?: boolean }) {
   const [autoStartEnabled, setAutoStartEnabled] = useState(false);
   const scroll = useRef<ScrollView>(null);
   const autoStartRef = useRef(false);
+  // A snapshot read error clears on the next successful read; an action error
+  // has to survive the 700ms poll, or the user sees it flash and vanish.
+  const errorSource = useRef<'read' | 'action' | null>(null);
+  // `busy` only disables the buttons after a re-render; this blocks the second
+  // tap of a double-press synchronously.
+  const deciding = useRef(false);
 
   const refresh = useCallback(async () => {
     try {
       setSnapshot(await agentClient.snapshot());
-      setError(null);
+      if (errorSource.current === 'read') {
+        errorSource.current = null;
+        setError(null);
+      }
     } catch (failure) {
-      setError(String((failure as Error)?.message ?? failure));
+      errorSource.current = 'read';
+      setError(failureText(failure));
     }
   }, []);
 
@@ -79,7 +91,8 @@ export function AgentButlerScreen({ active = true }: { active?: boolean }) {
     try {
       setSettings(await agentClient.getModelSettings());
     } catch (failure) {
-      setError(String((failure as Error)?.message ?? failure));
+      errorSource.current = 'read';
+      setError(failureText(failure));
     }
   }, []);
 
@@ -165,6 +178,7 @@ export function AgentButlerScreen({ active = true }: { active?: boolean }) {
     const text = draft.trim();
     if (!text || busy) return;
     if (!consent) {
+      errorSource.current = 'action';
       setError('请先阅读并同意数据发送说明');
       return;
     }
@@ -173,6 +187,7 @@ export function AgentButlerScreen({ active = true }: { active?: boolean }) {
       return;
     }
     setBusy(true);
+    errorSource.current = null;
     setError(null);
     void (async () => {
       try {
@@ -184,7 +199,8 @@ export function AgentButlerScreen({ active = true }: { active?: boolean }) {
       } catch (failure) {
         // Keep the draft on failure (for example BACKGROUND_NOT_READY) so the
         // user can re-authorize and send it again.
-        setError(String((failure as Error)?.message ?? failure));
+        errorSource.current = 'action';
+        setError(failureText(failure));
       } finally {
         setBusy(false);
       }
@@ -193,12 +209,15 @@ export function AgentButlerScreen({ active = true }: { active?: boolean }) {
 
   const stop = useCallback(() => {
     setBusy(true);
+    errorSource.current = null;
+    setError(null);
     void (async () => {
       try {
         setSnapshot(await agentClient.stop());
         await refreshThread();
       } catch (failure) {
-        setError(String((failure as Error)?.message ?? failure));
+        errorSource.current = 'action';
+        setError(failureText(failure));
       } finally {
         setBusy(false);
       }
@@ -207,24 +226,34 @@ export function AgentButlerScreen({ active = true }: { active?: boolean }) {
 
   const decide = useCallback(async (allow: boolean) => {
     const pending = snapshot?.pendingApproval;
-    if (!pending) return;
+    if (!pending || deciding.current) return;
+    deciding.current = true;
     setBusy(true);
+    errorSource.current = null;
+    setError(null);
     try {
-      setSnapshot(await agentClient.decide(pending.callId, allow));
+      // The digest the card rendered travels with the decision: native rejects
+      // it if the pending call changed, which a callId alone cannot detect.
+      setSnapshot(await agentClient.decide(pending.callId, pending.digest, allow));
     } catch (failure) {
-      setError(String((failure as Error)?.message ?? failure));
+      errorSource.current = 'action';
+      setError(failureText(failure));
     } finally {
+      deciding.current = false;
       setBusy(false);
     }
   }, [snapshot]);
 
   const resumeHandoff = useCallback(async () => {
     setBusy(true);
+    errorSource.current = null;
+    setError(null);
     try {
       setSnapshot(await agentClient.resumeHandoff());
       await refreshThread();
     } catch (failure) {
-      setError(String((failure as Error)?.message ?? failure));
+      errorSource.current = 'action';
+      setError(failureText(failure));
     } finally {
       setBusy(false);
     }
@@ -232,10 +261,13 @@ export function AgentButlerScreen({ active = true }: { active?: boolean }) {
 
   const dismissRecovery = useCallback(async () => {
     setBusy(true);
+    errorSource.current = null;
+    setError(null);
     try {
       setSnapshot(await agentClient.dismissRecovery());
     } catch (failure) {
-      setError(String((failure as Error)?.message ?? failure));
+      errorSource.current = 'action';
+      setError(failureText(failure));
     } finally {
       setBusy(false);
     }
@@ -249,11 +281,14 @@ export function AgentButlerScreen({ active = true }: { active?: boolean }) {
         style: 'destructive',
         onPress: () => {
           void (async () => {
+            errorSource.current = null;
+            setError(null);
             try {
               setSnapshot(await agentClient.clearThread());
               await refreshThread();
             } catch (failure) {
-              setError(String((failure as Error)?.message ?? failure));
+              errorSource.current = 'action';
+              setError(failureText(failure));
             }
           })();
         },
@@ -287,11 +322,13 @@ export function AgentButlerScreen({ active = true }: { active?: boolean }) {
 
   const retryBackground = useCallback(async () => {
     setBackgroundBusy(true);
+    errorSource.current = null;
+    setError(null);
     try {
       setBackground(await agentClient.backgroundRetry());
-      setError(null);
     } catch (failure) {
-      setError(String((failure as Error)?.message ?? failure));
+      errorSource.current = 'action';
+      setError(failureText(failure));
     } finally {
       setBackgroundBusy(false);
     }
@@ -299,34 +336,44 @@ export function AgentButlerScreen({ active = true }: { active?: boolean }) {
 
   const openShizuku = useCallback(async () => {
     setBackgroundBusy(true);
+    errorSource.current = null;
+    setError(null);
     try {
       const result = await agentClient.backgroundOpenShizuku();
       if (!result.opened) {
+        errorSource.current = 'action';
         setError(result.installed ? '未能打开 Shizuku' : '未安装 Shizuku');
       }
     } catch (failure) {
-      setError(String((failure as Error)?.message ?? failure));
+      errorSource.current = 'action';
+      setError(failureText(failure));
     } finally {
       setBackgroundBusy(false);
     }
   }, []);
 
   const disableAutoStart = useCallback(async () => {
+    errorSource.current = null;
+    setError(null);
     try {
       await agentClient.setBackgroundAutoStart(false);
       setAutoStartEnabled(false);
     } catch (failure) {
-      setError(String((failure as Error)?.message ?? failure));
+      errorSource.current = 'action';
+      setError(failureText(failure));
     }
   }, []);
 
   const stopBackground = useCallback(async () => {
     setBackgroundBusy(true);
+    errorSource.current = null;
+    setError(null);
     try {
       setBackground(await agentClient.backgroundStop());
       setBackgroundFrame(null);
     } catch (failure) {
-      setError(String((failure as Error)?.message ?? failure));
+      errorSource.current = 'action';
+      setError(failureText(failure));
     } finally {
       setBackgroundBusy(false);
     }
@@ -343,6 +390,9 @@ export function AgentButlerScreen({ active = true }: { active?: boolean }) {
   const streamText = snapshot?.streamText ?? '';
   const configured = Boolean(settings?.hasKey && settings.model);
   const showWorking = running && !pending && !handoff;
+  // `running` excludes failed, so the phase text never renders on failure and
+  // the run's own error would leave the screen showing nothing at all.
+  const runFailure = phase === 'failed' ? (snapshot?.error ?? '任务失败') : null;
   const backgroundPermissionMissing = Boolean(
     background && background.shizukuRunning && !background.permissionGranted,
   );
@@ -659,6 +709,14 @@ export function AgentButlerScreen({ active = true }: { active?: boolean }) {
                   </Text>
                 </View>
               ))}
+            </View>
+          </View>
+        ) : null}
+
+        {runFailure ? (
+          <View style={styles.assistantRow}>
+            <View style={[styles.assistantBubble, styles.errorCard]}>
+              <Text style={styles.error}>{PHASE_TEXT.failed} · {runFailure}</Text>
             </View>
           </View>
         ) : null}

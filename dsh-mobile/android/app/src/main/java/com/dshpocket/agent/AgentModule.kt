@@ -79,10 +79,10 @@ class AgentModule(private val react: ReactApplicationContext) : ReactContextBase
     }
 
     @ReactMethod
-    fun decide(callId: String, allow: Boolean, promise: Promise) {
+    fun decide(callId: String, digest: String, allow: Boolean, promise: Promise) {
         if (!supported()) { promise.reject("AGENT_UNSUPPORTED", "AGENT_UNSUPPORTED"); return }
         try {
-            val result = AgentRuntime.get(react).decide(callId, allow)
+            val result = AgentRuntime.get(react).decide(callId, digest, allow)
             if (!result.optBoolean("ok", true)) {
                 val code = result.optString("code", "DECIDE_FAILED")
                 promise.reject(code, code)

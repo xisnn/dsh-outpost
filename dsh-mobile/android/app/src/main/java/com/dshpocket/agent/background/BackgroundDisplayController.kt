@@ -722,11 +722,15 @@ class BackgroundDisplayController private constructor(
             val padded = Bitmap.createBitmap(paddedWidth, image.height, Bitmap.Config.ARGB_8888)
             padded.copyPixelsFromBuffer(plane.buffer)
             val full = Bitmap.createBitmap(padded, 0, 0, image.width, image.height)
-            padded.recycle()
+            // Both factory methods return the source instance when the result is
+            // identical to it — no row padding here, or a display already at
+            // preview size below. Recycling unconditionally would then recycle
+            // the bitmap still in use, and the catch would drop every frame.
+            if (full !== padded) padded.recycle()
             val previewHeight = (PREVIEW_WIDTH.toLong() * full.height / full.width)
                 .toInt().coerceAtLeast(1)
             val preview = Bitmap.createScaledBitmap(full, PREVIEW_WIDTH, previewHeight, true)
-            full.recycle()
+            if (preview !== full) full.recycle()
             synchronized(lock) {
                 latestFrame?.recycle()
                 latestFrame = preview

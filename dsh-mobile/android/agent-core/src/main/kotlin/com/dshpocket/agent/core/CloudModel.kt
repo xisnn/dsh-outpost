@@ -16,6 +16,7 @@ import kotlinx.serialization.json.intOrNull
 import kotlinx.serialization.json.longOrNull
 import kotlinx.serialization.json.put
 import java.net.URI
+import java.util.UUID
 
 enum class ModelProtocol {
     OPENAI_COMPAT,
@@ -421,7 +422,7 @@ private fun parseOpenAiMessageObject(root: JsonObject): ModelReply {
 private fun OpenAiToolCall.toToolCallOrNull(): ToolCall? {
     val callName = name ?: return null
     val arguments = parseArguments(arguments.toString()) ?: return null
-    return ToolCall(id ?: "call-${callName.hashCode()}", callName, arguments)
+    return ToolCall(id ?: syntheticCallId("call"), callName, arguments)
 }
 
 private fun toolCallsReply(text: String, calls: Map<Int, ToolCall?>): ModelReply {
@@ -529,7 +530,7 @@ private fun parseResponsesResponse(body: String): ModelReply {
 
             "function_call" -> {
                 val name = item.string("name") ?: return ModelReply.Failure("protocol-error", "function_call without name")
-                val callId = item.string("call_id") ?: item.string("id") ?: "call-${calls.size}"
+                val callId = item.string("call_id") ?: item.string("id") ?: syntheticCallId("call")
                 val arguments = parseArguments(item.string("arguments").orEmpty())
                     ?: return ModelReply.Failure("tool-arguments", "model returned invalid tool-call arguments")
                 calls += ToolCall(callId, name, arguments)
@@ -681,7 +682,7 @@ private fun parseAnthropicResponse(body: String): ModelReply {
             call.initial != null -> call.initial!!.toPlainMap()
             else -> emptyMap()
         }
-        ToolCall(call.id ?: "call-$name", name, arguments)
+        ToolCall(call.id ?: syntheticCallId("call"), name, arguments)
     }
     if (calls.isNotEmpty() && resolved.size != calls.size) {
         return ModelReply.Failure("tool-arguments", "model returned invalid tool-call arguments")
@@ -849,7 +850,7 @@ private fun parseGeminiRoot(
             val name = functionCall.string("name")
                 ?: return ModelReply.Failure("protocol-error", "Gemini functionCall without name")
             val args = (functionCall["args"] as? JsonObject)?.toPlainMap() ?: emptyMap()
-            calls += ToolCall("gemini-${calls.size + 1}", name, args)
+            calls += ToolCall(syntheticCallId("gemini"), name, args)
         }
     }
     return null
@@ -879,6 +880,14 @@ private fun parseObject(text: String): JsonObject? = try {
 } catch (_: Exception) {
     null
 }
+
+/**
+ * Gemini never issues call ids and the other protocols omit them on malformed
+ * chunks. A per-response counter would repeat ids across responses, and the id
+ * is also the approval binding key — a decision delayed past one call would
+ * then land on the next call that reused the same id.
+ */
+private fun syntheticCallId(prefix: String): String = "$prefix-${UUID.randomUUID()}"
 
 private fun parseArguments(raw: String): Map<String, Any?>? {
     if (raw.isBlank()) return emptyMap()

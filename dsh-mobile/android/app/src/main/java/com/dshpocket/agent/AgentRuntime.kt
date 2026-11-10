@@ -87,7 +87,12 @@ class AgentRuntime private constructor(context: Context) {
     private var finalText: String? = null
     private var lastError: String? = null
     private var fallbackPhase: String = "idle"
+    @Volatile
     private var finished: (() -> Unit)? = null
+
+    /** Set when a run ended while no service had registered a callback yet. */
+    @Volatile
+    private var finishUnobserved = false
     private val liveText = StringBuilder()
     private val liveEvents = mutableListOf<JSONObject>()
     private var eventSequence = 0
@@ -101,6 +106,14 @@ class AgentRuntime private constructor(context: Context) {
 
     fun setOnFinished(callback: (() -> Unit)?) {
         finished = callback
+        // The bridge starts the run right after startForegroundService, so a
+        // fast finish (a workspace error, or the demo model) can precede
+        // onCreate. Replay it, or the service stays in the foreground with no
+        // run left to report.
+        if (callback != null && finishUnobserved) {
+            finishUnobserved = false
+            callback()
+        }
     }
 
     /**
@@ -196,6 +209,9 @@ class AgentRuntime private constructor(context: Context) {
         val id = UUID.randomUUID().toString()
         runId = id
         active = true
+        // A finish recorded for a previous run must not stop the service that
+        // this run is about to ask for.
+        finishUnobserved = false
         liveText.setLength(0)
         liveEvents.clear()
         eventSequence = 0
@@ -366,17 +382,23 @@ class AgentRuntime private constructor(context: Context) {
                     runCatching { BackgroundDisplayController.stopIfRunning() }
                 }
                 val callback = finished
-                if (callback != null) main.post(callback)
+                if (callback != null) main.post(callback) else finishUnobserved = true
             }
         }
     }
 
-    fun decide(callId: String, allow: Boolean): JSONObject {
+    /**
+     * @param digest the argument digest the caller actually rendered. Providers
+     *   that omit call ids get synthetic ones, and a decision can outlive the
+     *   call it was made for; binding to the digest as well means a decision
+     *   can never be applied to a different call that happens to share an id.
+     */
+    fun decide(callId: String, digest: String, allow: Boolean): JSONObject {
         lock.lock()
         try {
             val request = pending
                 ?: return error("NO_PENDING_APPROVAL")
-            if (request.call.id != callId) return error("STALE_APPROVAL")
+            if (request.call.id != callId || request.digest != digest) return error("STALE_APPROVAL")
             // First decision wins. The inline card and the native overlay can
             // both answer; a reject followed by a stale allow must not flip
             // the decision before awaitApproval consumes it.

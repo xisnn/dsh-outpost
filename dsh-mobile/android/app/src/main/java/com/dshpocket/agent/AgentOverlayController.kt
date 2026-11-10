@@ -44,6 +44,7 @@ class AgentOverlayController(
     private var destroyed = false
     private var lastSignature = ""
     private var renderedApprovalCallId: String? = null
+    private var renderedApprovalDigest: String? = null
 
     private val tick = object : Runnable {
         override fun run() {
@@ -119,15 +120,19 @@ class AgentOverlayController(
         ensureCard()
         val backgroundLost = approval.optBoolean("backgroundLost", false)
         val callId = approval.optString("callId")
+        val digest = approval.optString("digest")
         renderedApprovalCallId = callId.takeIf { it.isNotBlank() }
-        val signature = "approval:$callId:$backgroundLost"
+        renderedApprovalDigest = digest.takeIf { it.isNotBlank() }
+        // The digest belongs in the signature: a provider that reuses a call id
+        // for a different call would otherwise leave the previous arguments on
+        // screen while the buttons answer the new one.
+        val signature = "approval:$callId:$digest:$backgroundLost"
         if (signature != lastSignature) {
             cardTitle?.text = "确认手机操作 · ${approval.optString("toolName")}"
             val args = approval.optJSONObject("arguments")?.toString().orEmpty()
             cardBody?.text = buildString {
                 append(args.take(240))
                 if (args.length > 240) append("…")
-                val digest = approval.optString("digest")
                 if (digest.isNotBlank()) append("\n摘要 ").append(digest.take(12)).append("…")
                 if (backgroundLost) append("\n后台屏已断开，允许后不会执行工具。")
             }
@@ -152,6 +157,7 @@ class AgentOverlayController(
         if (signature != lastSignature) {
             cardTitle?.text = "需要你接管手机"
             renderedApprovalCallId = null
+            renderedApprovalDigest = null
             cardBody?.text = handoff.optString("reason").take(260)
             allowButton?.visibility = View.GONE
             rejectButton?.visibility = View.GONE
@@ -223,17 +229,23 @@ class AgentOverlayController(
         }
         allowButton = smallButton("允许一次", 0xFF2F6BB0.toInt()) {
             // Only answer the approval that was actually rendered on this
-            // card; a new approval may have arrived since the tap.
+            // card; a new approval may have arrived since the tap. The digest
+            // sent is the rendered one, so the runtime rejects the decision if
+            // the pending call no longer matches what the user saw.
             val expected = renderedApprovalCallId
             val pending = runtime.snapshot().optJSONObject("pendingApproval")
             val callId = pending?.optString("callId").orEmpty()
-            if (expected != null && callId == expected) runtime.decide(callId, true)
+            if (expected != null && callId == expected) {
+                runtime.decide(callId, renderedApprovalDigest.orEmpty(), true)
+            }
         }
         rejectButton = smallButton("拒绝", 0xFFB23A2E.toInt()) {
             val expected = renderedApprovalCallId
             val pending = runtime.snapshot().optJSONObject("pendingApproval")
             val callId = pending?.optString("callId").orEmpty()
-            if (expected != null && callId == expected) runtime.decide(callId, false)
+            if (expected != null && callId == expected) {
+                runtime.decide(callId, renderedApprovalDigest.orEmpty(), false)
+            }
         }
         retryApprovalButton = smallButton("重试后台屏", 0xFF374151.toInt()) {
             BackgroundDisplayController.retryIfExists()
@@ -274,6 +286,7 @@ class AgentOverlayController(
         retryApprovalButton = null
         resumeHandoffButton = null
         renderedApprovalCallId = null
+        renderedApprovalDigest = null
         lastSignature = ""
     }
 

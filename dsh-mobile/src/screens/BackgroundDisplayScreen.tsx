@@ -5,7 +5,7 @@
  * 打开设置/联系人、缩略帧。它不改变 P6 的主屏 Agent 路径；后台屏不可用时
  * 仍然可以使用前台聊天和审批。
  */
-import React, { useCallback, useEffect, useMemo, useState } from 'react';
+import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import {
   ActivityIndicator,
   Image,
@@ -37,6 +37,8 @@ const EMPTY: BackgroundDisplayStatus = {
   error: null,
 };
 
+const failureText = (failure: unknown): string => String((failure as Error)?.message ?? failure);
+
 export function BackgroundDisplayScreen() {
   const tv = useTheme();
   const styles = useMemo(() => makeStyles(tv), [tv]);
@@ -45,14 +47,21 @@ export function BackgroundDisplayScreen() {
   const [busy, setBusy] = useState(false);
   const [autoStart, setAutoStart] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  // The 1s status poll carries its own error field; without a source tag it
+  // also wipes whatever an action just reported.
+  const errorSource = useRef<'read' | 'action' | null>(null);
 
   const refresh = useCallback(async () => {
     try {
       const next = await agentClient.backgroundStatus();
       setStatus(next);
-      setError(next.error ?? null);
+      if (errorSource.current !== 'action') {
+        errorSource.current = next.error ? 'read' : null;
+        setError(next.error ?? null);
+      }
     } catch (failure) {
-      setError(String((failure as Error)?.message ?? failure));
+      errorSource.current = 'read';
+      setError(failureText(failure));
     }
   }, []);
 
@@ -103,11 +112,13 @@ export function BackgroundDisplayScreen() {
 
   const start = useCallback(async () => {
     setBusy(true);
+    errorSource.current = null;
     setError(null);
     try {
       setStatus(await agentClient.backgroundStart());
     } catch (failure) {
-      setError(String((failure as Error)?.message ?? failure));
+      errorSource.current = 'action';
+      setError(failureText(failure));
     } finally {
       setBusy(false);
     }
@@ -115,10 +126,13 @@ export function BackgroundDisplayScreen() {
 
   const launch = useCallback(async (packageName: string) => {
     setBusy(true);
+    errorSource.current = null;
+    setError(null);
     try {
       setStatus(await agentClient.backgroundLaunch(packageName));
     } catch (failure) {
-      setError(String((failure as Error)?.message ?? failure));
+      errorSource.current = 'action';
+      setError(failureText(failure));
     } finally {
       setBusy(false);
     }
@@ -126,6 +140,7 @@ export function BackgroundDisplayScreen() {
 
   const toggleAutoStart = useCallback(async (next: boolean) => {
     setAutoStart(next);
+    errorSource.current = null;
     setError(null);
     try {
       await agentClient.setBackgroundAutoStart(next);
@@ -134,7 +149,11 @@ export function BackgroundDisplayScreen() {
         setStatus(await agentClient.backgroundStart());
       }
     } catch (failure) {
-      setError(String((failure as Error)?.message ?? failure));
+      // Roll the switch back: leaving it on while the store rejected the write
+      // tells the user auto-start is armed when it is not.
+      setAutoStart(!next);
+      errorSource.current = 'action';
+      setError(failureText(failure));
     } finally {
       setBusy(false);
     }
@@ -142,11 +161,14 @@ export function BackgroundDisplayScreen() {
 
   const stop = useCallback(async () => {
     setBusy(true);
+    errorSource.current = null;
+    setError(null);
     try {
       setStatus(await agentClient.backgroundStop());
       setFrame(null);
     } catch (failure) {
-      setError(String((failure as Error)?.message ?? failure));
+      errorSource.current = 'action';
+      setError(failureText(failure));
     } finally {
       setBusy(false);
     }
@@ -154,13 +176,17 @@ export function BackgroundDisplayScreen() {
 
   const openShizuku = useCallback(async () => {
     setBusy(true);
+    errorSource.current = null;
+    setError(null);
     try {
       const result = await agentClient.backgroundOpenShizuku();
       if (!result.opened) {
+        errorSource.current = 'action';
         setError(result.installed ? '未能打开 Shizuku' : '未安装 Shizuku');
       }
     } catch (failure) {
-      setError(String((failure as Error)?.message ?? failure));
+      errorSource.current = 'action';
+      setError(failureText(failure));
     } finally {
       setBusy(false);
     }
