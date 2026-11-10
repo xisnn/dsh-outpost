@@ -89,6 +89,103 @@ jobs:
         working-directory: dsh-mobile
         run: npm run test:node20
 
+  # ══════════════════════════════════════════════════════════════
+  # JVM 单元测试：agent-core 里 38 个**早就写好**的 JUnit 测试
+  #
+  # 为什么单独一个 job，而不是塞进 test 或 build-test：
+  #   · `test` 是纯 Node job，没有 JDK / Android SDK。给它加上会改变一个
+  #     原本与 Gradle 无关的 job 的环境依赖，而 desktop / build-test /
+  #     release 全都 `needs: test` —— 一旦 SDK 假设不成立，会连带阻塞全部
+  #     下游 job。隔离在这里，失败时归因清晰、影响面可控。
+  #   · `build-test` 带 `if: github.event_name == 'workflow_dispatch'`，
+  #     只在手动触发时跑，放那里等于几乎不跑。
+  #
+  # 这个 job **没有 job 级 if:**，所以每次 workflow 运行（tag push 或
+  # 手动触发）都会执行；并且被 `release` 依赖 —— JVM 测试失败会阻止发版。
+  #
+  # 覆盖内容：AgentLoopTest 14 / CloudModelClientTest 13 /
+  # FileRunStoreTest 7 / RunRecoveryTest 4 = 38。守护的是 Agent 循环、
+  # 云端模型客户端、run 存储与运行恢复 —— 其中 RunRecovery 与 FileRunStore
+  # 属审计报告的"不得重构"清单，它们的测试此前却从不运行。
+  #
+  # 只跑 `:agent-core:test`，不打任何 APK，不引用任何 secrets。
+  # ══════════════════════════════════════════════════════════════
+  jvm-tests:
+    needs: test
+    runs-on: ubuntu-latest
+    # 新 job 自带超时上限，避免 Gradle 卡死时占满 6 小时默认额度。
+    timeout-minutes: 25
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+          cache-dependency-path: dsh-mobile/package-lock.json
+
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: 21
+
+      # 与 build-test / release 里那一步**逐字相同**。
+      #
+      # agent-core 本身是纯 JVM 模块（kotlin.jvm + java-library），不需要 NDK。
+      # 但 gradle.properties 没有开 configure-on-demand，所以 Gradle 会配置
+      # **所有** project，包括 Android 模块 `:app`；而 `app/build.gradle:86`
+      # 声明了 `ndkVersion rootProject.ext.ndkVersion`、`:207` 在配置期就用
+      # `android.sdkDirectory` 拼 NDK 路径。AGP 是否会在配置阶段因为找不到该
+      # NDK 版本而报错，无法在不跑 CI 的前提下确认 —— 所以这里照抄已被
+      # build-test / release 验证过的完整步骤，宁可多下载，也不在一个
+      # release 门禁 job 上冒误报的风险。
+      - name: Ensure NDK and SDK packages
+        run: |
+          SDK="${ANDROID_SDK_ROOT:-$ANDROID_HOME}"
+          SDKMANAGER="$SDK/cmdline-tools/latest/bin/sdkmanager"
+          if [ ! -x "$SDKMANAGER" ]; then
+            SDKMANAGER=$(find "$SDK/cmdline-tools" -name sdkmanager -type f | head -1)
+          fi
+          need=""
+          [ -d "$SDK/ndk/27.1.12297006" ] || need="$need ndk;27.1.12297006"
+          [ -d "$SDK/platforms/android-36" ] || need="$need platforms;android-36"
+          [ -d "$SDK/build-tools/36.0.0" ] || need="$need build-tools;36.0.0"
+          if [ -n "$need" ]; then yes | "$SDKMANAGER" --install $need; fi
+          echo "ANDROID_NDK_HOME=$SDK/ndk/27.1.12297006" >> "$GITHUB_ENV"
+
+      - name: Cache Gradle
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.gradle/caches
+            ~/.gradle/wrapper
+          key: gradle-${{ runner.os }}-${{ hashFiles('dsh-mobile/android/**/*.gradle*', 'dsh-mobile/android/gradle.properties') }}
+          restore-keys: gradle-${{ runner.os }}-
+
+      # 必需，不是可选：settings.gradle 有
+      #   includeBuild('../node_modules/@react-native/gradle-plugin')
+      # 没有 node_modules，Gradle 连配置阶段都过不去。
+      - name: Install dependencies
+        working-directory: dsh-mobile
+        run: npm ci
+
+      - name: agent-core JVM unit tests (38 tests)
+        working-directory: dsh-mobile/android
+        run: |
+          chmod +x gradlew
+          ./gradlew --no-daemon --console=plain :agent-core:test
+
+      # 失败时把 HTML/XML 报告留下来，否则只能看到一句 "BUILD FAILED"
+      - name: Upload agent-core test report
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: agent-core-test-report
+          path: |
+            dsh-mobile/android/agent-core/build/reports/tests/
+            dsh-mobile/android/agent-core/build/test-results/
+          if-no-files-found: ignore
+
   desktop:
     needs: test
     runs-on: windows-latest
@@ -206,7 +303,9 @@ jobs:
   # ══════════════════════════════════════════════════════════════
   release:
     if: startsWith(github.ref, 'refs/tags/v')
-    needs: [test, desktop]
+    # jvm-tests 也在门禁里：agent-core 的 38 个 JUnit 测试覆盖 RunRecovery 与
+    # FileRunStore —— 两者都在审计的"不得重构"清单上，它们的测试不通过就不该发版。
+    needs: [test, desktop, jvm-tests]
     runs-on: ubuntu-latest
     # 只在这个 job 给写权限
     permissions:
