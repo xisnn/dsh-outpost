@@ -24,41 +24,106 @@
 
 ## 一、前 10 项（建议优先实施）
 
-### P0-1 · 修好测试链，让回归信号可信
+> **⚠️ 第二方复核修订（2026-11-11）**：本路线图经第二方复核，**整体方向认可**，5 项意见**全部采纳**（逐条记录见 `08_EXECUTIVE_SUMMARY.md` §〇）。对本节的直接影响：
+>
+> | 变化 | 内容 |
+> |---|---|
+> | **优先级重排** | **P0-7（TEST-03，静默 skip）升为第 1 优先 + Critical** —— 它是**唯一真正的假绿通道**，已实测复现。P0-1 降为 High（`&&` 链**不产生假绿**，危害是诊断不完整） |
+> | **P0-1 方案重写** | 撤回 `node --test tests/**/*-spec.mjs` glob 方案，改为**从 `package.json` 传递展开 + `spawnSync` 原样执行**的聚合器（Node 20 兼容、保留 tsx/node/npm-script 语义） |
+> | **P0-2 加硬约束** | 公网路径**显式 `-Skip:$false`**、不新增 skip 参数、`Write-GatewayPatchRefusal -Public` 不广告旁路 |
+> | **P0-3 移出本轮** | 风险 极低 → **中**，可验证性 强 → **弱**；前置条件是先具备真实渲染测试能力 |
+> | **P0-9 语义收紧** | `turn/end` 清 `pending` 时**必须同时设 `isError = true`**，否则"结果未达"会被渲染成"完成"；新增负向用例 (d) 断言不产生重发 |
+>
+> **本轮实际获授权实施的只有 4 项**（其余 6 项 P0 一律 ❌，各项的"本轮实施"栏已逐条标注）：
+>
+> | 序 | 授权范围 | 对应条目 |
+> |---|---|---|
+> | 1 | 核实并修复 SEC-01 公网启动门禁缺口 | **P0-2** |
+> | 2 | 建立 Node 20 兼容、能收集全部失败的测试聚合机制 | **P0-1** |
+> | 3 | 修复 CI 中关键测试静默 skip | **P0-7** |
+> | 4 | 接入已有 Android JVM 测试并验证 CI 可执行 | **TEST-17(1)**（见 §二） |
+>
+> **本轮硬约束**：不改动 fold / pendingSend / stream 核心业务逻辑；不新增功能；不做架构重构；不触碰正式签名材料；不自动发布版本；每个修复独立提交、可单独回滚；改动前先建立失败复现或负向测试；无法验证的结果标记待验证。
+
+### P0-1 · 修好测试链，让失败诊断完整
 
 | 项 | 内容 |
 |---|---|
 | 编号 | **BUG-01 / TEST-01 / TEST-02**（合并实施） |
-| 严重程度 | **Critical** |
+| 严重程度 | **High**（↓ 原 Critical，按复核意见 1 下调 —— `&&` 链**不产生假绿**，见下方修订说明） |
 | 位置 | `dsh-mobile/package.json:18`（103-spawn `&&` 链）；`dsh-mobile/tests/support/component-harness.mjs:17-18` |
-| 收益 | **极高** —— 这是所有其它项的前置条件。当前 `tsc --noEmit` 是链条**最后一环**，任何测试失败都会导致类型检查根本不跑；`component-harness` 的 `.ts` 硬编码会让过期 mock **abort 进程**并带走整条链（提交 `9c17dbd` 的结构性成因） |
-| 成本 | 中（改 runner + 修 4 行解析） |
-| 风险 | **低** —— 只改测试基础设施，不碰业务代码 |
-| 可验证性 | **强** —— 故意在一个 spec 里制造失败，断言：(a) 其余 spec 仍然运行完；(b) 退出码非零；(c) 失败清单包含全部失败项而不是只有第一个 |
-| 具体动作 | 1. 把 `&&` 链换成**收集失败**的 runner（`node --test tests/**/*-spec.mjs` + `--test-concurrency`）<br>2. 修 `component-harness.mjs:18`，按 `.ts` / `.tsx` / `/index.ts` / `/index.tsx` 依次尝试<br>3. 把 6 个孤儿 script 接进来：`test:localRuntime`、`test:p4`、`test:p3`、`test:e2e`、`test:perf`、`test:filesave`（当前 CI 只到达 92/107 个 script、122/142 个 spec） |
-| **前置条件** | **无**（它是别人的前置条件） |
-| **注意事项** | 并行化会暴露 `globalThis` 共享状态问题（**TEST-04** 的三个 cookie jar、**TEST-11**）。**分两步**：先做"收集失败 + 顺序执行"，确认可信后再开并行 |
-| 本轮实施 | ✅ **是 —— 第 1 优先** |
+| 收益 | **高** —— 当前 `tsc --noEmit` 是链条**最后一环**，任何测试失败都会导致类型检查根本不跑；`component-harness` 的 `.ts` 硬编码会让过期 mock **abort 进程**并带走整条链（提交 `9c17dbd` 的结构性成因）。修好后**一次运行即可看到全部失败**，而不是串行地"修一个、重跑、再看下一个" |
+| 成本 | 中（新增一个聚合器脚本 + 修 4 行解析） |
+| 风险 | **低** —— 只改测试基础设施，不碰业务代码，**不改任何被测 spec 的断言** |
+| 可验证性 | **强** —— 故意在两个 spec 里制造失败，断言：(a) 其余 spec 仍然运行完；(b) 退出码非零；(c) 失败清单包含**两个**失败项而不是只有第一个；(d) `tsc --noEmit` **仍然执行** |
+| **前置条件** | **无** |
+| **注意事项** | 并行化会暴露 `globalThis` 共享状态问题（**TEST-04** 的三个 cookie jar、**TEST-11**）。**本轮保持串行**，不并行化 |
+| 本轮实施 | ✅ **是 —— 复核授权范围第 2 项** |
+
+> **⚠️ 第二方复核修订（2026-11-11）—— 复核意见 1 与 2，均已采纳**
+>
+> **(a) 标题与严重度**：原标题"让回归信号**可信**"、严重度 Critical，隐含"`&&` 链会造成假绿"。**这是错的**：`&&` 链失败时**退出码非零、CI 是红的**；一条完整跑通的链意味着 103 条命令全部通过，**绿色是真实的**。真实危害是**诊断能力**（一次只暴露第一个失败、`tsc` 可能从未执行）。标题改为"让失败诊断完整"，严重度降为 **High**。**真正的假绿通道是 P0-7（TEST-03），已升为 Critical 并提到第 1 优先。**
+>
+> **(b) 具体动作第 1 步已重写**：原文是"把 `&&` 链换成 `node --test tests/**/*-spec.mjs` + `--test-concurrency`"。**撤回。** 复核意见要求：必须兼容 CI 的 Node 20、保留 `tsx`/`node`/`npm script` 的原有执行语义、不得使用未经验证的 glob 替换整条链。**本人核实后确认原方案不可行**：
+>
+> | 约束 | 核实结果 |
+> |---|---|
+> | `tsx` 依赖 | 103 条命令中 **76 条**依赖 `tsx`（**68** 裸调用 + **8** `tsx --test`）来加载 `.ts`。`node --test` **不能直接跑 `.ts`**，需要额外 loader → 改变执行语义 |
+> | Node 20 注入 | `test:node20` 的 5 条命令依赖 `--require ./tests/support/node20-sim.cjs`（删掉全局 `WebSocket` 以复现 Node 20 —— CI 的 Node 20 没有全局 WebSocket，21+ 才有）。聚合器**必须原样保留这个前缀** |
+> | glob 支持 | `package.json` 的 `engines` 是 `>=20`，CI 四个 job 全部固定 `node-version: 20`。`--test` 的 glob 位置参数支持是**版本相关**的；**具体从哪个版本起支持，本轮无法在不访问外部资料的前提下确认 → 标记待验证**，因此方案**不得依赖**它 |
+> | 命令种类 | 逐类计数（本人以脚本传递展开复核）：`tsx` 裸调用 **68**、`tsx --test` **8**、`node --test` **12**、裸 `node` **14**、`tsc --noEmit` **1** = **103**；`test:integration` 另 **5** 条、`test:node20` 另 **5** 条，合计 **113** 条叶子命令 |
+>
+> **修订后的方案（聚合器）**：
+> 1. **不重新发明命令**：从 `package.json` 的 `scripts` 出发，按 `&&` 分割并**传递展开** `npm run X`，得到与今天**逐字相同**的叶子命令列表；
+> 2. **原样执行**：用 `spawnSync` 逐条跑，`tsx` 解析到 `node_modules/.bin/tsx`，`--require` / `--test` 等前缀**逐字保留**，`cwd` 与 shell 环境不变；
+> 3. **只改失败处理**：把"首个失败即停"改成"**跑完全部 → 收集每条的退出码与输出 → 汇总打印失败清单 → 以非零退出**"；
+> 4. **不用 glob、不用 shell 通配**：文件枚举用 `fs.readdirSync`（Node 20 / 24 行为一致）；
+> 5. **保证 `tsc --noEmit` 必跑**，不再因前置失败被跳过；
+> 6. **自带等价性断言**：新增 spec 断言聚合器展开出的命令列表与旧 `&&` 链**逐字一致**（防止漏跑或多跑）。
+> 7. 原第 2、3 步（修 `component-harness.mjs:18` 的 `.ts` 硬编码；接入 6 个孤儿 script `test:localRuntime`/`test:p4`/`test:p3`/`test:e2e`/`test:perf`/`test:filesave`）**保留不变**。
 
 ---
 
-### P0-2 · 把 gateway 补丁门禁接到 `start-tunnel.ps1`
+### P0-2 · 把 gateway 补丁门禁接到 `start-tunnel.ps1`（公网路径不得可跳过）
 
 | 项 | 内容 |
 |---|---|
 | 编号 | **SEC-01** |
-| 严重程度 | **High（安全）** |
-| 位置 | `start-tunnel.ps1`（对补丁门禁的引用数 = **0**）vs `start-dsh-web.ps1`（引用数 = **4**）；DSH 启动点在 `start-tunnel.ps1:444-476` |
-| 收益 | **高** —— `start-tunnel.ps1` 会启动 DSH 并把它**发布到公网 cloudflared URL**，却**完全跳过**了 `start-dsh-web.ps1` 那道"补丁未应用就拒绝启动"的门禁 |
+| 严重程度 | **High（安全，公网暴露）** |
+| 位置 | `start-tunnel.ps1`（对补丁门禁的引用数 = **0**，本人 grep 复核）vs `start-dsh-web.ps1`（引用数 = **4**）；DSH 启动点有**两处**：`start-tunnel.ps1:262-280`（`$taskName0`）与 `:474-476`（`$taskName`） |
+| 收益 | **高** —— `start-tunnel.ps1` 会启动 DSH 并把它**发布到公网 cloudflared URL**（`:340-359`），却**完全跳过**了 `start-dsh-web.ps1` 那道"补丁未应用就拒绝启动"的门禁。叠加 `setup-gateway.ps1` 已把 `adminLoopbackOnly` 写成 `false`（`:147`、`:160`）→ `/mgw/*` 管理面无认证地暴露在公网 |
 | 成本 | **极低** —— dot-source 已有的 `scripts/gateway-patch-gate.ps1`，在两处 DSH 启动前各调一次 |
-| 风险 | **极低** —— **复用已经测好的代码**（`mobile-gateway-patch-spec.mjs` 是真实的强测试：应用补丁 → `node --check` → 执行打过补丁的路由断言 fail-closed 503/401/403 → 断言拒绝未知版本） |
-| 可验证性 | **强** —— 断言 `start-tunnel.ps1` 里 `gateway-patch-gate` 的引用数 ≥ 2；把插件换成未打补丁的版本，`start-tunnel.ps1` **必须拒绝启动** |
-| **宪章合规** | ✅ 这是**收紧**，不是简化删除。宪章明确"涉及安全的代码不得直接提出简化删除方案"——本项**扩展**了现有安全控制的覆盖面 |
-| 本轮实施 | ✅ **是 —— 第 2 优先** |
+| 风险 | **低-中**（↑ 原"极低"，因需新增 `-Public` 文案分支）—— **门禁判定逻辑零改动**，`start-dsh-web.ps1` 行为完全不变 |
+| 可验证性 | **强** —— 见下方验证清单 |
+| **宪章合规** | ✅ 这是**收紧**，不是简化删除。宪章明确"涉及安全的代码不得直接提出简化删除方案"——本项**扩展**了现有安全控制的覆盖面，且**关闭**了一个旁路 |
+| 本轮实施 | ✅ **是 —— 复核授权范围第 1 项（最高优先）** |
+
+> **⚠️ 第二方复核修订（2026-11-11）—— 复核意见 5，已采纳**
+>
+> 复核意见：**SEC-01 涉及公网暴露，应优先核实；公网隧道启动路径不得通过普通跳过参数绕过必要的鉴权门禁。**
+>
+> **本人核实：缺口确实存在，且原修复建议自己引入了旁路。** 原文写"沿用同一个显式 `-SkipGatewayPatchCheck` 退出口"，但：
+> - `scripts/gateway-patch-gate.ps1:74-81`：`-Skip` 直接返回 `ShouldCheck = $false`，调用方随即**静默放行**；
+> - `Write-GatewayPatchRefusal` 的**最后一行（`:156`）主动广告这个开关**：`确认不需要手机审批、想强行启动：加 -SkipGatewayPatchCheck`。
+>
+> 在**局域网**路径上这是经过权衡的 opt-out（`start-dsh-web.ps1:110` 注释写明"仅用于你确认不用手机审批时"，暴露面限于同网段）。搬到**公网隧道**上，等于在暴露面最大的入口提供"一行参数关闭鉴权门禁"的旁路，**而且拒绝提示自己会教用户怎么用它**。
+>
+> **修订后的实施约束（硬性）**：
+> 1. `start-tunnel.ps1` **不得新增** `-SkipGatewayPatchCheck` 参数（该脚本当前没有 —— 保持这样）；
+> 2. 调用门禁时**显式传 `-Skip:$false`**，使"公网路径永不跳过"成为**代码事实**而非约定；
+> 3. 给 `Write-GatewayPatchRefusal` 增加 **`-Public`** 开关：公网路径**不打印** skip 提示，改为"公网隧道不提供跳过开关；请修复补丁，或改用局域网路径 `start-dsh-web.ps1`"；
+> 4. **不改动 `Test-GatewayPatchApplied` 的判定逻辑** —— 三个 `ShouldCheck = $false` 分支（skip / plugin-not-installed / patch-script-missing）与 `CheckRunner` 语义**逐字保留**；
+> 5. 门禁必须位于**两处** `schtasks /Create` 之前、且在"定位 dsh"之前（否则环境问题会掩盖门禁结果 —— 这正是 `gateway-patch-gate.ps1:11-19` 注释记录过的历史坑）。
+>
+> **验证清单**（扩展 `dsh-mobile/tests/gateway-startup-gate-spec.mjs`，它已在真实 PowerShell 下调用门禁函数，并遵循"CI 无 PowerShell 即 `bad()`"的 fail-closed 约定，见 `:98-100`）：
+> - 静态：dot-source 门禁、调用 `Test-GatewayPatchApplied`、`ExitCode -ne 0` → `exit 1`、门禁位置在两处 `schtasks /Create` 之前；
+> - **负向**：`start-tunnel.ps1` **不含** `SkipGatewayPatchCheck`（防止旁路被重新引入）；
+> - 行为：真实 PowerShell 下 `Write-GatewayPatchRefusal -Public` 的输出**不含** `SkipGatewayPatchCheck`，但**仍含** `apply.mjs --apply` 与"拒绝启动"；不带 `-Public` 时**仍含** `SkipGatewayPatchCheck`（局域网 opt-out 不被削弱）；
+> - 回归：该 spec 原有的 8 条静态断言 + 12 条行为断言 + §5 反证**必须仍绿**。
 
 ---
 
-### P0-3 · 补 React 错误边界
+### P0-3 · 补 React 错误边界（**不得视为零风险**）
 
 | 项 | 内容 |
 |---|---|
@@ -66,11 +131,25 @@
 | 严重程度 | **High** |
 | 位置 | 全仓 **0 个** error boundary（`componentDidCatch` / `getDerivedStateFromError` grep 零命中） |
 | 收益 | **高** —— 当前任何一处渲染期抛错都会白屏整个 App，用户唯一能做的是杀进程重进。而 fold 层处理的是**上游 wire 数据**，形状变化是常态（见 `docs/protocol-compat.md` 场景 B/D） |
-| 成本 | 低 —— 纯**新增**一个 `ErrorBoundary` 组件 + 在 3~4 个导航层挂载 |
-| 风险 | **极低** —— **纯增量，零功能改动**。不改任何现有代码路径 |
-| 可验证性 | **强** —— 写一个故意抛错的组件挂进去，断言：显示降级 UI 而不是白屏，且 `store` 状态未被破坏 |
+| 成本 | 低（代码量）—— 但**验证成本高**，见下 |
+| 风险 | **中**（↑ 原"极低"，按复核意见 4 上调） |
+| 可验证性 | ⚠️ **弱**（↓ 原"强"）—— **当前无法验证**，见下方修订说明 |
 | 建议挂载点 | (1) NavHost 的每个 stack entry（隔离单屏崩溃）；(2) `ChatScreen` 的消息行（隔离单条消息的渲染崩溃——这与 fold 的容错设计互补）；(3) App 根（兜底） |
-| 本轮实施 | ✅ **是 —— 第 3 优先** |
+| **前置条件（新增）** | **必须先具备真实渲染测试能力**（TEST-12）：能真正 render 一棵子树、能让子树在渲染期抛错、能断言 fallback UI 出现且父级状态未损坏 |
+| 本轮实施 | ❌ **否 —— 不在复核授权的 4 项范围内**（原列第 3 优先，现移出本轮） |
+
+> **⚠️ 第二方复核修订（2026-11-11）—— 复核意见 4，已采纳**
+>
+> 复核意见：**ErrorBoundary 必须有真实渲染行为测试；不能将其定义为零风险修改。**
+>
+> **本人核实：原评级内部自相矛盾。** 原表写"风险 **极低** —— 纯增量，零功能改动"且"可验证性 **强** —— 写一个故意抛错的组件挂进去"。但同一份审计的 **TEST-12** 已证明：
+> - **34 个 `.tsx` 从不真正渲染**；
+> - `component-harness.mjs:28` 的 `useEffect() {}` 是**空实现** → effect 从不执行；
+> - `useState` 的 setter **不触发重渲染**，`useMemo`/`useCallback` **丢弃依赖**。
+>
+> 而错误边界的**全部价值**恰好是"子树在**渲染期**抛错时被 `getDerivedStateFromError` 捕获并渲染 fallback"。**这正是当前 harness 无法观察的行为** —— "纯增量"只说明它不改现有代码路径，**不等于**它的行为正确性可以被验证。一个从未被渲染测试覆盖的 ErrorBoundary，可能因为挂载位置错误、fallback 自身抛错、或 `componentDidCatch` 里的 `store` 调用二次抛错而**完全不生效，且没有任何测试会变红**。
+>
+> **修订结论**：风险 **极低 → 中**；可验证性 **强 → 弱**；新增前置条件；**移出本轮实施范围**。后续实施时，"写一个故意抛错的组件挂进去"这条验证方法**必须在真实渲染器下**执行（`@testing-library/react-native` 或等价的真实 reconciler），不能用现有的 `component-harness.mjs`。
 
 ---
 
@@ -85,7 +164,7 @@
 | 成本 | **极低 —— 3 行**（照抄同文件里其它方法的 `if (!supported()) { promise.reject("AGENT_UNSUPPORTED", ...); return }`） |
 | 风险 | **极低** —— 同文件 `:426` 已有该模式，`dismissRecovery` 就在用 |
 | 可验证性 | 中 —— 需要 API 24/25 设备或模拟器（**TEST-17** 说 CI 没有模拟器）。退一步：静态断言"所有触碰 `java.nio.file` 的 `@ReactMethod` 都有 `supported()` 守卫" |
-| 本轮实施 | ✅ **是 —— 第 4 优先** |
+| 本轮实施 | ❌ **否 —— 不在复核授权的 4 项范围内**（原列第 4 优先） |
 
 ---
 
@@ -101,7 +180,7 @@
 | 风险 | **极低** —— 合法端口全部通过 |
 | 可验证性 | **强** —— 单测：注入 `port = "3095; calc"`，断言命令未被执行/被拒绝 |
 | **宪章合规** | ✅ 收紧，非简化 |
-| 本轮实施 | ✅ **是 —— 第 5 优先** |
+| 本轮实施 | ❌ **否 —— 不在复核授权的 4 项范围内**（原列第 5 优先） |
 
 ---
 
@@ -116,23 +195,30 @@
 | 成本 | **极低 —— 2 处改名** |
 | 风险 | **极低** |
 | 可验证性 | **强** —— 但**注意 TEST-16(b)**：现有 CI 只在 **pwsh 7 / Linux** 下验证 `.ps1`，而产品跑在 **PS 5.1 / Windows**。pwsh 7 对未定义函数的报错行为与 5.1 不同，所以**这个 bug 才能存在至今** |
-| 本轮实施 | ✅ **是 —— 第 6 优先** |
+| 本轮实施 | ❌ **否 —— 不在复核授权的 4 项范围内**（原列第 6 优先）。**注意：本项与 P0-2 改同一个文件 `start-tunnel.ps1`，本轮实施 P0-2 时不得顺手夹带本项** |
 
 ---
 
-### P0-7 · 让 CI 下的 `skip` 变成失败
+### P0-7 · 让 CI 下的 `skip` 变成失败（**唯一的真·假绿通道**）
 
 | 项 | 内容 |
 |---|---|
 | 编号 | **TEST-03** |
-| 严重程度 | **High** |
-| 位置 | 若干 spec 的 `CANDIDATES` 列表缺 `dsh-mobile/node_modules/dsh-plugin-mobile-gateway`（而 CI 恰恰设了 `DSH_GATEWAY_PLUGIN_DIR` @ `android.yml:57`）；`skip > 0` 在 CI 下不影响退出码 |
-| 收益 | **高** —— 当前这些 spec 在 CI 里**静默跳过**，报告仍是绿的 |
-| 成本 | 低 |
-| 风险 | 低 |
-| 可验证性 | **强** —— 清空插件目录、设 `CI=1` 运行，**必须失败** |
-| 现成的正确范例 | `gateway-startup-gate-spec.mjs:96-99` 已经做对了（CI 下失败，只本地跳过）——**照抄它** |
-| 本轮实施 | ✅ **是 —— 第 7 优先** |
+| 严重程度 | **Critical**（↑ 原 High，按复核意见 1 上调；Critical 名额由 BUG-01 转移过来） |
+| 位置 | **恰好 2 个 spec**：`dsh-mobile/tests/protocol-contract-spec.mjs`（11 处 `{ skip: … }` 返回）、`dsh-mobile/tests/crosscheck-revoke-self-spec.mjs`（5 处）。两者都是 `process.exitCode = fail === 0 ? 0 : 1` —— **`skip` 完全不参与退出码**，且**零** `process.env.CI` 引用 |
+| 收益 | **极高** —— 这是本轮审计发现的**唯一一条真正让绿灯失真的通道**。一旦插件不可解析，DSH 审批协议契约（子协议前缀 `dsh-auth.`/`dsh-pair.`、Origin 同源校验、撤销语义、`clientDeviceId` 缺失时的自识别）会**全部失去守卫而 CI 仍然全绿** |
+| **已实测复现** | 本地 Node v24.13.0，把 `HOME`/`USERPROFILE` 指向空临时目录、`DSH_GATEWAY_PLUGIN_DIR` 指向不存在路径：<br>· `protocol-contract-spec.mjs`：正常 **16 通过 / 0 跳过** → **6 通过 / 10 跳过 / 0 失败 / exit 0**<br>· `crosscheck-revoke-self-spec.mjs`：正常 **5 通过** → **0 通过 / 5 跳过 / 0 失败 / exit 0**（**整组零断言**） |
+| **⚠️ 今天已在 CI 上发生** | `android.yml:54-57` 的 `test` job **设了** `DSH_GATEWAY_PLUGIN_DIR` → 那个 job 正常。**但 `signing-verify.yml` 没设**（`android.yml` 是唯一设置它的 workflow），而它在 `:147-149` 跑**完整 `npm test`**、runner 是 `ubuntu-latest`（`:53`）→ `USERPROFILE` 未定义、`$HOME/.dsh/…` 不存在 → **15 条契约断言全部 skip、两个 spec 均 exit 0、该 workflow 报绿**。**这不是"将来可能失效"，是"已经失效"** |
+| 成本 | **极低**（每个 spec 加一个解析点守卫 + 退出码纳入 `skip`；`signing-verify.yml` 加一个 job 级环境变量） |
+| 风险 | **低** —— 只在"CI 且插件不可解析"这个分支上改变退出码。**残余风险（需在交付说明中明确）**：补齐 `signing-verify.yml` 的环境变量后，该 workflow 会**第一次真正执行**这 15 条断言；若上游插件与客户端已漂移，它会**立刻变红**。这是**期望结果**（暴露真实缺陷），不是"改坏了" |
+| 可验证性 | **强** —— 负向：`CI=1` + 插件不可解析 → **必须非零退出**；正向：插件可用 → **仍为 0 且 skip 为 0**；静态：两个 workflow 的 `DSH_GATEWAY_PLUGIN_DIR` 值一致 |
+| **修复必须两部分同时做** | ① **spec 侧**：解析点加 fail-closed 守卫 + `skip > 0 && CI` → 非零退出；② **CI 侧**：给 `signing-verify.yml` 的 `verify-signing` job 补上与 `android.yml:54-57` **逐字相同**的 `DSH_GATEWAY_PLUGIN_DIR`。**只做 ① 会把 `signing-verify.yml` 弄红；只做 ② 则守卫缺失、下次仍会静默失效** |
+| **仓库内已有的正确范例（两个）** | ① **`approval-gateway-f01-spec.mjs:60-63`** —— 同样消费该插件的**第三个** spec，**fail-closed**：`if (!pluginDir) { console.error('FAIL: 未找到真实 dsh-plugin-mobile-gateway 插件目录'); process.exit(1); }`。**三个 spec 对同一前置条件给出两种相反处理 → 这是内部不一致，不是设计选择。照抄它。**<br>② `gateway-startup-gate-spec.mjs:98-100` —— `if (process.env.CI) bad(...) else console.log('  SKIP  ...')` |
+| **刻意排除** | `server-identity-binding-spec.mjs` 也有 skip 计数器，但其 skip 来自**端口复用竞态**（`:551,554,562`：`端口 ${oldPort} 没能复用`），属环境抖动而非依赖缺失。让它 `skip>0` 即失败会**引入 CI 抖动** → **排除在本项之外**，另行排期 |
+| 本轮实施 | ✅ **是 —— 复核授权范围第 3 项；按严重度排第 1 优先** |
+
+> **⚠️ 第二方复核修订（2026-11-11）**：原"位置"栏写"若干 spec 的 `CANDIDATES` 列表缺 `dsh-mobile/node_modules/dsh-plugin-mobile-gateway`"。**该表述不准确，已更正**：CI 通过 `android.yml:57` 的 `DSH_GATEWAY_PLUGIN_DIR` 指向的**正是**该路径，且它是 `CANDIDATES` 的**第一个**候选，所以**今天 CI 上插件能解析、测试确实在跑**。真正的问题不是"目录未登记"，而是**没有任何机制保证它一直能解析** —— 解析失败时两个 spec 会静默跳过全部断言并以 0 退出。修复重点因此从"加候选目录"改为"**在解析点加 fail-closed 守卫**"，并保留 `CANDIDATES` 原样（不改候选顺序，避免影响本地开发者的 `~/.dsh` 解析）。
+
 
 ---
 
@@ -149,7 +235,7 @@
 | 可验证性 | **强，但必须先写测试** |
 | **实施顺序（重要）** | 1. **先**加"`call()` 响应体阶段超时"的测试，**确认它当前失败**<br>2. 再改代码<br>3. 同步放宽 `timeout-throttle-spec.mjs:72-77`——把"数 `clearTimeout` 出现次数"改成"断言每个 `setTimeout` 都有配对的清理路径"（后者才是真正想守的不变量） |
 | **注意** | `timeout-throttle-spec.mjs` **整个文件是静态的**（`readFileSync` + 正则，从不 import 那个类）。它属于 `07_REGRESSION_PROTECTION.md` 的**不要删清单第 14 条**——它是若干 UI 层不变量的唯一守卫。**改它的断言方式，不要删它** |
-| 本轮实施 | ✅ **是 —— 第 8 优先（测试先行）** |
+| 本轮实施 | ❌ **否 —— 不在复核授权的 4 项范围内**（原列第 8 优先）。本项触碰 `transport/index.ts`，属本轮硬约束"不改动 stream 核心业务逻辑"的范围 |
 
 ---
 
@@ -164,9 +250,11 @@
 | 成本 | 中 —— 4 处小改 |
 | 风险 | **中 —— `fold/index.ts` 是重点保护区**（宪章明确列出"工具调用 ID 字段差异""重复工具调用块""pending 状态无法结束"三个历史修复） |
 | 可验证性 | **强，但必须先写测试** |
-| **实施顺序（重要）** | 1. **先**在 `tests/fold-spec.mjs` 加 3 个用例，**确认它们当前失败**：<br>&nbsp;&nbsp;(a) `tool/result` 用 `id`（而非 `toolCallId`）携带 callId → 当前会产生**两个**工具块<br>&nbsp;&nbsp;(b) `tool/result` 的 callId 为空串 → 当前**静默丢弃**<br>&nbsp;&nbsp;(c) `turn/end` 到达时仍有 `pending: true` 的块 → 当前**永久 pending**<br>2. 再改代码<br>3. 断言 `fold-spec.mjs:189-232` 的**现有**用例（真实捕获的 id `call_574864__tsk16___eK0ASYdfAikZ6ze`）**仍然通过** |
+| **实施顺序（重要）** | 1. **先**在 `tests/fold-spec.mjs` 加 4 个用例，**确认它们当前失败**：<br>&nbsp;&nbsp;(a) `tool/result` 用 `id`（而非 `toolCallId`）携带 callId → 当前会产生**两个**工具块<br>&nbsp;&nbsp;(b) `tool/result` 的 callId 为空串 → 当前**静默丢弃**<br>&nbsp;&nbsp;(c) `turn/end` 到达时仍有 `pending: true` 的块 → 当前**永久 pending**；修复后必须断言 `pending === false` **且 `isError === true` 且 `output` 非空**<br>&nbsp;&nbsp;(d) **负向**：上述场景**不得产生任何重发** —— 断言注入的 transport spy 调用次数为 **0**<br>2. 再改代码<br>3. 断言 `fold-spec.mjs:189-232` 的**现有**用例（真实捕获的 id `call_574864__tsk16___eK0ASYdfAikZ6ze`）**仍然通过** |
+| **修复语义硬约束（复核意见 3）** | ⚠️ **缺失 `tool/result` 不得等同工具执行成功。** `ToolCard.tsx:152-158` 的状态推导是 `pending ? '执行中' : isError ? '失败' : '完成'` —— **成功是默认分支**。因此 `turn/end` 清扫时**只置 `pending = false` 而不设 `isError`，会把"结果未达"渲染成"完成" + success 配色**。正确写法：`pending = false` **且 `isError = true` 且 `output ??= '（未收到工具结果，轮次已结束）'`**。<br>**禁止**：只清 `pending`；把 `output` 留空；在 `turn/end` 里补发请求或重放事件。<br>**"不得自动重试"已核实成立**：`isError` 全仓仅 3 个消费点（`ToolCard.tsx:152-158`、`WorkGroupCard.tsx:46`、`workGroup.ts:114`）**全是展示层**；`grep -rniE "retry\|resend\|requeue"` 在 `workGroup.ts`/`WorkGroupCard.tsx` **零命中**；`store.ts` 唯一的 `retry` 是 `:2593` 的 `pendingSends.retry(requestId)`（持久化发件箱，以 `requestId` 为键，与工具块无耦合） |
+| **需一并复核的副作用** | `workGroup.ts:114` 的 `const failed = toolBlocks.some((b) => b.isError)` 会让包含该工具的 WorkGroup 整体显示为失败。这是**期望的**（确实有工具没跑完），但会改变可见状态 |
 | **保护区约束** | ✅ 本项是**补齐 `e0216f9` 的对称性**，不是替换它。`fold-spec.mjs:189-232` 是真实测试（真 import、真 `foldEvents`、真 id），改前改后都必须绿。**不得**改动 `:265-274` 的 seq 去重或 `:396-499` 的合并逻辑主干 |
-| 本轮实施 | ✅ **是 —— 第 9 优先（测试先行）** |
+| 本轮实施 | ❌ **否 —— 不在复核授权的 4 项范围内**。且本轮硬约束明确"**不改动 fold、pendingSend、stream 核心业务逻辑**"，本项正落在 fold 核心区。原列第 9 优先，现移出本轮 |
 
 ---
 
@@ -217,7 +305,7 @@
 **⚠️ 删除前的强制检查（宪章第 6 条：不允许根据文件名认定）：**
 每一项都必须重新 grep 一次确认零引用，**并且**跑一遍全链 + `tsc --noEmit`。`scripts/release-gate.mjs` 属于"看起来死、实际应该复活"的类别，**不能删**。
 
-| 本轮实施 | ✅ **是 —— 第 10 优先** |
+| 本轮实施 | ❌ **否 —— 不在复核授权的 4 项范围内**（原列第 10 优先） |
 |---|---|
 
 ---
@@ -250,8 +338,8 @@
 
 | 编号 | 严重 | 一句话 | 成本 | 备注 |
 |---|---|---|---|---|
-| **TEST-17(1)** | **Medium-High** | **CI 加一行 `./gradlew :agent-core:test`** → **38 个已经写好的 JVM 测试立刻生效**（`AgentLoopTest` 14、`CloudModelClientTest` 13、`FileRunStoreTest` 7、`RunRecoveryTest` 4） | **极低** | **本次审计里收益/成本比最高的单项** |
-| **TEST-06** | High | 给 butler 沙箱边界 `workspace-fs.js`（81 行，含 `inside()` / `verifyRoot()` / `fresh()` TOCTOU 重解析 / 符号链接拒绝）补测试 | 低 | 判据：把 `fresh()` 换成缓存版本，测试**必须失败** |
+| **TEST-17(1)** | **Medium-High** | **CI 加一行 `./gradlew :agent-core:test`** → **38 个已经写好的 JVM 测试立刻生效**（`AgentLoopTest` 14、`CloudModelClientTest` 13、`FileRunStoreTest` 7、`RunRecoveryTest` 4） | **极低** | **本次审计里收益/成本比最高的单项** · ✅ **本轮已授权实施（复核范围第 4 项）** |
+| **TEST-06** | High | 给 butler 沙箱边界 `workspace-fs.js`（80 行，含 `inside()` / `verifyRoot()` / `fresh()` TOCTOU 重解析 / 符号链接拒绝）补测试 | 低 | 判据：把 `fresh()` 换成缓存版本，测试**必须失败** |
 | **TEST-16(1)** | Medium | 给 `android.yml` 所有 job 加 `timeout-minutes`（当前只有 `signing-verify.yml:54` 设了 45） | 极低 | |
 | **TEST-16(2)** | Medium-High | 加一条 `windows-latest` leg，用 **`powershell.exe`(5.1)** 校验每个 `.ps1` | 中 | **BUG-06 之所以存在，正是因为这个盲区** |
 | **TEST-14(1)** | High | CI 在集成测试**之前**跑 `apply.mjs --apply` 并校验 `state.json` | 低 | 当前 CI 跑的是**未打补丁**的 gateway |
@@ -320,11 +408,12 @@
 
 | 内容 | 项 |
 |---|---|
-| 范围 | **P0-1**（测试链 + harness 解析 + 6 个孤儿 script）、**P0-7**（CI 下 skip 变失败）、**TEST-17(1)**（加 `:agent-core:test`）、**TEST-16(1)**（加 `timeout-minutes`）、**TEST-14(1)**（CI 打 gateway 补丁） |
-| 触碰业务代码 | **否** —— 全部是测试/CI 基础设施 |
-| 回滚方式 | 单个 commit，`git revert` 即可 |
-| 完成判据 | (1) 故意制造 2 个失败，报告里**两个都在**；(2) `tsc --noEmit` 无论测试成败都跑；(3) CI 日志里能看到 38 个 agent-core 测试结果；(4) CI 日志里能看到补丁被应用 |
-| 预期收益 | **首次获得可信的回归信号** + 38 个已有原生测试生效 |
+| 完整范围（原规划） | **P0-1**（测试链 + harness 解析 + 6 个孤儿 script）、**P0-7**（CI 下 skip 变失败）、**TEST-17(1)**（加 `:agent-core:test`）、**TEST-16(1)**（加 `timeout-minutes`）、**TEST-14(1)**（CI 打 gateway 补丁） |
+| **本轮实际授权范围** | **P0-1**、**P0-7**、**TEST-17(1)**，另加**阶段 2 的 P0-2（SEC-01）**被提前到本轮第 1 优先。<br>**未授权、本轮不做**：`TEST-16(1)`（`timeout-minutes`）、`TEST-14(1)`（CI 打 gateway 补丁）、P0-1 里的"harness `.ts` 解析修复"与"接入 6 个孤儿 script"两项子动作**也未单独授权** —— 本轮只做聚合器本身，不夹带 |
+| 触碰业务代码 | **否** —— 全部是测试/CI 基础设施（P0-2 触碰 `start-tunnel.ps1` 与 `scripts/gateway-patch-gate.ps1`，属**启动脚本与安全门禁**，不是 DSH 业务逻辑） |
+| 回滚方式 | **每项一个独立 commit**，可单独 `git revert`（复核要求） |
+| 完成判据 | (1) 故意制造 2 个失败，报告里**两个都在**；(2) `tsc --noEmit` 无论测试成败都跑；(3) CI 日志里能看到 38 个 agent-core 测试结果；(4) `CI=1` + 插件不可解析时两个契约 spec **非零退出**；(5) `start-tunnel.ps1` 在补丁未应用时**拒绝启动**且**不提供 skip 旁路** |
+| 预期收益 | **首次获得可诊断的完整失败清单** + 关闭唯一的假绿通道 + 38 个已有原生测试生效 + 公网启动路径纳入门禁 |
 
 ### 阶段 1 · 零风险/极低风险的确定性修复
 

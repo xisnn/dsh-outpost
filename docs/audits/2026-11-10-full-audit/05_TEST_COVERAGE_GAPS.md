@@ -210,9 +210,9 @@
 
 ## 三、测试基础设施的结构性问题
 
-### TEST-01 · `&&` 长链使失败信号不可信 —— **Critical**
+### TEST-01 · `&&` 长链使失败诊断不完整 —— **High**（原 Critical，已按复核意见下调）
 
-> 完整分析见 `03_BUG_AND_SECURITY_RISKS.md` 的 **BUG-01**。此处只记测试视角的后果。
+> 完整分析见 `03_BUG_AND_SECURITY_RISKS.md` 的 **BUG-01**（该条含复核修订说明）。此处只记测试视角的后果。
 
 `dsh-mobile/package.json:18` 是一条 **103 个 spawn** 的 `&&` 链。后果：
 
@@ -220,7 +220,19 @@
 2. **`tsc --noEmit` 是最后一环** —— 前面任何测试失败，**类型检查根本不跑**。
 3. `component-harness.mjs:17-18` 的模块解析缺陷（见 TEST-02）会让某个 spec **进程级 abort**，把整条链带走。
 
-**这意味着："测试是绿的"在当前不是一个可信前提。** 这也是为什么 `06_OPTIMIZATION_ROADMAP.md` 把它排在第 1 位——**在修好它之前，任何重构的回归信号都不可靠**。
+> **⚠️ 第二方复核修订（2026-11-11）**：本条原标题是"`&&` 长链使失败信号**不可信**"、严重度 **Critical**，并在 `08` §一 里被写成"『测试是绿的』在当前不是一个可信前提"。**复核意见指出：`&&` 链造成的是失败后提前停止、无法收集后续结果，不等于完整通过的测试链产生假绿。采纳 —— 该表述已撤回。**
+>
+> **正确的表述**：`&&` 链**失败时退出码非零，CI 是红的**；一条**完整跑通**的链意味着 103 条命令全部通过，**绿色是真实的**。危害是**诊断能力**（一次只暴露第一个问题、`tsc` 可能从未执行），不是**信号被伪造**。
+>
+> **真正会造成假绿的是 TEST-03（静默 skip）**，其 Critical 名额由本条转移过去。三类现象必须分开评价：
+>
+> | 现象 | 假绿？ | 严重度 | 条目 |
+> |---|---|---|---|
+> | 失败截断（本条） | ❌ 否 | **High** | TEST-01 ≡ BUG-01 |
+> | **静默 skip** | ✅ **是** | **Critical** | **TEST-03** |
+> | 测试从未被 CI 执行 | ❌ 否（覆盖空洞） | Medium-High | TEST-17、6 个孤儿 script |
+>
+> **因此"在修好它之前任何重构的回归信号都不可靠"这个论断也需要限定**：重构的回归信号不可靠，主要是因为 **TEST-12（34 个 `.tsx` 从不渲染）+ TEST-15（无覆盖率度量）+ TEST-03（关键契约可静默跳过）**，其次才是本条的诊断不便。`08` §六 的理由排序已据此调整。
 
 ### TEST-02 · `component-harness.mjs` 的解析缺陷会 abort 整个进程 —— **High**
 
@@ -235,17 +247,31 @@
 | 验证 | 故意放一个 `.tsx` mock，断言 harness 能解析而不是 abort |
 | 本轮实施 | **建议排期（与 BUG-01 同批）** |
 
-### TEST-03 · gateway 插件目录未登记 + `skip` 静默通过 —— **High**
+### TEST-03 · 两个关键契约 spec 在插件不可解析时**零断言通过** —— **Critical**（原 High，已按复核意见上调）
+
+> **⚠️ 第二方复核修订（2026-11-11）**：严重度 **High → Critical**。原证据表述"CANDIDATES 列表里没有 `dsh-mobile/node_modules/dsh-plugin-mobile-gateway` 这一项"**不完整，已更正并加强**：
+>
+> - `android.yml:54-57` 的 `test` job **确实**通过 `DSH_GATEWAY_PLUGIN_DIR` 指向该路径，所以**那个 job 上插件能解析、测试确实在跑**；
+> - **但 `signing-verify.yml` 没有设这个变量**（本人 grep 确认 `android.yml` 是唯一设置它的 workflow），而它在 `:147-149` 跑的是**完整的 `npm test`**，runner 是 `ubuntu-latest`（`:53`）→ `USERPROFILE` 未定义、`$HOME/.dsh/…` 不存在 → **`pluginDir === undefined` → 15 条契约断言全部 skip → 两个 spec 均 exit 0 → 该 workflow 报绿**。
+>
+> **所以这不是"将来可能失效"，而是"今天已经在 `signing-verify.yml` 上失效"。** 完整证据链见 `03_BUG_AND_SECURITY_RISKS.md` 的 TEST-03（证据 A–D）。真正的问题是**没有任何机制保证插件可解析**——解析失败时两个 spec 会静默跳过全部断言并以 0 退出。修复因此是**两部分**：spec 侧加 fail-closed 守卫 + `signing-verify.yml` 补齐环境变量（**必须同时做，否则会把该 workflow 弄红**）。
 
 | 项 | 内容 |
 |---|---|
-| 证据 | CI 设了 `DSH_GATEWAY_PLUGIN_DIR`（`android.yml:57`），但若干 spec 的 `CANDIDATES` 列表里没有 `dsh-mobile/node_modules/dsh-plugin-mobile-gateway` 这一项；同时 `skip > 0` 在 CI 下**不影响退出码** |
-| 后果 | 在 CI 里这些 spec **静默跳过**，报告仍然是绿的 |
-| 对照 | `gateway-startup-gate-spec.mjs:96-99` 做对了——它在 `process.env.CI` 下**失败**，只在本地跳过 |
-| 修复 | (1) 把 `dsh-mobile/node_modules/dsh-plugin-mobile-gateway` 加进 `CANDIDATES`；(2) `skip > 0 && process.env.CI` → 非零退出 |
-| 风险 | 低 |
-| 验证 | 清空插件目录后在 `CI=1` 下运行，必须**失败**而非跳过 |
-| 本轮实施 | **建议排期（前 10）** |
+| **受影响 spec** | **恰好 2 个**（本人以"有 skip 计数器 + 退出码不含 skip + 零 `process.env.CI` 引用"三个条件全量筛查 142 个 spec 得出）：`tests/protocol-contract-spec.mjs`、`tests/crosscheck-revoke-self-spec.mjs` |
+| **机制** | 两者都是 `process.exitCode = fail === 0 ? 0 : 1` —— **`skip` 完全不参与退出码**；每条依赖插件的断言写成 `if (!src) return { skip: '插件源码不可用' }`（`protocol-contract-spec.mjs` 有 **11** 处、`crosscheck-revoke-self-spec.mjs` 有 **5** 处） |
+| **实测复现**（本地 Node v24.13.0，把 `HOME`/`USERPROFILE` 指向空目录、`DSH_GATEWAY_PLUGIN_DIR` 指向不存在路径） | `protocol-contract-spec.mjs`：正常 **16 通过 / 0 跳过** → 复现时 **6 通过 / 10 跳过 / 0 失败 / exit 0**；`crosscheck-revoke-self-spec.mjs`：正常 **5 通过** → 复现时 **0 通过 / 5 跳过 / 0 失败 / exit 0**（**整组零断言**） |
+| **两者都在 CI 链上** | `test:contract`（`package.json:96`）与 `test:crosscheck` 均被 `test` 链引用（本人核实；`test:contract` 的键名不是 `test:protocolContract`，容易漏查） |
+| **仓库内已有正确范式（关键）** | 同样消费该插件的**第三个** spec `tests/approval-gateway-f01-spec.mjs:60-63` 是 **fail-closed** 的：<br>`if (!pluginDir) { console.error('FAIL: 未找到真实 dsh-plugin-mobile-gateway 插件目录'); process.exit(1); }`<br>**三个 spec 对同一个前置条件给出了两种相反的处理** —— 这是内部不一致，不是设计选择 |
+| **另一处对照** | `gateway-startup-gate-spec.mjs:98-100` 也做对了：`if (process.env.CI) bad(...) else console.log('  SKIP  ...')` |
+| **不受影响、且本轮刻意不改** | `server-identity-binding-spec.mjs` 也有 skip 计数器，但它的 skip 来自**端口复用竞态**（`:551,554,562`：`端口 ${oldPort} 没能复用`），属环境抖动而非依赖缺失。让它 `skip>0` 即失败会**引入 CI 抖动**，因此**排除在本次修复之外**，另行排期 |
+| **后果** | 一旦 `DSH_GATEWAY_PLUGIN_DIR` 被删/写错、上游包布局变化使 `lib/index.mjs` 或 `lib/devices.js` 不再存在、或有人在 `test` job 之外单独跑这两个 spec —— **DSH 审批协议契约（子协议前缀 `dsh-auth.`/`dsh-pair.`、Origin 同源校验、撤销语义、`clientDeviceId` 缺失时的自识别）会全部失去守卫，而 CI 仍是绿的** |
+| **修复** | 照抄 `approval-gateway-f01-spec.mjs:60-63` 的 fail-closed 范式，在**插件解析点**加守卫：`process.env.CI` 下解析失败 → 记一条 `FAIL` 并非零退出；本地无插件 → 保留 SKIP 但打印醒目提示。同时把 `skip > 0 && process.env.CI` 也计入非零退出，覆盖"目录解析成功但单个文件缺失"的残余漏洞 |
+| **不改的部分** | **不动任何一条断言的判定逻辑**，不动 `CANDIDATES` 的候选顺序，不动本地开发时的 SKIP 行为（否则没有插件的开发者会被挡在门外） |
+| 风险 | **低** —— 只在"CI 且插件不可解析"这个**当前必然为假**的分支上改变退出码 |
+| 验证 | 负向测试：在 `CI=1` 且 `DSH_GATEWAY_PLUGIN_DIR` 指向空目录的条件下运行两个 spec，断言**退出码非零**；再在插件可用的正常条件下运行，断言**仍为 0 且 skip 为 0**（防止修复把正常路径弄坏） |
+| 本轮实施 | **已获授权实施**（复核范围第 3 项） |
+
 
 ### TEST-04 · 三个互不同步的 Cookie jar —— **Medium-High**
 
@@ -618,11 +644,11 @@
 
 | 编号 | 严重程度 | 一句话 | 本轮实施 |
 |---|---|---|---|
-| **TEST-01 / BUG-01** | **Critical** | 103-spawn `&&` 链使"测试是绿的"不可信，且 `tsc` 是最后一环 | **是（第 1 优先）** |
-| **TEST-02** | **High** | `component-harness.mjs:17-18` 的 `.ts` 硬编码使过期 mock **abort 进程** | **是（同批）** |
-| **TEST-03** | **High** | gateway 插件目录未登记 + CI 下 `skip` 静默通过 | **是（第 7 优先）** |
+| **TEST-03** | **Critical**（↑ 原 High） | **两个契约 spec 在插件不可解析时零断言通过**（已实测复现：`crosscheck` 0 通过 / 5 跳过 / exit 0）——**唯一真正的假绿通道** | **是（本轮已授权，第 3 项）** |
+| **TEST-01 / BUG-01** | **High**（↓ 原 Critical） | 103-spawn `&&` 链**失败即截断**，`tsc` 是最后一环。**不产生假绿**（退出码非零，CI 是红的），危害是诊断不完整 | **是（本轮已授权，第 2 项）** |
+| **TEST-02** | **High** | `component-harness.mjs:17-18` 的 `.ts` 硬编码使过期 mock **abort 进程** | 排期（同批） |
 | **TEST-14** | **High** | 发布门禁死代码；CI **不打 gateway 补丁**就跑集成测试；两处 fail-open | 排期（(3) 优先） |
-| **TEST-17** | **Medium-High** | `:agent-core:test` 的 **38 个已有测试从不运行**；`android/app` 覆盖率为零 | 排期（**(1) 收益/成本比最高**） |
+| **TEST-17** | **Medium-High** | `:agent-core:test` 的 **38 个已有测试从不运行**；`android/app` 覆盖率为零 | **是（本轮已授权，第 4 项）** |
 | **TEST-16** | **Medium-High** | CI 无 `timeout-minutes`；**所有 `.ps1` 只在 pwsh 7 下验证过，产品跑在 5.1** | 排期（(1) 立即） |
 | **TEST-04** | **Medium-High** | 三个互不同步的 cookie jar；测试跑的是生产不会走的回退路径 | 排期（TEST-09 前置） |
 | **TEST-12** | **Medium-High** | 34 个 `.tsx` 从不渲染；`useEffect` 是空函数 → effect 清理未测 | 不建议（需新增依赖） |
@@ -643,7 +669,7 @@
 | 维度 | 评价 |
 |---|---|
 | **测试的"真实性"** | **意外地好**。没有 `xit`/`.skip`/`.todo`，没有假绿计数器，PowerShell 是真实执行的，`ws-reconnect-session-recovery-spec.mjs` / `fold-spec.mjs` / `pending-send-send-flow-spec.mjs` / `mobile-gateway-patch-spec.mjs` 都是驱动真实产品代码的强测试 |
-| **测试的"可达性"** | **差**。`&&` 链 + 进程 abort + 静默 skip 三者叠加，使"绿灯"不可信（TEST-01/02/03） |
+| **测试的"可达性"** | **差**。三者叠加但**性质不同**：**静默 skip（TEST-03）是唯一真正让绿灯失真的通道**；`&&` 链（TEST-01）与进程 abort（TEST-02）**不伪造绿灯**（退出码非零），它们损害的是**诊断完整性**——一次只暴露一个问题、`tsc` 可能从未执行 |
 | **测试的"广度"** | **偏斜严重**。核心通信/发送/fold 覆盖深；UI 层（34 个 `.tsx`）、桌面端（EXEC 0/3）、butler 沙箱边界、`dsh-plugin-connect` 几乎为零 |
 | **原生测试** | **已有 38 个 JVM 测试写得很好，但 CI 从不运行它们**——这是最可惜的一项 |
 | **Mock 保真度** | `fake-dsh.mjs` 是协议**子集**，所有 fail-closed 分支（409/4003/4004/1009/能力缺失/未认证 hello）在 mock 层被抹掉 |

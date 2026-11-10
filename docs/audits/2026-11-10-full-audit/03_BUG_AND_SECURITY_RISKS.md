@@ -9,11 +9,24 @@
 
 ## 一、Critical
 
-### BUG-01 · `npm test` 的 `&&` 链在首个失败处静默丢弃后续全部套件与类型检查 · Critical · 已确认
+### BUG-01 · `npm test` 的 `&&` 链在首个失败处截断后续全部套件与类型检查 · High · 已确认
+
+> **⚠️ 第二方复核修订（2026-11-11）**：本条原标记为 **Critical**，理由是"它使『测试是绿的』这个前提不可靠"。**复核意见指出该表述错误，现已采纳并撤回。**
+>
+> `&&` 链的语义是**失败即截断**：任何一环非零退出，后续命令不再执行，**链整体以非零退出 → CI 显示红色**。因此**一条完整跑通的 `&&` 链不会产生假绿**；绿色确实意味着 103 条命令全部通过。原先把"失败截断"与"假绿"混为一谈，夸大了本条的风险性质。
+>
+> **真正的假绿向量是另外两件事，必须分开评价：**
+> | 现象 | 是否造成假绿 | 归属 |
+> |---|---|---|
+> | **失败截断**（本条 BUG-01） | ❌ **不造成假绿** —— 退出码非零，CI 是红的。危害是**诊断信息不完整**：拿不到后续套件的结果，且链尾 `tsc --noEmit` 可能根本没跑 | BUG-01 · **High** |
+> | **静默 skip** | ✅ **造成假绿** —— `skip` 不计入退出码，插件缺失时整组契约测试**零断言通过** | **TEST-03 · Critical**（已复现，见 `05`） |
+> | **测试从未被 CI 执行** | ⚠️ **不造成假绿，但造成覆盖空洞** —— 绿色只代表"跑过的那部分通过" | TEST-17、6 个孤儿 npm script |
+>
+> **严重度调整**：BUG-01 **Critical → High**；**TEST-03 High → Critical**（Critical 名额转移，总数不变）。
 
 **位置**：`dsh-mobile/package.json:18`（`test` 脚本）；结构性放大器 `dsh-mobile/tests/support/component-harness.mjs:18`
 
-**证据**：`test` 脚本是 **89 个 `npm run` 链接、展开为 103 次进程 spawn** 的单条 `&&` 链（实测展开：68 × `tsx` 裸调用、8 × `tsx --test`、12 × `node --test`、14 × 裸 `node`、1 × `tsc`）。任何非零退出都会截断其后所有内容——包括链尾的 `npm run typecheck`。
+**证据**：`test` 脚本是 **89 个 `npm run` 链接、展开为 103 次进程 spawn** 的单条 `&&` 链（本人以脚本传递展开复核，逐类计数：**68 × `tsx` 裸调用、8 × `tsx --test`、12 × `node --test`、14 × 裸 `node`、1 × `tsc --noEmit`**；`test:integration` 另 5 条、`test:node20` 另 5 条，合计 **113** 条叶子命令）。任何非零退出都会截断其后所有内容——包括链尾的 `npm run typecheck`。
 
 作者在 `git show 9c17dbd` 中**逐字记录了这件事已经发生过**：
 
@@ -25,15 +38,34 @@ return loadSource(path.posix.normalize(path.posix.join(path.posix.dirname(file),
 ```
 相对 import 未命中 mock 表时**硬编码追加 `'.ts'`**。于是一个过期的 `.tsx` mock key 变成文件系统 ENOENT，**中断整个进程**，而不是失败一条断言。
 
-**影响**：类型安全与约 60 个套件可以在数周内处于"未验证"状态，而 CI 只在某个无关的早期 spec 上显示红色。这是本项目**最大的工程风险**——它使所有其他发现的可信度打折，因为"测试是绿的"这个前提本身不可靠。
+**影响（修订后）**：
+- **不是假绿**。失败时 CI 确实是红的。
+- 真实危害是**诊断能力**：一次失败只报告第一个问题，其余约 60 个套件与 `tsc --noEmit` 的结果**完全未知**，修复必须串行地"修一个、重跑、再看下一个"。`9c17dbd` 的作者正是这样被拖慢的。
+- 次生危害：因为链尾是 `tsc`，**类型检查在链上任何一处失败时都不会执行**，所以"红"的分支同时失去了类型信号。
+- 因此本条是**工程效率与可诊断性**问题，不是**正确性信号被伪造**问题。后者的严重度更高，归 TEST-03。
 
-**建议修复**：改用 `node --test tests/**/*-spec.mjs`（Node ≥20 支持 glob + `--test-concurrency`），或任何会收集全部失败再汇总的 runner；同时让 `loadSource` 尝试 `['.ts','.tsx','/index.ts','/index.tsx']`。
+**建议修复（修订后 —— 撤回原 glob 方案）**：
 
-**修改风险**：低-中。并行化可能暴露共享 `globalThis` shim 状态问题（见 `05` 报告 TEST-04），需先解决。
+> **原建议 `node --test tests/**/*-spec.mjs` 已撤回。** 复核意见指出：必须兼容 CI 的 Node 20，必须保留 `tsx` / `node` / `npm script` 三种原有执行语义，不得使用未经验证的 glob 命令替换整条链。**采纳。** 撤回理由（本人核实）：
+> 1. 103 条命令里有 **76 条依赖 `tsx`**（68 裸调用 + 8 `--test`）来加载 `.ts`。`node --test` 不能直接跑 `.ts`，需要额外 loader —— 这会改变执行语义。
+> 2. `test:node20` 的 5 条命令依赖 `--require ./tests/support/node20-sim.cjs` 注入（删掉全局 `WebSocket` 以复现 Node 20）。统一 runner 必须原样保留这个前缀。
+> 3. `--test` 的 glob 位置参数支持是**版本相关**的；`package.json` 的 `engines` 是 `>=20`，CI 固定在 **20**。**具体从哪个 Node 版本起支持，本轮无法在不访问外部资料的前提下确认 → 标记待验证**，因此不得依赖它。
 
-**验证方法**：故意让一个早期 spec 失败，确认后续 spec 仍然报告结果、`tsc` 仍然运行。
+**修订后的方案**：新增一个**聚合器脚本**，它
+- **不重新发明命令**：仍然从 `package.json` 的 `scripts` 出发，按 `&&` 与 `npm run X` **传递展开**出与今天**逐字相同**的 103 条叶子命令，然后用 `spawnSync` **原样执行**（`tsx` 走 `node_modules/.bin/tsx`，`node --require …` 前缀原样保留）；
+- **只改失败处理**：把"首个失败即停"改成"**跑完全部、收集每一条的退出码与输出、最后汇总并以非零退出**"；
+- **不使用 glob、不使用 shell 通配**：文件枚举用 `fs.readdirSync`（Node 20/24 行为一致），命令枚举用 `package.json` 解析；
+- **保留 `tsc --noEmit` 必跑**：它不再因为前面失败而被跳过。
 
-**本轮实施建议**：**建议立即实施**（下一阶段第一项）。这是所有其他改动的前置条件。
+**修改风险**：**低-中**。聚合器**不改任何被测 spec 的断言**，因此不引入行为变化；风险在于 (a) 串行跑完全部会让原本被截断的失败**同时暴露**（这是预期的，但第一次跑会看到一批红）；(b) 若后续引入并行，可能暴露共享 `globalThis` shim 状态问题（见 `05` 报告 TEST-04）——**本轮保持串行**，不并行化。
+
+**验证方法**：
+- 负向测试：构造两个必定失败的假 spec，断言聚合器**报告了两个失败**且退出码非零（`&&` 链只会报告第一个）。
+- 断言聚合器展开出的命令列表与旧链**逐字一致**（防止漏跑或多跑）。
+- 断言 `tsc --noEmit` 在前置 spec 失败时**仍然执行**。
+
+**本轮实施建议**：**已获授权实施**（复核后范围第 2 项）。
+
 
 ---
 
@@ -122,20 +154,45 @@ const callId = (typeof message.toolCallId === 'string' && message.toolCallId)
 
 **注**：轮次级 `running` 的修复**是已测量覆盖的**（`tests/streaming-perf-f03-spec.mjs:585-610` 断言 `running===false` 且 `turns.at(-1).running===false`）。**但没有任何测试断言块级 pending**，而代码可证明不处理它。
 
-**建议修复**：
+**建议修复（第 3 项已按第二方复核意见重写）**：
 1. 给 :469-471 补上与 :402-406 / :434-438 相同的 `message.callId` / `message.id` / `d.callId` / `d.id` 回退；
 2. 当解析出的 `callId` 为 `''` 时，只匹配仍处于 `pending && output === undefined` 的块（**绝不**盲取首个），否则追加独立块而非丢弃；
-3. `turn/end` 时把剩余 `pending` 工具块标记为已终止（如 `pending = false` 且 `output ??= '（未收到工具结果）'`），使完成判定反映服务端真相而非"少了一帧"。
+3. **`turn/end` 时把剩余 `pending` 工具块标记为「结果未达 / 异常终止」，而不是「完成」。**
+
+> **⚠️ 第二方复核修订（2026-11-11）**：第 3 项原文是"`pending = false` 且 `output ??= '（未收到工具结果）'`"。**复核意见指出：缺失 `tool/result` 不能自动等同工具执行成功，必须保留未知状态或异常终止语义，且不得产生自动重试。采纳 —— 原写法确实会造成"等同成功"，证据如下（本人核实）。**
+>
+> `ToolCard.tsx:152-158` 的状态是**三态推导**，且**成功是默认分支**：
+> ```js
+> const statusColor = block.pending ? tv.colors.textTertiary
+>                   : block.isError ? tv.colors.danger
+>                   : tv.colors.success;
+> const statusText  = block.pending ? '执行中' : block.isError ? '失败' : '完成';
+> ```
+> 所以只把 `pending` 置 `false` 而**不动 `isError`**，卡片会渲染成 **"完成" + success 配色** —— 一个从未收到结果的工具被显示为成功执行。这正是复核意见要禁止的语义。
+>
+> **修订后的第 3 项**：`turn/end` 时对仍 `pending` 的工具块同时设置
+> - `pending = false`（停止永久 spinner，解除 `toChatItems:650-653` 对完成卡的压制 —— 该判定**只看 `pending`，不看 `isError`**，已核实）；
+> - **`isError = true`**（渲染为"失败" + danger 配色，即**异常终止**语义，而非成功）；
+> - `output ??= '（未收到工具结果，轮次已结束）'`（明确说明是**未知**，不是空成功）。
+>
+> **不得产生自动重试 —— 已核实成立**：`isError` 在全仓的消费点只有三处，**全部是展示层**：`ToolCard.tsx:152-158`、`WorkGroupCard.tsx:46`（同样的 `执行中/失败` 三态文案）、`workGroup.ts:114`（`const failed = toolBlocks.some((b) => b.isError)`，只写入纯视图对象 `WorkGroupView`）。`grep -rniE "retry|resend|requeue"` 在 `workGroup.ts` 与 `WorkGroupCard.tsx` 中**零命中**；`store.ts` 里唯一的 `retry` 是 `:2593` 的 `pendingSends.retry(requestId)`，属**持久化发件箱**、以 `requestId` 为键，与工具块无任何耦合。**因此标记 `isError = true` 不会触发任何重发。**
+>
+> **需要一并复核的副作用**：`workGroup.ts:114` 的 `failed` 会让包含该工具的 WorkGroup 整体显示为失败。这是**期望的**（确实有工具没跑完），但会改变可见状态，属于第 4 节"必须先用测试固定当前行为"的范围。
+>
+> **禁止的写法**（明确记录，防止后续实施走偏）：不得只清 `pending` 而不设 `isError`；不得把 `output` 留空（空 output + `isError=false` = 看起来像成功的空结果）；不得在 `turn/end` 里补发任何请求或重放事件。
+
 
 **修改风险**：**中**。:469-496 正是提交 `e0216f9` 改过的函数，且 `07_REGRESSION_PROTECTION.md` 将 `foldEvents` 的工具合并逻辑列为不得重构区。**任何改动必须先补 fold-spec 用例。**第 3 项会改变可见的完成卡行为，需一并复核 `ebcc9a1` 时期的审批/完成语义。
 
 **验证方法**：新增 `fold-spec.mjs` 用例：
 - (i) `tool/result` 携带 `data.callId`；
 - (ii) 两个无 id 的 `tool/call` + 两个无 id 的 `tool/result` → 断言 2 个块、都 `pending === false`、output 各不相同；
-- (iii) `tool/call` 无匹配 `tool/result`，随后 `turn/end reason:{kind:'completed'}` → 断言无块 `pending === true` 且完成卡未被压制。
-真机：在工具调用中途杀掉网关 → 前台化 → 观察卡片在一个轮询周期内到达终态。
+- (iii) `tool/call` 无匹配 `tool/result`，随后 `turn/end reason:{kind:'completed'}` → 断言无块 `pending === true`、完成卡未被压制，**且该块 `isError === true`、`output` 非空**（即渲染为"失败"而非"完成"）。
+- **(iv)（复核后新增）负向断言：上述场景不得产生任何重发** —— 断言 fold 是纯函数、`turn/end` 处理后没有任何出站请求被排队（可通过断言注入的 transport spy 调用次数为 0 实现）。
+真机：在工具调用中途杀掉网关 → 前台化 → 观察卡片在一个轮询周期内到达终态，**且显示为"失败"而不是"完成"**。
 
-**本轮实施建议**：**建议优先实施，但必须先补测试**（用例 (i)(ii)(iii) 先落地并确认当前失败，再改代码）。
+**本轮实施建议**：**本轮不实施**（不在第二方复核授权的 4 项范围内）。后续实施时**必须先补测试**（用例 (i)(ii)(iii)(iv) 先落地并确认当前失败，再改代码），且必须遵守上方"禁止的写法"。
+
 
 ---
 
@@ -151,9 +208,23 @@ const callId = (typeof message.toolCallId === 'string' && message.toolCallId)
 
 **建议修复**：在 `NavHost` 每个栈条目外包一层 class ErrorBoundary，应用根再包一层；fallback = 错误卡片 + "重试/返回"并重置状态；通过既有 notify 通道上报。
 
-**修改风险**：**低**（纯增量）。
+**修改风险**：**中**（↑ 原评"低（纯增量）"，按第二方复核意见 4 上调）。
 **验证方法**：dev-only 开关强制 ChatScreen 渲染期抛错，断言兄弟屏幕存活且 fallback 显示。
-**本轮实施建议**：**建议立即实施**。零功能风险、收益明确。
+
+> **⚠️ 第二方复核修订（2026-11-11）—— 复核意见 4，已采纳**
+>
+> 复核意见：**ErrorBoundary 必须有真实渲染行为测试，不能将其定义为零风险修改。**
+>
+> **本人核实：原评级内部自相矛盾。** 原文同时声称"风险 **低**（纯增量）"与"验证方法：断言兄弟屏幕存活且 fallback 显示"。但同一份审计的 **TEST-12** 已证明：
+> - **34 个 `.tsx` 从不真正渲染**；
+> - `component-harness.mjs:28` 的 `useEffect() {}` 是**空实现** → effect 从不执行；
+> - `useState` 的 setter **不触发重渲染**，`useMemo`/`useCallback` **丢弃依赖**。
+>
+> 错误边界的**全部价值**恰好是"子树在**渲染期**抛错时被 `getDerivedStateFromError` 捕获并渲染 fallback"。**这正是当前 harness 无法观察的行为。** "纯增量"只说明它不改现有代码路径，**不等于**它的行为正确性可被验证：一个从未被真实渲染测试覆盖的 ErrorBoundary，可能因为挂载位置错误、fallback 自身抛错、或 `componentDidCatch` 里的 `store` 调用二次抛错而**完全不生效，且没有任何测试会变红**。
+>
+> **新增前置条件**：必须先具备真实渲染测试能力（真正的 reconciler，如 `@testing-library/react-native` 或等价物），能 render 一棵子树、让它在渲染期抛错、并断言 fallback 出现且父级状态未损坏。**现有的 `component-harness.mjs` 不能用于验证本项。**
+
+**本轮实施建议**：❌ **本轮不实施**（不在第二方复核授权的 4 项范围内；原为"建议立即实施"，现移出本轮，等 TEST-12 的渲染测试能力就位后再做）。
 
 ---
 
@@ -214,13 +285,33 @@ JS 侧无门控直达：`src/core/agent.ts:223-226`、`src/screens/AgentMemorySc
 
 **影响**：这正是补丁 + 门禁存在所要关闭的风险，却出现在**暴露面最大**的启动路径上。
 
-**建议修复**：在 `start-tunnel.ps1` 的**两处** DSH 启动前 dot-source `scripts/gateway-patch-gate.ps1`；失败时调用 `Write-GatewayPatchRefusal` 并 `exit 1`；沿用同一个显式 `-SkipGatewayPatchCheck` 退出口。
+**建议修复（已按第二方复核意见重写 —— 撤回"沿用 `-SkipGatewayPatchCheck` 退出口"）**：
 
-**修改风险**：**低**（复用已存在且已被测试的门禁脚本）。可能挡住故意跑未打补丁版本的用户——已有的 opt-out 覆盖这种情况。
+> **⚠️ 第二方复核修订（2026-11-11）**：原文建议"沿用同一个显式 `-SkipGatewayPatchCheck` 退出口"。**复核意见指出：SEC-01 涉及公网暴露，应优先核实；公网隧道启动路径不得通过普通跳过参数绕过必要的鉴权门禁。采纳。**
+>
+> **为什么原建议是错的（本人核实）**：`scripts/gateway-patch-gate.ps1:74-81` 里 `-Skip` 直接返回 `ShouldCheck = $false`，调用方随即静默放行；而 `Write-GatewayPatchRefusal` 的**最后一行（:156）主动把这个开关广告给用户**：
+> ```
+> 确认不需要手机审批、想强行启动：加 -SkipGatewayPatchCheck
+> ```
+> 在**局域网**路径上这是一个经过权衡的 opt-out（暴露面限于同网段，`start-dsh-web.ps1:110` 的注释也写明"仅用于你确认不用手机审批时"）。但把它照搬到**公网隧道**路径上，等于在暴露面最大的入口提供一个"一行参数即可关闭鉴权门禁"的旁路，而且**拒绝提示自己会教用户怎么用这个旁路**。这与门禁存在的目的直接冲突。
 
-**验证方法**：扩展 `dsh-mobile/tests/gateway-startup-gate-spec.mjs`（它已经在真实 pwsh 下调用门禁函数），新增一例断言 `start-tunnel.ps1` 引用了门禁且在未打补丁状态下拒绝。
+**修订后的修复方案**：
 
-**本轮实施建议**：**建议立即实施**。这是本轮唯一的高危安全项，且修复方式是复用现有已测代码。
+1. `start-tunnel.ps1` **不新增 `-SkipGatewayPatchCheck` 参数**（该脚本当前没有这个参数 —— 保持这样）；调用门禁时**显式传 `-Skip:$false`**，使"公网路径永不跳过"成为代码事实而非约定。
+2. 在**两处** DSH 启动（`:262-280` 的 `$taskName0`、`:474-476` 的 `$taskName`）**之前**、且在"定位 dsh"之前 dot-source `scripts/gateway-patch-gate.ps1` 并调用 `Test-GatewayPatchApplied`；`ShouldCheck -and ExitCode -ne 0` → `exit 1`（fail-closed）。缺门禁文件本身也 `exit 1`（照抄 `start-dsh-web.ps1:115-121`）。
+3. **拒绝文案必须区分公网场景**：给 `Write-GatewayPatchRefusal` 增加一个 `-Public` 开关，在公网路径上**不打印** `-SkipGatewayPatchCheck` 那一行，改为明确说明"公网隧道不提供跳过开关；请修复补丁，或改用局域网路径 `start-dsh-web.ps1`"。这样既保住"提示文案集中一处、可被测试断言措辞"的原有契约，又不在公网入口广告旁路。
+4. **不改动门禁的判定逻辑**：`Test-GatewayPatchApplied` 的三个 `ShouldCheck = $false` 分支（skip / plugin-not-installed / patch-script-missing）与 `CheckRunner` 语义**逐字保留**，`start-dsh-web.ps1` 的行为**完全不变**（其现有 spec 的 8 条静态断言与 12 条行为断言必须仍绿）。
+
+**修改风险**：**低-中**（原评"低"，因新增 `-Public` 文案分支而上调）。缓解：门禁判定逻辑零改动，只增加调用点与一条文案分支；`start-dsh-web.ps1` 不受影响。**残余风险**：`start-tunnel.ps1` 是用户日常入口，加门禁后**未打补丁的用户会被挡住** —— 这是预期行为（fail-closed），但需在拒绝文案里给出可执行的修复命令（`apply.mjs --apply` / `setup-gateway.ps1`，两者门禁模块已打印）。
+
+**验证方法**：扩展 `dsh-mobile/tests/gateway-startup-gate-spec.mjs`（它已在真实 PowerShell 下调用门禁函数，并遵循"CI 无 PowerShell 即 `bad()`"的 fail-closed 约定，见 `:98-100`）：
+- **静态**：`start-tunnel.ps1` dot-source 门禁、调用 `Test-GatewayPatchApplied`、`ExitCode -ne 0` → `exit 1`、门禁位于两处 `schtasks /Create` **之前**；
+- **负向**：断言 `start-tunnel.ps1` **不含** `SkipGatewayPatchCheck` 参数声明（防止旁路被重新引入）；
+- **行为**：真实 PowerShell 下调用 `Write-GatewayPatchRefusal -Public`，断言输出**不含** `SkipGatewayPatchCheck`、但**仍含** `apply.mjs --apply` 与"拒绝启动"；同时断言不带 `-Public` 时**仍含** `SkipGatewayPatchCheck`（局域网路径的 opt-out 不被削弱）；
+- **反证**：沿用该 spec §5 的既有手法，构造坏门禁确认断言不是恒真。
+
+**本轮实施建议**：**已获授权实施，且按复核意见列为本轮第一优先**（复核范围第 1 项）。
+
 
 ---
 
@@ -357,11 +448,11 @@ host-location-spec.mjs            local-runtime-client-spec.mjs     timeout-thro
 
 ---
 
-### TEST-03 · 真实网关契约套件静默跳过且仍退出 0 · High · 已确认（本人复核）
+### TEST-03 · 真实网关契约套件静默跳过且仍退出 0 · **Critical**（↑ 原 High） · 已确认（本人复核 + **本轮实测复现**）
 
-**位置**：`dsh-mobile/tests/protocol-contract-spec.mjs:46-49,60-83,417`；`tests/crosscheck-revoke-self-spec.mjs:315`；`tests/server-identity-binding-spec.mjs:551-562,879`
+**位置**：`dsh-mobile/tests/protocol-contract-spec.mjs:46-49,60-85,417`；`tests/crosscheck-revoke-self-spec.mjs:82-102,315`；对照 `tests/approval-gateway-f01-spec.mjs:60-63`；CI 侧 `.github/workflows/signing-verify.yml:52-53,147-149` vs `.github/workflows/android.yml:54-57`
 
-**证据**：
+**证据 A —— 退出码不含 skip**：
 ```js
 46: function skipped(n, why) {
 47:   skip += 1;                       // ← 只增 skip
@@ -370,17 +461,50 @@ host-location-spec.mjs            local-runtime-client-spec.mjs     timeout-thro
 ...
 417: process.exitCode = fail === 0 ? 0 : 1;    // ← skip 不参与退出码
 ```
-`pluginDir` 的候选列表（:65-83）只包含 `DSH_GATEWAY_PLUGIN_DIR`、`%USERPROFILE%\.dsh\profiles\web\node_modules\…`、`$HOME/.dsh/profiles/web/node_modules/…`——**不包含 `dsh-mobile/node_modules/dsh-plugin-mobile-gateway`**，而那正是 `npm ci` 实际安装的位置。
 
-`android.yml:57` 设置了该环境变量（本人 grep 确认这是**唯一**设置它的 workflow）；**`signing-verify.yml` 没有设置**。因此在 `signing-verify.yml` 里，整个契约交叉检查是**报告成功的空操作**。
+**证据 B —— 本轮实测复现（本地 Node v24.13.0 / Windows）**：把 `HOME`、`USERPROFILE` 指向空临时目录、`DSH_GATEWAY_PLUGIN_DIR` 指向不存在路径后运行：
 
-**影响**：这是**唯一**能自动防御 `fake-dsh.mjs` 与真实网关漂移的机制（漂移清单见 `05` 报告 §二）。它可以在毫无信号的情况下消失。
+| spec | 正常（插件可解析） | 复现（插件不可解析） | 退出码 |
+|---|---|---|---|
+| `protocol-contract-spec.mjs` | **16 通过 / 0 跳过** | **6 通过 / 10 跳过 / 0 失败** | **0** |
+| `crosscheck-revoke-self-spec.mjs` | **5 通过 / 0 跳过** | **0 通过 / 5 跳过 / 0 失败**（**整组零断言**） | **0** |
 
-**建议修复**：把 `dsh-mobile/node_modules/dsh-plugin-mobile-gateway` 加入 `CANDIDATES`；并在 `process.env.CI` 下让 `skip > 0` 产生非零退出。
+**证据 C —— 这在今天的 CI 里正在发生（不是假设）**：
+- `pluginDir` 的候选列表（`protocol-contract-spec.mjs:65-83`）只有三项：`DSH_GATEWAY_PLUGIN_DIR`、`%USERPROFILE%\.dsh\profiles\web\node_modules\…`、`$HOME/.dsh/profiles/web/node_modules/…`。**不含 `dsh-mobile/node_modules/dsh-plugin-mobile-gateway`**，而那正是 `npm ci` 实际安装的位置。
+- `android.yml:54-57` 在 `test` job 上设了 `DSH_GATEWAY_PLUGIN_DIR: ${{ github.workspace }}/dsh-mobile/node_modules/dsh-plugin-mobile-gateway` → **那个 job 上能解析、测试确实在跑**。
+- **但 `signing-verify.yml` 没有设**（本人 grep 确认 `android.yml` 是**唯一**设置它的 workflow），而它在 `:147-149` 跑的是**完整的 `npm test`**（含 `test:contract` 与 `test:crosscheck`），runner 是 `ubuntu-latest`（`:53`）→ `USERPROFILE` 未定义、`$HOME/.dsh/…` 不存在 → **`pluginDir === undefined` → 15 条契约断言全部 skip → 两个 spec 均 exit 0 → 该 workflow 报绿**。
+- **结论：`signing-verify.yml` 里的网关契约交叉检查，当前是一个"报告成功的空操作"。**
 
-**修改风险**：**低**。
-**验证方法**：取消设置环境变量后运行该 spec，期望非零退出。
-**本轮实施建议**：**建议立即实施**。
+**证据 D —— 仓库内已有正确范式，三个 spec 处理同一前置条件却给出两种相反结果**：
+```js
+// approval-gateway-f01-spec.mjs:60-63 —— fail-closed（正确）
+if (!pluginDir) {
+  console.error('FAIL: 未找到真实 dsh-plugin-mobile-gateway 插件目录');
+  process.exit(1);
+}
+```
+同样消费该插件的另外两个 spec 却是 fail-open。**这是内部不一致，不是设计选择。** 另一处对照：`gateway-startup-gate-spec.mjs:98-100` 的 `if (process.env.CI) bad(...) else console.log('  SKIP  ...')`。
+
+**影响**：这是**唯一**能自动防御 `fake-dsh.mjs` 与真实网关漂移的机制（漂移清单见 `05` 报告 §四）。它可以在毫无信号的情况下消失 —— 而且在 `signing-verify.yml` 上**已经消失了**。所守的契约包括：子协议前缀 `dsh-auth.` / `dsh-pair.`、非 GET 管理请求的同源 Origin 校验、撤销语义、`clientDeviceId` 缺失时的设备自识别。
+
+> **⚠️ 第二方复核修订（2026-11-11）**：
+> - **严重度 High → Critical**（按复核意见 1，Critical 名额由 BUG-01 转移过来）。理由：这是本轮审计发现的**唯一一条真正让绿灯失真的通道**，且证据 C 表明它**当前正在 CI 上发生**。
+> - **原"建议修复"第 1 步（把 node_modules 路径加入 `CANDIDATES`）已降级为可选**：`android.yml` 已通过环境变量覆盖了该路径，加候选并不解决 `signing-verify.yml` 缺环境变量的问题，反而会改变本地开发者的解析顺序。**修复重点改为"在解析点加 fail-closed 守卫"+"补齐缺失的环境变量"。**
+> - **`server-identity-binding-spec.mjs` 明确排除**：它的 skip 来自端口复用竞态（`:551,554,562`），属环境抖动而非依赖缺失；让它 `skip>0` 即失败会**引入 CI 抖动**。原条目把它并列进来是不准确的。
+
+**建议修复（两部分必须同时做，否则会把 `signing-verify.yml` 弄红）**：
+1. **spec 侧（fail-closed 守卫）**：在两个 spec 的插件解析点照抄 `approval-gateway-f01-spec.mjs:60-63` —— `process.env.CI` 下解析失败即记一条 `FAIL`；并把 `skip > 0 && process.env.CI` 计入非零退出，覆盖"目录解析成功但单个文件缺失"的残余漏洞。**本地无插件时保留 SKIP 行为**（否则没有插件的开发者会被挡在门外）。**不动任何一条断言的判定逻辑，不动 `CANDIDATES` 的候选顺序。**
+2. **CI 侧（补齐环境变量）**：给 `signing-verify.yml` 的 `verify-signing` job 加上与 `android.yml:54-57` **逐字相同**的 `DSH_GATEWAY_PLUGIN_DIR`，使契约套件在该 workflow 里**第一次真正执行**。
+
+**修改风险**：**低**。第 1 部分只在"CI 且插件不可解析"这个分支上改变退出码；第 2 部分是新增一个 job 级环境变量，与 `android.yml` 已验证过的写法一致。**残余风险**：第 2 部分生效后，`signing-verify.yml` 会**第一次真正执行**这 15 条契约断言 —— 如果上游插件与客户端已经漂移，它会**立刻变红**。这是**期望的结果**（暴露真实缺陷），但需在交付说明里明确指出，不能当成"改坏了"。
+
+**验证方法**：
+- 负向：`CI=1` + `DSH_GATEWAY_PLUGIN_DIR` 指向空目录 → 两个 spec **必须非零退出**（修复前为 0，已实测）。
+- 正向：插件可用 → **仍为 exit 0 且 skip 为 0**（防止修复弄坏正常路径）。
+- 静态：`signing-verify.yml` 含 `DSH_GATEWAY_PLUGIN_DIR`，且与 `android.yml` 的值一致。
+- 反证：把守卫去掉，负向测试必须重新变绿（证明守卫是被测对象，不是恒真断言）。
+
+**本轮实施建议**：✅ **已获授权实施（复核范围第 3 项），按严重度排第 1 优先。**
 
 ---
 
