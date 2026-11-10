@@ -18,6 +18,8 @@ import { ButlerWorkspacePicker } from '../components/ButlerWorkspacePicker';
 import { useApp } from '../App';
 import { useNav } from '../nav/NavHost';
 import { ChatScreen } from './ChatScreen';
+import { AgentButlerScreen } from './AgentButlerScreen';
+import { LocalProfileScreen } from './LocalProfileScreen';
 import { ProfileScreen } from './ProfileScreen';
 import { WorkspacesScreen } from './WorkspacesScreen';
 
@@ -37,7 +39,9 @@ function ButlerBoot({ busy }: { busy: boolean }) {
 export function HomeScreen({ active = true }: { active?: boolean }) {
   const tv = useTheme();
   const {
+    authed,
     butlerMode,
+    location,
     butlerSessionId,
     butlerBusy,
     butlerNeedWorkspace,
@@ -87,7 +91,7 @@ export function HomeScreen({ active = true }: { active?: boolean }) {
        * 两处都挂就会出现两个 Modal 互相挡触摸（用户点了没反应）。
        */}
       <ButlerWorkspacePicker
-        visible={butlerMode && !butlerSessionId && butlerNeedWorkspace}
+        visible={butlerMode && location === 'desktop' && !butlerSessionId && butlerNeedWorkspace}
         workspaces={store.workspaces}
         onPick={pickButlerWorkspace}
         onCancel={() => {}}
@@ -95,7 +99,9 @@ export function HomeScreen({ active = true }: { active?: boolean }) {
       <View style={styles.body}>
         {butlerMode ? (
           <View style={[styles.pane, tab === 'butler' ? null : styles.hidden]}>
-            {butlerSessionId ? (
+            {location === 'local' ? (
+              <AgentButlerScreen active={active && tab === 'butler'} />
+            ) : butlerSessionId ? (
               <ChatScreen
                 // key 必须跟着 sessionId 变：切项目时会换成另一个会话，
                 // 不加 key 的话 React 复用同一个实例，内部 state（滚动位置、
@@ -117,7 +123,11 @@ export function HomeScreen({ active = true }: { active?: boolean }) {
           </View>
         )}
         <View style={[styles.pane, tab === 'me' ? null : styles.hidden]}>
-          <ProfileScreen active={active && tab === 'me'} />
+          {authed ? (
+            <ProfileScreen active={active && tab === 'me'} />
+          ) : (
+            <LocalProfileScreen onOpenButler={() => setTab('butler')} />
+          )}
         </View>
       </View>
       <TabBar tab={tab} onChange={next => {

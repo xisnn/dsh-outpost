@@ -1,3 +1,4 @@
 <resources>
     <string name="app_name">DSH Outpost</string>
+    <string name="accessibility_service_description">允许本机 Agent 读取当前屏幕元素并执行你确认过的点击、输入、滚动和按键。不会提供 shell 或任意坐标。</string>
 </resources>

@@ -15,6 +15,7 @@ import { radius, space, type, weight } from '../design/tokens';
 import { GradientFill } from '../components/ui';
 import { ScanSheet } from '../components/ScanSheet';
 import { PairingHelpSheet } from '../components/PairingHelpSheet';
+import { LocalOnlyEntry } from '../components/LocalOnlyEntry';
 
 import { parsePairingText } from '../core/pairing';
 import { checkBaseUrlSecurity } from '../core/net-security';
@@ -332,6 +333,8 @@ export function PairScreen() {
             token 只在本次服务进程内有效，服务重启后需要重新获取。
           </Text>
         </View>
+
+        <LocalOnlyEntry />
       </ScrollView>
 
       <PairingHelpSheet visible={helpOpen} onClose={() => setHelpOpen(false)} />

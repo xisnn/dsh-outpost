@@ -3,4 +3,5 @@ plugins { id("com.facebook.react.settings") }
 extensions.configure(com.facebook.react.ReactSettingsExtension){ ex -> ex.autolinkLibrariesFromCommand() }
 rootProject.name = 'DshPocket'
 include ':app'
+include ':agent-core'
 includeBuild('../node_modules/@react-native/gradle-plugin')

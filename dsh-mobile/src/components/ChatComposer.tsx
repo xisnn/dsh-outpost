@@ -17,6 +17,7 @@ interface ComposerAttachment {
 export function ChatComposer({
   value, attachments, sending, uploading, running, maxLength, sendScope, enabled = true,
   onChangeText, onAddAttachment, onRemoveAttachment, onSend, onStop, selection, onSelectionChange, focusRequest,
+  queueOnly = false, attachmentsEnabled = true, placeholder = '发消息…',
 }: {
   value: string;
   attachments: readonly ComposerAttachment[];
@@ -27,6 +28,11 @@ export function ChatComposer({
   /** New connection / conversation / visibility invalidates a previous choice. */
   sendScope?: object;
   enabled?: boolean;
+  /** 本机管家只有显式排队，没有「插话」；隐藏队列/插话选择器。 */
+  queueOnly?: boolean;
+  /** 本机管家暂不支持附件上传。 */
+  attachmentsEnabled?: boolean;
+  placeholder?: string;
   onChangeText: (value: string) => void;
   focusRequest?: number;
   selection?: {start: number; end: number};
@@ -120,7 +126,7 @@ export function ChatComposer({
         onFocus={() => setFocused(true)}
         onBlur={() => setFocused(false)}
         accessibilityLabel="消息输入框"
-        placeholder={uploading ? '正在上传附件…' : '发消息…'}
+        placeholder={uploading ? '正在上传附件…' : placeholder}
         placeholderTextColor={tv.colors.textTertiary}
         multiline
         maxLength={maxLength}
@@ -130,7 +136,7 @@ export function ChatComposer({
         <Text style={styles.limitHint}>已达 {maxLength} 字草稿上限，继续输入请先发送或删减</Text>
       ) : null}
 
-      {running ? <View style={styles.sendModeWrap}>
+      {running && !queueOnly ? <View style={styles.sendModeWrap}>
         <View style={styles.sendModes} accessibilityRole="radiogroup" accessibilityLabel="运行中的消息处理方式">
           {(['queue', 'steer'] as const).map(option => <Pressable
             key={option}
@@ -147,17 +153,19 @@ export function ChatComposer({
 
       <View pointerEvents="box-none" style={[styles.toolbar, !expanded && styles.toolbarCompact]}>
         <View pointerEvents="box-none" style={styles.actions}>
-          <Pressable
-            onPress={onAddAttachment}
-            disabled={sending}
-            style={[styles.add, sending ? styles.muted : null]}
-            accessibilityRole="button"
-            accessibilityLabel="添加附件"
-            accessibilityState={{ disabled: sending }}
-          >
-            <Text style={styles.addIcon}>＋</Text>
-            {expanded ? <Text style={styles.addText}>添加</Text> : null}
-          </Pressable>
+          {attachmentsEnabled ? (
+            <Pressable
+              onPress={onAddAttachment}
+              disabled={sending}
+              style={[styles.add, sending ? styles.muted : null]}
+              accessibilityRole="button"
+              accessibilityLabel="添加附件"
+              accessibilityState={{ disabled: sending }}
+            >
+              <Text style={styles.addIcon}>＋</Text>
+              {expanded ? <Text style={styles.addText}>添加</Text> : null}
+            </Pressable>
+          ) : null}
           {running ? (
             <Pressable onPress={onStop} style={styles.stop} accessibilityRole="button" accessibilityLabel="打断当前回复">
               <View style={styles.stopDot} />
@@ -171,7 +179,7 @@ export function ChatComposer({
           style={[styles.send, !canSend ? styles.sendDisabled : null]}
           accessibilityRole="button"
           accessibilityLabel="发送消息"
-          accessibilityHint={running ? mode === 'steer' ? '将这条消息插话到当前轮' : '将这条消息排到下一轮' : undefined}
+          accessibilityHint={running ? queueOnly ? '排到当前任务之后执行' : mode === 'steer' ? '将这条消息插话到当前轮' : '将这条消息排到下一轮' : undefined}
           accessibilityState={{ disabled: !canSend, busy: sending }}
         >
           {sending ? <ActivityIndicator color={tv.colors.textSecondary} size="small" /> : <Text style={[styles.sendIcon, !canSend ? styles.sendIconDisabled : null]}>↑</Text>}

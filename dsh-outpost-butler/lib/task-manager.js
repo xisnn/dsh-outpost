@@ -53,6 +53,7 @@ export class TaskManager {
     now = () => Date.now(),
     approvalTimeoutMs = DEFAULT_APPROVAL_TIMEOUT_MS,
     defaultMaxGoalRounds = DEFAULT_MAX_GOAL_ROUNDS,
+    localRuntime = null,
   }) {
     this.store = store;
     this.sessions = sessions;
@@ -63,6 +64,7 @@ export class TaskManager {
     this.now = now;
     this.approvalTimeoutMs = approvalTimeoutMs;
     this.defaultMaxGoalRounds = defaultMaxGoalRounds;
+    this.localRuntime = localRuntime;
 
     this.queue = [];
     this.queued = new Set();
@@ -83,6 +85,17 @@ export class TaskManager {
     for (const task of this.store.list()) {
       if (TERMINAL_STATUSES.has(task.status)) continue;
       if (task.sessionId) this.sessionToTask.set(task.sessionId, task.id);
+      if (this.localRuntime) {
+        // A persisted queue is not a new user authorization after process loss.
+        await this.persist(task.id, {
+          status: task.status === 'created' ? 'created' : 'waiting_user',
+          autoResume: false, localAuthorization: null,
+          recoveryRequired: Boolean(task.sessionId || task.status !== 'created'),
+          lastError: task.status === 'created' ? 'queue-requires-authorization' : 'execution-outcome-unverified',
+          ...approvalPatch([]),
+        });
+        continue;
+      }
       if (task.status === 'created') {
         this.enqueue(task.id);
         continue;
@@ -135,7 +148,7 @@ export class TaskManager {
     return task;
   }
 
-  async create(input) {
+  async create(input, { commandReceipt, deferExecution = false } = {}) {
     const objective = String(input?.objective ?? '').trim();
     if (!objective) throw new TaskError('invalid-objective', 'objective is required');
     if (objective.length > MAX_OBJECTIVE_LENGTH) {
@@ -159,13 +172,39 @@ export class TaskManager {
       objective,
       cwd,
       maxGoalRounds,
-      autoResume: input?.autoResume === true,
+      autoResume: !this.localRuntime && input?.autoResume === true,
       title,
       idempotencyKey,
+      ...(this.localRuntime ? { localAuthorization: this.localRuntime.generation } : {}),
+      commandReceipt,
     });
-    this.enqueue(task.id);
-    this.pump();
+    if (!deferExecution) {
+      this.enqueue(task.id);
+      this.pump();
+    }
     return this.publicTask(this.store.get(task.id) ?? task);
+  }
+
+  async interrupt(id) {
+    const task = this.get(id);
+    if (TERMINAL_STATUSES.has(task.status)) throw new TaskError('invalid-state', 'task is terminal', 409);
+    this.queue = this.queue.filter(queued => queued !== id);
+    this.queued.delete(id);
+    // Fence deferred preparation before touching the agent. Unknown tool writes
+    // are never made safe merely by a successful cancellation request.
+    const updated = await this.persist(id, {
+      status: 'waiting_user', lastError: 'interrupted', ...approvalPatch([]),
+      ...(this.localRuntime ? { localAuthorization: null, recoveryRequired: Boolean(task.sessionId) } : {}),
+    });
+    const agent = task.sessionId ? this.agents.get(task.sessionId) : undefined;
+    if (agent) {
+      try {
+        const goal = this.goals.get(agent);
+        if (goal?.phase === 'active') this.goals.pause(agent, { id: goal.id, revision: goal.revision });
+      } finally { agent.cancel({ kind: 'user' }); }
+    }
+    this.finishLane(id);
+    return this.publicTask(updated);
   }
 
   async cancel(id) {
@@ -201,6 +240,9 @@ export class TaskManager {
 
   async resume(id, { automatic = false } = {}) {
     let task = this.get(id);
+    if (this.localRuntime && (automatic || task.recoveryRequired || task.unsettledWrites?.length)) {
+      throw new TaskError('reconciliation-required', 'verify external effects before starting a new task; uncertain sessions cannot be replayed', 409);
+    }
     if (TERMINAL_STATUSES.has(task.status)) {
       throw new TaskError('invalid-state', `cannot resume a ${task.status} task`, 409);
     }
@@ -243,6 +285,13 @@ export class TaskManager {
       throw new TaskError('agent-unavailable', error.message, 409);
     }
 
+    // Cold resolution yields to cancellation, interruption and disposal.
+    task = this.get(id);
+    if (this.disposed || !['waiting_user', 'blocked'].includes(task.status)
+      || (this.localRuntime && (task.recoveryRequired || task.localAuthorization !== this.localRuntime.generation))) {
+      this.finishLane(id);
+      throw new TaskError('state-changed', 'task changed during agent resolution', 409);
+    }
     let goal = this.goals.get(agent);
     if (!goal) {
       goal = this.goals.create(agent, {
@@ -387,7 +436,8 @@ export class TaskManager {
       goalPhase: goal.phase,
     };
 
-    if (task.status === 'waiting_user' && task.lastError?.startsWith('approval-')) {
+    if ((this.localRuntime && (task.recoveryRequired || task.localAuthorization !== this.localRuntime.generation))
+      || (task.status === 'waiting_user' && task.lastError?.startsWith('approval-'))) {
       await this.persist(id, base);
       return;
     }
@@ -618,7 +668,9 @@ export class TaskManager {
     if (this.queued.has(id)) return;
     const task = this.store.get(id);
     if (!task || task.status !== 'created') return;
+    if (this.localRuntime && (task.localAuthorization !== this.localRuntime.generation || task.recoveryRequired)) return;
     this.queue.push(id);
+    if (this.localRuntime) this.queue.sort((a, b) => this.get(a).queueOrder - this.get(b).queueOrder);
     this.queued.add(id);
   }
 
@@ -638,17 +690,17 @@ export class TaskManager {
   async execute(id) {
     let task = this.get(id);
     task = await this.persist(id, { status: 'preparing', lastError: null });
-    if (this.store.get(id)?.status === 'cancelled') return;
+    if (this.disposed || this.store.get(id)?.status !== 'preparing') return;
 
     const created = await this.sessionController.create({ cwd: task.cwd });
-    if (this.store.get(id)?.status === 'cancelled') return;
+    if (this.disposed || this.store.get(id)?.status !== 'preparing') return;
     const sessionId = created.sessionId;
     this.sessionToTask.set(sessionId, id);
     task = await this.persist(id, { sessionId, status: 'preparing' });
-    if (this.store.get(id)?.status === 'cancelled') return;
+    if (this.disposed || this.store.get(id)?.status !== 'preparing') return;
 
     const agent = await this.resolveAgentCold(task);
-    if (this.store.get(id)?.status === 'cancelled') return;
+    if (this.disposed || this.store.get(id)?.status !== 'preparing') return;
 
     const goal = this.goals.create(agent, {
       objective: task.objective,
@@ -688,7 +740,7 @@ export class TaskManager {
   async finalizeCompleted(id) {
     const task = this.store.get(id);
     if (!task || TERMINAL_STATUSES.has(task.status)) return task;
-    if (task.lastError?.startsWith('approval-') || pendingApprovalsOf(task).length > 0) return task;
+    if (task.recoveryRequired || task.lastError?.startsWith('approval-') || pendingApprovalsOf(task).length > 0) return task;
     const updated = await this.persist(id, {
       status: 'completed',
       goalPhase: 'complete',
@@ -792,6 +844,11 @@ export class TaskManager {
       deliverables: task.deliverables,
       ...approvalPatch(pendingApprovalsOf(task)),
       lastError: task.lastError,
+      ...(this.localRuntime ? {
+        queueOrder: task.queueOrder ?? null,
+        authorized: task.localAuthorization === this.localRuntime.generation,
+        recoveryRequired: task.recoveryRequired === true,
+      } : {}),
     };
   }
 

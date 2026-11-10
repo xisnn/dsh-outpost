@@ -578,7 +578,7 @@ function makeStyles(tv: ReturnType<typeof useTheme>) {
     searchWrap: {
       flexDirection: 'row',
       alignItems: 'center',
-      marginHorizontal: space.md,
+      marginHorizontal: tv.layout.screenPadding,
       marginBottom: space.sm,
       paddingHorizontal: space.sm,
       borderRadius: radius.md,
@@ -650,7 +650,7 @@ function makeStyles(tv: ReturnType<typeof useTheme>) {
     emptyHint: { color: C.textFaint, fontSize: type.xs, marginTop: space.sm },
 
     card: {
-      marginHorizontal: space.md,
+      marginHorizontal: tv.layout.screenPadding,
       marginBottom: space.sm,
       paddingHorizontal: space.md,
       paddingVertical: space.md,
@@ -659,7 +659,7 @@ function makeStyles(tv: ReturnType<typeof useTheme>) {
       borderWidth: StyleSheet.hairlineWidth,
       borderColor: C.border,
     },
-    sidebarCard: { backgroundColor: 'transparent', borderColor: 'transparent', marginBottom: space.xs },
+    sidebarCard: { backgroundColor: 'transparent', borderColor: 'transparent', marginHorizontal: space.md, marginBottom: space.xs },
     cardSelected: { backgroundColor: C.accentWash, borderColor: C.accentDim },
     cardPressed: { backgroundColor: C.bgCard, borderColor: C.borderStrong },
     cardTop: { flexDirection: 'row', alignItems: 'flex-start' },

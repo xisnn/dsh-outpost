@@ -16,6 +16,32 @@ export interface PickedFile {
 
 export type PickMode = 'images' | 'files';
 
+/**
+ * Pick one runtime package for the local runtime importer.
+ *
+ * `mode:'open'` returns the provider's `content://` URI with a temporary read
+ * grant. That is exactly what LocalDshModule.install consumes; the native side
+ * still validates the trusted manifest and the archive, not the URI.
+ */
+export async function pickRuntimePackage(): Promise<PickedFile | null> {
+  try {
+    const [picked] = await pick({
+      type: [types.allFiles],
+      allowMultiSelection: false,
+      mode: 'open',
+    });
+    return {
+      uri: picked.uri,
+      name: picked.name ?? 'runtime.tar',
+      size: picked.size ?? undefined,
+      mime: picked.type ?? undefined,
+    };
+  } catch (e) {
+    if (isErrorWithCode(e) && e.code === errorCodes.OPERATION_CANCELED) return null;
+    throw e;
+  }
+}
+
 export async function pickAttachments(mode: PickMode): Promise<PickedFile[]> {
   try {
     const res = await pick({

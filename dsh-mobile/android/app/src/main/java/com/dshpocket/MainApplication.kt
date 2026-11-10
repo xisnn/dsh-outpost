@@ -1,6 +1,8 @@
 package com.dshpocket
 
 import android.app.Application
+import com.dshpocket.agent.AgentPackage
+import com.dshpocket.runtime.LocalDshPackage
 import com.facebook.react.PackageList
 import com.facebook.react.ReactApplication
 import com.facebook.react.ReactHost
@@ -19,6 +21,8 @@ class MainApplication : Application(), ReactApplication {
         override fun getPackages(): List<ReactPackage> =
             PackageList(this).packages.apply {
               add(ShareInboxPackage())
+              add(LocalDshPackage())
+              add(AgentPackage())
             }
 
         override fun getJSMainModuleName(): String = "index"

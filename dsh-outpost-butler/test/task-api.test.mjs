@@ -2,6 +2,7 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import { registerTaskApi } from '../lib/task-api.js';
 import { TaskError } from '../lib/task-manager.js';
+import { MemoryStore } from '../lib/memory-store.js';
 
 class FakeConnection {
   constructor() {
@@ -41,6 +42,80 @@ function makeManager() {
     },
   };
 }
+
+test('capabilities report unsupported writes on legacy Host', async () => {
+  const { connection } = await setup();
+  const response = await route(connection, '/api/outpost/butler/capabilities').fetch(new Request('http://localhost/api/outpost/butler/capabilities'));
+  assert.deepEqual(await body(response), { version: 1, enabled: false, durableReceipts: false });
+  const denied = await route(connection, '/api/outpost/butler/commands').fetch(new Request('http://localhost/api/outpost/butler/commands', { method: 'POST', body: '{}' }));
+  assert.equal(denied.status, 409);
+  assert.equal((await body(denied)).code, 'unsupported-capability');
+});
+
+test('local mutations require commands and receipt lookup preserves unknown state', async () => {
+  const connection = new FakeConnection(), manager = makeManager();
+  const receipt = { commandId: 'unknown-command', state: 'unknown' };
+  let observed;
+  registerTaskApi({ connection, manager, logger: { warn() {} }, commands: {
+    submit: async envelope => { observed = envelope; return receipt; },
+    receipt: id => id === receipt.commandId ? receipt : null,
+    reconcile: () => ({ generation: 'g', unresolved: [receipt] }),
+    capabilities: () => ({ version: 1, enabled: true }),
+  } });
+  for (const op of ['create', 'cancel', 'resume']) {
+    const denied = await route(connection, '/api/outpost/butler/tasks/' + op).fetch(new Request('http://localhost/api/outpost/butler/tasks/' + op, { method: 'POST', body: '{}' }));
+    assert.equal(denied.status, 409); assert.equal((await body(denied)).code, 'command-required');
+  }
+  assert.deepEqual(manager.calls, []);
+  const envelope = { version: 1, commandId: 'unknown-command' };
+  const submitted = await route(connection, '/api/outpost/butler/commands').fetch(new Request('http://localhost/api/outpost/butler/commands', { method: 'POST', body: JSON.stringify(envelope) }));
+  assert.deepEqual(observed, envelope); assert.deepEqual(await body(submitted), { receipt });
+  for (const id of ['unknown-command', 'absent']) {
+    const response = await route(connection, '/api/outpost/butler/commands/get').fetch(new Request('http://localhost/api/outpost/butler/commands/get?commandId=' + id));
+    assert.equal(response.status, id === 'absent' ? 404 : 200);
+    if (response.status === 200) assert.equal((await body(response)).receipt.state, 'unknown');
+  }
+});
+
+function memoryDomain() {
+  const tables = new Map();
+  return { table(name) {
+    if (!tables.has(name)) tables.set(name, new Map());
+    const table = tables.get(name);
+    return {
+      get: key => table.get(key),
+      put: async (key, value) => { table.set(key, structuredClone(value)); },
+      delete: async key => { table.delete(key); },
+      entries: () => [...table.entries()].map(([key, value]) => [key, structuredClone(value)]),
+    };
+  } };
+}
+
+test('memory routes expose identity and user edits; unavailable memory fails closed', async () => {
+  const connection = new FakeConnection(), manager = makeManager();
+  const store = new MemoryStore({ domain: memoryDomain() });
+  await store.load();
+  registerTaskApi({ connection, manager, memory: store, logger: { warn() {} } });
+  const base = 'http://localhost/api/outpost/butler/memory';
+  const snapshotResponse = await route(connection, '/api/outpost/butler/memory').fetch(new Request(base));
+  const snapshot = await body(snapshotResponse);
+  assert.match(snapshot.butlerId, /^[0-9a-f-]{36}$/);
+  const setResponse = await route(connection, '/api/outpost/butler/memory/set').fetch(new Request(base + '/set', { method: 'POST', body: JSON.stringify({ kind: 'project', key: '仓库', value: 'dsBot' }) }));
+  const setBody = await body(setResponse);
+  assert.equal(setBody.entry.key, '仓库');
+  assert.equal(setBody.entry.source, 'user');
+  assert.equal(typeof setBody.revision, 'number');
+  const historyResponse = await route(connection, '/api/outpost/butler/memory/history').fetch(new Request(base + '/history'));
+  assert.equal((await body(historyResponse)).changes[0].action, 'set');
+  const deleteResponse = await route(connection, '/api/outpost/butler/memory/delete').fetch(new Request(base + '/delete', { method: 'POST', body: JSON.stringify({ id: setBody.entry.id, expectedRevision: 1 }) }));
+  assert.equal((await body(deleteResponse)).deleted, setBody.entry.id);
+
+  const unavailableConnection = new FakeConnection();
+  registerTaskApi({ connection: unavailableConnection, manager, memory: null, logger: { warn() {} } });
+  const unavailable = await route(unavailableConnection, '/api/outpost/butler/memory').fetch(new Request(base));
+  assert.equal(unavailable.status, 503);
+  assert.equal((await body(unavailable)).code, 'memory-unavailable');
+});
 
 async function setup() {
   const connection = new FakeConnection();

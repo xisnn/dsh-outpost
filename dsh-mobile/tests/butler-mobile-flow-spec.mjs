@@ -54,6 +54,10 @@ function nodes(tree) {
   return [tree, ...children.flat(Infinity).flatMap(nodes)];
 }
 const taskListLogic = load('core/butlerTaskList.ts', {});
+// The task screen now goes through ButlerClient; load the real desktop
+// adapter so this spec still exercises the actual component wiring.
+const localRuntimeLogic = load('core/localRuntime.ts', {});
+const butlerClientLogic = load('core/butlerClient.ts', { './localRuntime': localRuntimeLogic });
 function button(tree, text) {
   const result = nodes(tree).find(node => node.type === 'Pressable' && nodes(node).some(child => child.type === 'Text' && child.children.includes(text)));
   assert.ok(result, 'Missing button: ' + text);
@@ -72,6 +76,7 @@ function taskHarness(store, nativeExtras = {}, globals = {}) {
     '../components/TaskMotion': { TaskPressable: 'Pressable', TaskSection: 'View', TaskStatus: 'TaskStatus', TaskDisclosure: 'View' },
     '../design/theme': { useTheme: () => theme }, '../nav/NavHost': { useNav: () => nav },
     '../core/butlerTaskList': taskListLogic,
+    '../core/butlerClient': butlerClientLogic,
   }, globals);
   return { ...h, nav, render() { h.begin(); return ButlerTasksScreen({}); } };
 }

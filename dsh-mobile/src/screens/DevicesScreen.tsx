@@ -357,13 +357,18 @@ export function DevicesScreen() {
                 </Text>
 
                 <View style={styles.actions}>
-                  <Text
-                    style={[styles.revokeBtn, busy ? styles.revokeBtnBusy : null]}
-                    onPress={busy ? undefined : () => askRevoke(d)}
-                    suppressHighlighting
+                  <Pressable
+                    onPress={() => askRevoke(d)}
+                    disabled={busy}
+                    accessibilityRole="button"
+                    accessibilityLabel="撤销设备授权"
+                    accessibilityState={{ disabled: busy }}
+                    style={styles.revokeHit}
                   >
-                    {busy ? '撤销中…' : '撤销授权'}
-                  </Text>
+                    <Text style={[styles.revokeBtn, busy ? styles.revokeBtnBusy : null]}>
+                      {busy ? '撤销中…' : '撤销授权'}
+                    </Text>
+                  </Pressable>
                 </View>
               </View>
             );
@@ -427,13 +432,13 @@ function makeStyles(tv: ReturnType<typeof useTheme>) {
 
     intro: {
       color: C.textTertiary,
-      fontSize: type.micro,
+      fontSize: type.xs,
       lineHeight: type.xs * 1.6,
       marginBottom: space.md,
     },
 
     card: {
-      backgroundColor: C.bgCard,
+      backgroundColor: C.bgRaised,
       borderRadius: radius.md,
       borderWidth: StyleSheet.hairlineWidth,
       borderColor: C.border,
@@ -459,6 +464,7 @@ function makeStyles(tv: ReturnType<typeof useTheme>) {
     },
 
     actions: { flexDirection: 'row', justifyContent: 'flex-end', marginTop: space.sm },
+    revokeHit: { minHeight: 44, minWidth: 44, justifyContent: 'center', alignSelf: 'flex-end' },
     revokeBtn: {
       color: C.danger,
       fontSize: type.micro,

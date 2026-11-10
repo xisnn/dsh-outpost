@@ -68,7 +68,7 @@ test('Home consumes main-butler clicks into its existing root and selects the bu
   react,'react-native':{ActivityIndicator:'ActivityIndicator',StyleSheet:{create:x=>x},Text:'Text',View:'View'},
   '../components/TabBar':{TabBar:'TabBar'},'../design/theme':{useTheme:()=>({colors:{}})},
   '../components/ButlerWorkspacePicker':{ButlerWorkspacePicker:'Picker'},'../App':{useApp:()=>context},
-  '../nav/NavHost':{useNav:()=>nav},'./ChatScreen':{ChatScreen:'Chat'},'./ProfileScreen':{ProfileScreen:'Profile'},'./WorkspacesScreen':{WorkspacesScreen:'Workspaces'},
+  '../nav/NavHost':{useNav:()=>nav},'./ChatScreen':{ChatScreen:'Chat'},'./LocalButlerScreen':{LocalButlerScreen:'LocalButler'},'./LocalProfileScreen':{LocalProfileScreen:'LocalProfile'},'./ProfileScreen':{ProfileScreen:'Profile'},'./WorkspacesScreen':{WorkspacesScreen:'Workspaces'},
  }).HomeScreen,{});
  const tab=tree=>tree.children.flat().find(n=>n?.type==='TabBar');
  tab(h.render()).props.onChange('me');h.render();request='main';for(const fn of listeners)fn();

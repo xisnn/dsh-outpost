@@ -30,6 +30,16 @@ import {
   type ButlerTaskStatus,
   type NewButlerTask,
 } from './butlerTasks';
+import {
+  deleteButlerMemory,
+  listButlerMemoryHistory,
+  loadButlerMemory,
+  setButlerMemory,
+  type ButlerMemoryChange,
+  type ButlerMemoryEntry,
+  type ButlerMemoryInput,
+  type ButlerMemorySnapshot,
+} from './butlerMemory';
 import { ButlerSessionOwnership } from './butlerSessionOwnership';
 import { buildButlerWake, isPhoneButlerControlMessage } from './butler';
 import type { WorkspaceCustom } from '../core/workspace-custom';
@@ -815,6 +825,23 @@ export class Store {
     const task = await resumeButlerTask(this.conn, id);
     this.butlerOwnership.remember(task);
     return task;
+  }
+
+  /** P4 管家身份与用户记忆（只读/显式用户编辑；不参与任务与工具授权）。 */
+  async getButlerMemory(): Promise<ButlerMemorySnapshot> {
+    return loadButlerMemory(this.conn);
+  }
+
+  async listButlerMemoryHistory(id?: string): Promise<ButlerMemoryChange[]> {
+    return listButlerMemoryHistory(this.conn, id);
+  }
+
+  async setButlerMemory(input: ButlerMemoryInput): Promise<ButlerMemoryEntry> {
+    return setButlerMemory(this.conn, input);
+  }
+
+  async deleteButlerMemory(id: string, expectedRevision?: number): Promise<number> {
+    return deleteButlerMemory(this.conn, id, expectedRevision);
   }
 
   /** 拉取模型目录 */

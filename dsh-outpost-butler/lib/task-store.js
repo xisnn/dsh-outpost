@@ -30,19 +30,60 @@ function validateTask(task) {
     // Older v019 records may omit this field; leave their representation intact.
     || !(task.pendingApprovals === undefined
       || (Array.isArray(task.pendingApprovals) && task.pendingApprovals.every(isApproval)))
+    || !(task.localAuthorization === undefined || task.localAuthorization === null || typeof task.localAuthorization === 'string')
+    || !(task.queueOrder === undefined || Number.isSafeInteger(task.queueOrder) && task.queueOrder > 0)
+    || !(task.recoveryRequired === undefined || typeof task.recoveryRequired === 'boolean')
+    || !(task.unsettledWrites === undefined || Array.isArray(task.unsettledWrites) && task.unsettledWrites.every(item => isObject(item)
+      && typeof item.callId === 'string' && /^[a-f0-9]{64}$/.test(item.argumentDigest)))
     || !Array.isArray(task.managedRpcIds)
     || !task.managedRpcIds.every((id) => typeof id === 'string')) {
     throw new Error('invalid persisted task record');
   }
 }
 
+function validateReceipt(receipt) {
+  if (!isObject(receipt) || receipt.version !== 1
+    || !/^[A-Za-z0-9_-]{1,128}$/.test(receipt.commandId)
+    || typeof receipt.generation !== 'string' || !receipt.generation
+    || !['create', 'enqueue', 'resume', 'interrupt', 'cancel', 'approval'].includes(receipt.operation)
+    || !/^[a-f0-9]{64}$/.test(receipt.digest)
+    || !['accepted', 'completed', 'rejected', 'unknown'].includes(receipt.state)
+    || !Number.isFinite(receipt.at)
+    || !(receipt.taskId === null || typeof receipt.taskId === 'string')) {
+    throw new Error('invalid command receipt');
+  }
+}
+
+function replayReceipt(receipts, receipt) {
+  if (!receipt) return;
+  validateReceipt(receipt);
+  const prior = receipts.get(receipt.commandId);
+  if (prior && (prior.digest !== receipt.digest || prior.operation !== receipt.operation
+    || prior.generation !== receipt.generation
+    || prior.taskId !== receipt.taskId
+    || prior.state !== 'accepted' || !['completed', 'rejected', 'unknown'].includes(receipt.state))) {
+    throw new Error('command journal identity or transition conflict');
+  }
+  if (!prior && receipt.state !== 'accepted' && !(['create', 'enqueue'].includes(receipt.operation) && receipt.state === 'completed')) {
+    throw new Error('command receipt has no accepted intent');
+  }
+  receipts.set(receipt.commandId, receipt);
+}
+
 function validateEvent(event) {
   if (!isObject(event) || !Number.isSafeInteger(event.seq) || event.seq < 1
-    || !Number.isFinite(event.at) || !['created', 'updated'].includes(event.kind)) {
+    || !Number.isFinite(event.at) || !['created', 'updated', 'command'].includes(event.kind)) {
     throw new Error('invalid task journal entry');
+  }
+  if (event.receipt !== undefined) validateReceipt(event.receipt);
+  if (event.kind === 'command') {
+    if (!event.receipt || event.task !== undefined) throw new Error('invalid command journal entry');
+    return;
   }
   validateTask(event.task);
   if (event.taskId !== event.task.id) throw new Error('task journal identity conflict');
+  if (event.receipt && (event.kind !== 'created' || event.receipt.state !== 'completed'
+    || event.receipt.taskId !== event.taskId)) throw new Error('invalid atomic create receipt');
 }
 
 function validateTransition(previous, task, kind) {
@@ -50,7 +91,8 @@ function validateTransition(previous, task, kind) {
     || (kind === 'updated' && (task.revision < 2
       || (previous && task.revision !== previous.revision + 1)))
     || (previous && (task.createdAt !== previous.createdAt
-      || task.idempotencyKey !== previous.idempotencyKey))) {
+      || task.idempotencyKey !== previous.idempotencyKey
+      || task.queueOrder !== previous.queueOrder))) {
     throw new Error('task journal revision or identity conflict');
   }
 }
@@ -100,6 +142,11 @@ export function newTaskRecord(input) {
     lastError: null,
     managedRpcIds: [],
     idempotencyKey: input.idempotencyKey ?? null,
+    ...(input.localAuthorization !== undefined ? {
+      localAuthorization: input.localAuthorization,
+      queueOrder: input.queueOrder,
+      recoveryRequired: false,
+    } : {}),
   };
 }
 
@@ -123,6 +170,7 @@ export class TaskStore {
     this.idFactory = idFactory;
     this.seq = 0;
     this.cache = new Map();
+    this.receipts = new Map();
     this.queue = Promise.resolve();
     this.failure = null;
   }
@@ -144,6 +192,7 @@ export class TaskStore {
       this.failure = new Error('task store is loading');
       try {
         const cache = new Map();
+        const receipts = new Map();
         const owners = new Map();
         const events = [...this.tables.journal.entries()];
         for (const [key, event] of events) {
@@ -157,9 +206,12 @@ export class TaskStore {
         for (const [, event] of events) {
           // v019 reserved numbers before writing; failed appends can leave gaps.
           if (event.seq <= seq) throw new Error('task journal sequence conflict');
-          validateTransition(cache.get(event.taskId), event.task, event.kind);
-          registerKey(owners, event.task);
-          cache.set(event.taskId, event.task);
+          replayReceipt(receipts, event.receipt);
+          if (event.kind !== 'command') {
+            validateTransition(cache.get(event.taskId), event.task, event.kind);
+            registerKey(owners, event.task);
+            cache.set(event.taskId, event.task);
+          }
           seq = event.seq;
         }
         const snapshots = new Map(this.tables.tasks.entries());
@@ -173,6 +225,7 @@ export class TaskStore {
         }
         // Publish only after the entire journal and legacy snapshots validate.
         this.cache = cache;
+        this.receipts = receipts;
         this.seq = seq;
         this.failure = null;
         for (const [id, task] of cache) {
@@ -184,6 +237,7 @@ export class TaskStore {
         return this;
       } catch (error) {
         this.cache = new Map();
+        this.receipts = new Map();
         this.seq = 0;
         this.failure = error;
         throw error;
@@ -237,8 +291,14 @@ export class TaskStore {
         autoResume: input.autoResume,
         idempotencyKey: input.idempotencyKey,
         now: this.now(),
+        localAuthorization: input.localAuthorization,
+        queueOrder: this.seq + 1,
       });
-      await this.appendRecord(task, 'created');
+      const receipt = input.commandReceipt ? {
+        ...input.commandReceipt, taskId: task.id, state: 'completed', at: this.now(),
+        revision: task.revision,
+      } : undefined;
+      await this.appendRecord(task, 'created', receipt);
       if (input.idempotencyKey) {
         await putCache(this.tables.idempotency, indexKey(input.idempotencyKey), { taskId: task.id });
       }
@@ -268,24 +328,52 @@ export class TaskStore {
     return this.enqueue(() => this.appendRecord(task, kind));
   }
 
-  async appendRecord(task, kind) {
+  receipt(commandId) {
     this.assertHealthy();
-    const seq = this.seq + 1;
-    const event = { seq, taskId: task.id, at: this.now(), kind, task };
-    validateEvent(event);
+    const receipt = this.receipts.get(commandId);
+    return receipt ? structuredClone(receipt) : null;
+  }
+
+  unresolved() {
+    this.assertHealthy();
+    return [...this.receipts.values()].filter(r => ['accepted', 'unknown'].includes(r.state)).map(r => structuredClone(r));
+  }
+
+  async writeReceipt(receipt, validate = () => {}) {
+    return this.enqueue(async () => {
+      this.assertHealthy();
+      validate();
+      const next = { ...receipt, at: this.now() };
+      await this.commitEvent({ seq: this.seq + 1, at: this.now(), kind: 'command', receipt: next });
+      return structuredClone(next);
+    });
+  }
+
+  async appendRecord(task, kind, receipt) {
+    this.assertHealthy();
+    const event = { seq: this.seq + 1, taskId: task.id, at: this.now(), kind, task,
+      ...(receipt ? { receipt } : {}) };
     validateTransition(this.cache.get(task.id), task, kind);
     const owners = new Map();
     for (const stored of this.cache.values()) registerKey(owners, stored);
     registerKey(owners, task);
+    await this.commitEvent(event);
+    await putCache(this.tables.tasks, task.id, task);
+  }
+
+  async commitEvent(event) {
+    validateEvent(event);
+    const receipts = new Map(this.receipts);
+    replayReceipt(receipts, event.receipt);
     try {
-      await this.tables.journal.put(String(seq).padStart(8, '0'), event);
+      await this.tables.journal.put(String(event.seq).padStart(8, '0'), event);
     } catch (cause) {
       // A rejected write may already be durable. Never overwrite its sequence.
       this.failure = new Error('task journal write failed; reload required', { cause });
       throw this.failure;
     }
-    this.seq = seq;
-    this.cache.set(task.id, task);
-    await putCache(this.tables.tasks, task.id, task);
+    this.seq = event.seq;
+    this.receipts = receipts;
+    if (event.task) this.cache.set(event.taskId, event.task);
   }
 }

@@ -20,6 +20,8 @@ import { SectionLabel } from '../components/ui';
 import { ConfirmSheet } from '../components/ConfirmSheet';
 import { LocalDiagnosticsButton } from '../components/LocalDiagnosticsButton';
 import { SlideSegmented } from '../components/SlideSegmented';
+import { localRuntimeAvailable, p6AgentAvailable } from '../core/localRuntimeSupport';
+import type { HostLocation } from '../core/hostLocation';
 import { APP_VERSION, APP_VERSION_LABEL } from '../core/version';
 import { isNotifyEnabled, notifyDebugState, setNotifyEnabled, vibrateShort } from '../core/notify';
 import type { GatewayStatus } from '../core/approvalGateway';
@@ -66,6 +68,8 @@ export function ProfileScreen({ active = true }: { active?: boolean }) {
     clearAuthorization,
     butlerMode,
     setButlerMode,
+    location,
+    setLocation,
     butlerBusy,
     approvalRevoked,
     reauthorizeApprovals,
@@ -375,6 +379,28 @@ export function ProfileScreen({ active = true }: { active?: boolean }) {
               />
             )}
           </View>
+          <View style={styles.locationRow}>
+            <Text style={styles.switchLabel}>运行位置</Text>
+            <Text style={styles.locationHint}>
+              {location === 'local'
+                ? butlerMode
+                  ? '管家任务在手机 Agent 上执行；先在管家页配置模型。'
+                  : '开启管家模式后，任务会在手机 Agent 上执行；先在管家页配置模型。'
+                : '管家任务在已配对的电脑上执行。'}
+            </Text>
+            <SlideSegmented<HostLocation>
+              options={localRuntimeAvailable()
+                ? [{ value: 'desktop', label: '电脑' }, { value: 'local', label: '本机' }]
+                : [{ value: 'desktop', label: '电脑' }]}
+              value={location}
+              onChange={setLocation}
+              accessibilityLabel="管家运行位置"
+            />
+            {!localRuntimeAvailable() ? (
+              <Text style={styles.locationHint}>当前设备不支持本机运行，继续使用电脑模式。</Text>
+            ) : null}
+          </View>
+
           {butlerMode ? (
             <Pressable
               onPress={() => nav.push('Workspaces')}
@@ -388,6 +414,17 @@ export function ProfileScreen({ active = true }: { active?: boolean }) {
               <Text style={styles.entryChevron}>›</Text>
             </Pressable>
           ) : null}
+          <Pressable
+            onPress={() => nav.push(location === 'local' && p6AgentAvailable() ? 'AgentMemory' : 'ButlerMemory')}
+            style={({ pressed }: { pressed: boolean }) => [
+              styles.entryRow,
+              pressed ? { opacity: tv.motion.pressOpacity } : null,
+            ]}
+          >
+            <Text style={styles.entryLabel}>管家记忆</Text>
+            <Text style={styles.entryMeta}>偏好与项目事实</Text>
+            <Text style={styles.entryChevron}>›</Text>
+          </Pressable>
         </View>
 
         {/* ── 提醒 ─────────────────────────────────────── */}
@@ -766,9 +803,9 @@ function makeStyles(tv: ReturnType<typeof useTheme>) {
     },
     headerTitle: {
       color: C.text,
-      fontSize: tv.type.title,
-      fontWeight: tv.weight.bold,
-      letterSpacing: -0.5,
+      fontSize: tv.type.lg,
+      fontWeight: tv.weight.semibold,
+      letterSpacing: -0.2,
     },
     headerSub: { color: C.textSecondary, fontSize: tv.type.xs, marginTop: 2 },
 
@@ -893,6 +930,13 @@ function makeStyles(tv: ReturnType<typeof useTheme>) {
     },
     switchBody: { flex: 1, marginRight: tv.space.md },
     switchLabel: { color: C.text, fontSize: tv.type.base, fontWeight: tv.weight.medium },
+    locationRow: {
+      marginTop: tv.space.lg,
+      paddingTop: tv.space.md,
+      borderTopWidth: StyleSheet.hairlineWidth,
+      borderTopColor: C.border,
+    },
+    locationHint: { color: C.textSecondary, fontSize: tv.type.xs, lineHeight: tv.type.xs * 1.5, marginTop: 4, marginBottom: tv.space.sm },
     entryRow: {
       flexDirection: 'row',
       alignItems: 'center',

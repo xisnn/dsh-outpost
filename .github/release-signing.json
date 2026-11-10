@@ -1,0 +1,10 @@
+{
+  "formatVersion": 1,
+  "knownGoodCertificateSha256": [
+    "191b16cebd6f39f64f8cbbe3fcbdd90e2d845a9d7b1fbe19ccdcd819293a736a"
+  ],
+  "candidateMustMatchForRelease": true,
+  "testOnlyDebugCertificates": [
+    "fac61745dc0903786fb9ede62a962b399f7348f0bb6f899b8332667591033b9c"
+  ]
+}

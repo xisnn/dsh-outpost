@@ -32,6 +32,7 @@ import { TaskDisclosure, TaskPressable, TaskSection, TaskStatus, taskEnter, task
 import { useTheme } from '../design/theme';
 import { useNav } from '../nav/NavHost';
 import type { ButlerTask, ButlerTaskStatus } from '../core/butlerTasks';
+import { DesktopButlerClient } from '../core/butlerClient';
 import {
   APPROVAL_STATUS_TEXT, TASK_FILTERS, filterTasks, reconcileTasks, taskFilterCounts,
   taskListSummary, taskPollDelay, upsertTask, type TaskFilter,
@@ -97,6 +98,8 @@ const TaskListCard = React.memo(function TaskListCard({ task, styles, color, onO
 
 export function ButlerTasksScreen({ cwd: cwdProp }: { cwd?: string }) {
   const { store, butlerWorkspace } = useApp();
+  // 电脑任务页只负责电脑位置；本机任务有独立面板。两者共用 ButlerClient 语义。
+  const client = useMemo(() => new DesktopButlerClient(store), [store]);
   const nav = useNav();
   const tv = useTheme();
   const styles = useMemo(() => makeStyles(tv), [tv]);
@@ -168,7 +171,7 @@ export function ButlerTasksScreen({ cwd: cwdProp }: { cwd?: string }) {
       const generation = ++loadGeneration.current;
       if (!soft) setLoading(true);
       try {
-        const list = await store.listButlerTasks();
+        const list = await client.list();
         if (generation !== loadGeneration.current) return;
         applyTasks(list);
         setError(null);
@@ -183,7 +186,7 @@ export function ButlerTasksScreen({ cwd: cwdProp }: { cwd?: string }) {
         }
       }
     },
-    [store, applyTasks],
+    [client, applyTasks],
   );
 
   const isVisible = nav.stack[nav.stack.length - 1]?.name === 'ButlerTasks';
@@ -243,10 +246,7 @@ export function ButlerTasksScreen({ cwd: cwdProp }: { cwd?: string }) {
     setSubmitting(true);
     setError(null);
     try {
-      const task = await store.createButlerTask(
-        input,
-        idemRef.current!.key,
-      );
+      const task = await client.create(input, idemRef.current!.key);
       idemRef.current = null;
       setObjective('');
       setDetailError(null);
@@ -258,13 +258,13 @@ export function ButlerTasksScreen({ cwd: cwdProp }: { cwd?: string }) {
     } finally {
       setSubmitting(false);
     }
-  }, [autoResume, cwd, load, maxRounds, objective, openDetails, store, applyActionTask]);
+  }, [autoResume, client, cwd, load, maxRounds, objective, openDetails, applyActionTask]);
 
   const doCancel = useCallback(
     async (task: ButlerTask) => {
       setActionBusy(true);
       try {
-        const next = await store.cancelButlerTask(task.id);
+        const next = await client.cancel(task.id);
         setDetailError(null);
         applyActionTask(next);
         setSelected((prev) => prev?.id === task.id && next.revision > prev.revision ? next : prev);
@@ -275,7 +275,7 @@ export function ButlerTasksScreen({ cwd: cwdProp }: { cwd?: string }) {
         setActionBusy(false);
       }
     },
-    [load, store, applyActionTask],
+    [client, load, applyActionTask],
   );
 
   const cancel = useCallback(
@@ -292,7 +292,7 @@ export function ButlerTasksScreen({ cwd: cwdProp }: { cwd?: string }) {
     async (task: ButlerTask) => {
       setActionBusy(true);
       try {
-        const next = await store.resumeButlerTask(task.id);
+        const next = await client.resume(task.id);
         setDetailError(null);
         applyActionTask(next);
         setSelected((prev) => prev?.id === task.id && next.revision > prev.revision ? next : prev);
@@ -303,7 +303,7 @@ export function ButlerTasksScreen({ cwd: cwdProp }: { cwd?: string }) {
         setActionBusy(false);
       }
     },
-    [load, store, applyActionTask],
+    [client, load, applyActionTask],
   );
 
   const statusColor = useCallback((status: ButlerTaskStatus): string => {
@@ -650,11 +650,13 @@ function makeStyles(tv: ReturnType<typeof useTheme>) {
       marginTop: tv.space.md,
       backgroundColor: C.accent,
       borderRadius: tv.radius.sm,
+      minHeight: 44,
       paddingVertical: 11,
       paddingHorizontal: 14,
       alignItems: 'center',
+      justifyContent: 'center',
     },
-    primaryText: { color: '#fff', fontSize: tv.type.sm, fontWeight: '600' },
+    primaryText: { color: C.onAccent, fontSize: tv.type.sm, fontWeight: '600' },
     sectionLabel: {
       color: C.textTertiary,
       fontSize: tv.type.micro,
@@ -715,16 +717,22 @@ function makeStyles(tv: ReturnType<typeof useTheme>) {
       borderRadius: tv.radius.sm,
       borderWidth: StyleSheet.hairlineWidth,
       borderColor: C.border,
+      minHeight: 44,
       paddingHorizontal: 14,
       paddingVertical: 10,
+      alignItems: 'center',
+      justifyContent: 'center',
     },
     secondaryText: { color: C.text, fontSize: tv.type.sm },
     dangerBtn: {
       borderRadius: tv.radius.sm,
       borderWidth: StyleSheet.hairlineWidth,
       borderColor: C.danger,
+      minHeight: 44,
       paddingHorizontal: 14,
       paddingVertical: 10,
+      alignItems: 'center',
+      justifyContent: 'center',
     },
     dangerText: { color: C.danger, fontSize: tv.type.sm },
   });

@@ -50,6 +50,16 @@ react {
     //   The list of flags to pass to the Hermes compiler. By default is "-O", "-output-source-map"
     // hermesFlags = ["-O", "-output-source-map"]
 
+    // Verification entry is compiled only into an explicitly isolated test application.
+    if (project.hasProperty('DSH_TEST_ENTRY_FILE')) {
+        if (!project.hasProperty('DSH_TEST_APPLICATION_ID')) {
+            throw new GradleException('A verification entry requires an isolated application id')
+        }
+        entryFile = file(project.property('DSH_TEST_ENTRY_FILE'))
+        if (project.hasProperty('DSH_TEST_METRO_CONFIG')) {
+            bundleConfig = file(project.property('DSH_TEST_METRO_CONFIG'))
+        }
+    }
     /* Autolinking */
     autolinkLibrariesWithApp()
 }
@@ -78,8 +88,32 @@ android {
     compileSdk rootProject.ext.compileSdkVersion
 
     namespace "com.dshpocket"
+    buildFeatures { aidl true }
+    if (project.hasProperty('DSH_TEST_BUILD_TYPE')) {
+        def isolatedType = project.property('DSH_TEST_BUILD_TYPE').toString()
+        if (!project.hasProperty('DSH_TEST_APPLICATION_ID') || !(isolatedType in ['debug', 'release'])) {
+            throw new GradleException('Test build type requires an isolated test application')
+        }
+        testBuildType isolatedType
+    }
+    packagingOptions { jniLibs { useLegacyPackaging = true } }
+    sourceSets.main.jniLibs.srcDir(layout.buildDirectory.dir('generated/runtimeJniLibs'))
+    if (project.hasProperty('DSH_RUNTIME_NATIVE_DIR')) {
+        sourceSets.main.jniLibs.srcDir(project.property('DSH_RUNTIME_NATIVE_DIR'))
+    }
+    if (project.hasProperty('DSH_RUNTIME_ASSETS_DIR')) {
+        sourceSets.main.assets.srcDir(project.property('DSH_RUNTIME_ASSETS_DIR'))
+    }
     defaultConfig {
         applicationId "com.dshpocket"
+        // Explicit isolated package for native/RN lifecycle verification; never a release fallback.
+        if (project.hasProperty('DSH_TEST_APPLICATION_ID')) {
+            def testId = project.property('DSH_TEST_APPLICATION_ID').toString()
+            if (!(testId ==~ /com\.dshoutpost\.p1\.[a-z][a-z0-9_]*/)) {
+                throw new GradleException('Invalid isolated P1 test application id')
+            }
+            applicationId testId
+        }
         minSdkVersion rootProject.ext.minSdkVersion
         targetSdkVersion rootProject.ext.targetSdkVersion
         // versionCode 必须单调递增，否则 Android 拒绝覆盖安装（应用内更新靠它判断）。
@@ -162,6 +196,19 @@ android {
     }
 }
 
+def buildRuntimeRunner = tasks.register('buildRuntimeRunner', Exec) {
+    def runtimeOutput = layout.buildDirectory.dir('generated/runtimeJniLibs')
+    def runtimeAbis = (project.findProperty('reactNativeArchitectures') ?: 'arm64-v8a').toString()
+    inputs.file(file('src/main/cpp/runtime-runner.c'))
+    inputs.file(file('../../scripts/build-runtime-native.mjs'))
+    inputs.property('abis', runtimeAbis)
+    outputs.dir(runtimeOutput)
+    commandLine 'node', file('../../scripts/build-runtime-native.mjs').absolutePath,
+        new File(android.sdkDirectory, 'ndk/' + rootProject.ext.ndkVersion).absolutePath,
+        runtimeOutput.get().asFile.absolutePath, runtimeAbis
+}
+tasks.named('preBuild').configure { dependsOn(buildRuntimeRunner) }
+
 // ── release 签名强制检查（执行阶段）────────────────────────────────
 //
 // 只在「任务图里真的要构建 release 产物」时才检查签名材料。
@@ -207,6 +254,9 @@ gradle.taskGraph.whenReady { graph ->
 dependencies {
     // The version of react-native is set by the React Native Gradle Plugin
     implementation("com.facebook.react:react-android")
+    implementation project(':agent-core')
+    implementation "dev.rikka.shizuku:api:13.1.5"
+    implementation "dev.rikka.shizuku:provider:13.1.5"
 
     // Android 安全存储验证（只进 androidTest APK，不进入正式包）
     androidTestImplementation("androidx.test:runner:1.6.2")

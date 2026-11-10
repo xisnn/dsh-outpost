@@ -1,0 +1,7 @@
+{
+  "formatVersion": 1,
+  "apkBytesMax": 100000000,
+  "runtimeArchiveBytesMax": 750000000,
+  "runtimeUnpackedBytesMax": 700000000,
+  "note": "P6 release gate uses apkBytesMax and P6 ABI/bundle/signing checks. Legacy runtime archive/unpacked budgets apply only to --legacy-runtime builds."
+}

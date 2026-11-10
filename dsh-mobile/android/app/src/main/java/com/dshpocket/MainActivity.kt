@@ -6,6 +6,7 @@ import com.facebook.react.ReactActivity
 import com.facebook.react.ReactActivityDelegate
 import com.facebook.react.defaults.DefaultNewArchitectureEntryPoint.fabricEnabled
 import com.facebook.react.defaults.DefaultReactActivityDelegate
+import com.dshpocket.runtime.RuntimeSupervisor
 
 class MainActivity : ReactActivity() {
 
@@ -13,6 +14,18 @@ class MainActivity : ReactActivity() {
     super.onCreate(savedInstanceState)
     // Recreating the Activity must not enqueue the same external share a second time.
     if (savedInstanceState == null) ShareInbox.capture(this, intent)
+  }
+
+  override fun onResume() {
+    super.onResume()
+    // A visible app is an explicit user session: keep an idle local runtime
+    // (e.g. while managing memory) until the 15-minute service cap or a stop.
+    RuntimeSupervisor.setAppForeground(true)
+  }
+
+  override fun onPause() {
+    RuntimeSupervisor.setAppForeground(false)
+    super.onPause()
   }
 
   override fun onNewIntent(intent: Intent) {

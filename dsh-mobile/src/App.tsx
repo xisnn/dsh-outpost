@@ -11,7 +11,7 @@
  *         Sessions
  *         Chat
  */
-import React, { useCallback, useEffect, useMemo, useState } from 'react';
+import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { ActivityIndicator, Alert, AppState, type AppStateStatus, StatusBar, StyleSheet, View } from 'react-native';
 import { SafeAreaProvider } from 'react-native-safe-area-context';
 import { GestureHandlerRootView } from 'react-native-gesture-handler';
@@ -57,6 +57,9 @@ import { ThemeProvider, useTheme } from './design/theme';
 import { MotionProvider } from './design/motion';
 import { themeLabels, type ThemeMode } from './design/tokens';
 import { buildButlerPrime, BUTLER_PRIME_VERSION } from './core/butler';
+import { loadHostLocation, saveHostLocation, type HostLocation } from './core/hostLocation';
+import { shouldEnterApp } from './core/entryGate';
+import { localRuntimeAvailable } from './core/localRuntimeSupport';
 import { NavHost, type Screen } from './nav/NavHost';
 import { SharedInboxHost } from './components/SharedInboxHost';
 import { NoticeHost } from './components/NoticeHost';
@@ -69,6 +72,11 @@ import { DevicesScreen } from './screens/DevicesScreen';
 import { WorkspacesScreen } from './screens/WorkspacesScreen';
 import { TaskBoardScreen } from './screens/TaskBoardScreen';
 import { ButlerTasksScreen } from './screens/ButlerTasksScreen';
+import { ButlerMemoryScreen } from './screens/ButlerMemoryScreen';
+import { AgentDemoScreen } from './screens/AgentDemoScreen';
+import { AgentSettingsScreen } from './screens/AgentSettingsScreen';
+import { AgentMemoryScreen } from './screens/AgentMemoryScreen';
+import { BackgroundDisplayScreen } from './screens/BackgroundDisplayScreen';
 
 // 旧版本明文凭据键（@dsh/cookie / @dsh/lastCookie / @dsh/gatewayToken /
 // @dsh/gatewayDeviceId）统一由 core/credentialMigration.ts 管理 ——
@@ -225,6 +233,13 @@ export interface AppContextValue {
   /** 管家模式：开启后首页直接跟管家对话，工作区列表退到「我的」里 */
   butlerMode: boolean;
   setButlerMode: (on: boolean) => void;
+  /** 管家任务执行位置：电脑（默认）或本机。不影响普通聊天与配对。 */
+  location: HostLocation;
+  setLocation: (next: HostLocation) => void;
+  /** 是否已通过电脑配对认证；本机独立模式为 false。 */
+  authed: boolean;
+  /** 未配对时进入本机管家；不创建电脑会话、不伪造登录。 */
+  enterLocalOnly: () => void;
   /** 管家会话（首次开启时创建并持久化） */
   butlerSessionId: string | null;
   butlerBusy: boolean;
@@ -456,6 +471,8 @@ export default function App() {
   const [cookie, setCookie] = useState<string | undefined>(undefined);
   // 管家模式
   const [butlerMode, setButlerModeState] = useState(false);
+  // 管家任务执行位置：电脑（默认，保持升级前行为）或本机
+  const [location, setLocationState] = useState<HostLocation>('desktop');
   const [butlerSessionId, setButlerSessionId] = useState<string | null>(null);
   // 管家绑定的工作区；null 表示还没选过，需要引导用户选一个
   const [butlerWorkspace, setButlerWorkspace] = useState<string | null>(null);
@@ -562,6 +579,10 @@ export default function App() {
         if (savedButlerSession) setButlerSessionId(savedButlerSession);
         const savedButlerWs = await AsyncStorage.getItem(BUTLER_WORKSPACE_KEY);
         if (savedButlerWs) setButlerWorkspace(savedButlerWs);
+        // 位置必须在 setReady(true) 之前读：晚读会让首页先挂载电脑管家面板。
+        // 设备不再支持本机（如备份还原到 iOS/32 位）时回到电脑，避免停在不可用面板。
+        const savedLocation = await loadHostLocation(AsyncStorage);
+        setLocationState(savedLocation === 'local' && !localRuntimeAvailable() ? 'desktop' : savedLocation);
 
         // ── 旧版本明文凭据迁移 ────────────────────────────────────
         //
@@ -1309,6 +1330,8 @@ export default function App() {
       setButlerModeState(on);
       void AsyncStorage.setItem(BUTLER_KEY, on ? '1' : '0');
       if (!on) return;
+      // 本机管家不需要电脑会话；切回电脑位置时会按需补建（见 setLocation）。
+      if (location === 'local') return;
       // 还没有会话或还没绑工作区 → 先让用户选一个项目。
       // 每次都问太烦，所以只在「没绑过」或「会话丢了」时才弹。
       void (async () => {
@@ -1316,8 +1339,55 @@ export default function App() {
         if (!id) setButlerNeedWorkspace(true);
       })();
     },
-    [ensureButlerSession],
+    [ensureButlerSession, location],
   );
+
+  /**
+   * 切换管家执行位置。只影响管家任务面板，不改连接、Cookie、审批网关或普通聊天。
+   * 选择本机会顺带开启管家模式（否则首页根本没有管家面板）；
+   * 切回电脑时若还没有电脑管家会话，按需补建，而不是把用户丢在「未准备」占位页。
+   * 持久化失败不回滚界面选择 —— 下次启动会回到上一次成功落盘的位置。
+   */
+  const setLocation = useCallback(
+    (next: HostLocation) => {
+      setLocationState(next);
+      void saveHostLocation(AsyncStorage, next).catch(() => undefined);
+      if (next === 'local') {
+        setButlerModeState(true);
+        void AsyncStorage.setItem(BUTLER_KEY, '1');
+        return;
+      }
+      if (authed && butlerMode && !butlerSessionId) {
+        void (async () => {
+          const id = await ensureButlerSession();
+          if (!id) setButlerNeedWorkspace(true);
+        })();
+      }
+    },
+    [authed, butlerMode, butlerSessionId, ensureButlerSession],
+  );
+
+  /** 未配对时进入本机管家：只落位置与管家模式，不触发任何电脑请求。 */
+  const enterLocalOnly = useCallback(() => {
+    setLocationState('local');
+    setButlerModeState(true);
+    void saveHostLocation(AsyncStorage, 'local').catch(() => undefined);
+    void AsyncStorage.setItem(BUTLER_KEY, '1');
+  }, []);
+
+  // 配对成功或从本机切回电脑后，若管家模式已开但还没有电脑会话，补建一次。
+  // 用 key 防止“没有工作区/网络暂时失败”时无限重试；用户仍可在配对页或
+  // 工作区选择器里手动处理。
+  const autoSessionKey = useRef('');
+  useEffect(() => {
+    if (!ready || !authed || !butlerMode || location !== 'desktop' || butlerSessionId) return;
+    if (!baseUrl || autoSessionKey.current === baseUrl) return;
+    autoSessionKey.current = baseUrl;
+    void (async () => {
+      const id = await ensureButlerSession();
+      if (!id) setButlerNeedWorkspace(true);
+    })();
+  }, [ready, authed, butlerMode, location, butlerSessionId, baseUrl, ensureButlerSession]);
 
   /** 用户选好管家工作区：建会话并绑定 */
   const pickButlerWorkspace = useCallback(
@@ -1338,6 +1408,10 @@ export default function App() {
       clearAuthorization,
       butlerMode,
       setButlerMode,
+      location,
+      setLocation,
+      authed,
+      enterLocalOnly,
       butlerSessionId,
       butlerBusy,
       butlerNeedWorkspace,
@@ -1359,6 +1433,10 @@ export default function App() {
       clearAuthorization,
       butlerMode,
       setButlerMode,
+      location,
+      setLocation,
+      authed,
+      enterLocalOnly,
       butlerSessionId,
       butlerBusy,
       butlerNeedWorkspace,
@@ -1381,6 +1459,9 @@ export default function App() {
     );
   }
 
+  // 未配对时只有「本机 + 管家模式」可以进入；其余仍走配对页。
+  const enterApp = shouldEnterApp({ authed, location, butlerMode });
+
   return (
     <GestureHandlerRootView style={{ flex: 1 }}>
       <SafeAreaProvider>
@@ -1389,7 +1470,7 @@ export default function App() {
             <MotionProvider>
               <BottomSheetModalProvider>
                 <ThemedStatusBar />
-                {authed ? <NavHost initial={{ name: 'Home' }} render={renderScreen} rootIsList={!butlerMode} /> : <PairScreen />}
+                {enterApp ? <NavHost initial={{ name: 'Home' }} render={renderScreen} rootIsList={!butlerMode} /> : <PairScreen />}
                 {/* 全局通知横幅：盖在导航之上，任意页面都能看到 */}
                 {authed ? <GlobalNotices /> : null}
                 {authed ? <SharedInboxHost /> : null}
@@ -1545,6 +1626,16 @@ function renderScreen(screen: Screen, active: boolean) {
           cwd={screen.params?.cwd ? String(screen.params.cwd) : undefined}
         />
       );
+    case 'ButlerMemory':
+      return <ButlerMemoryScreen active={active} />;
+    case 'AgentDemo':
+      return <AgentDemoScreen active={active} />;
+    case 'AgentSettings':
+      return <AgentSettingsScreen />;
+    case 'AgentMemory':
+      return <AgentMemoryScreen active={active} />;
+    case 'BackgroundDisplay':
+      return <BackgroundDisplayScreen />;
     case 'Subagent':
       // 队员事件流：只读，用 subagent 地址才读得到
       return (

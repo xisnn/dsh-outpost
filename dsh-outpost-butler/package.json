@@ -23,6 +23,6 @@
     "dsh": ">=0.2.0 <0.3.0"
   },
   "scripts": {
-    "test": "node --test test/task-store.test.mjs test/task-manager.test.mjs test/task-api.test.mjs test/deliverables.test.mjs"
+    "test": "node --test test/task-store.test.mjs test/task-manager.test.mjs test/task-api.test.mjs test/deliverables.test.mjs test/local-commands.test.mjs test/memory-store.test.mjs"
   }
 }
