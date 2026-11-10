@@ -333,6 +333,39 @@ try {
     );
   }
 
+  // BUG-01 的真正危害不是"少跑几条测试"，而是 `tsc --noEmit` 作为链尾
+  // 在任何前置失败时都从不执行 —— 类型错误可以长期无人发现。
+  // 上面 §4 的链条是全绿的，证明不了这一点，所以单独造一条前面必失败的。
+  fx.writePkg({
+    suite: 'node f/fail1.mjs && tsc --noEmit',
+  });
+  fx.clearMarkers();
+  const r4tsc = fx.runIn(['suite']);
+
+  check(r4tsc.code === 1, '前置失败 → 聚合器退出码 1', `实际 ${r4tsc.code}`);
+  check(fx.marker('fail1') !== null, '前置命令（fail1）确实跑了');
+  {
+    const tscArgv = JSON.parse(fx.marker('stub-tsc') ?? 'null');
+    check(
+      tscArgv !== null,
+      '**前置失败时 tsc --noEmit 仍然执行**（&& 链在这里会截断，类型检查永不运行）',
+    );
+    check(
+      Array.isArray(tscArgv) && tscArgv[0] === '--noEmit',
+      '这条被执行的 tsc 收到了原样的 --noEmit',
+      JSON.stringify(tscArgv),
+    );
+  }
+  check(
+    /类型检查（tsc --noEmit）：已执行/.test(r4tsc.out),
+    '汇总单独报告了类型检查的执行状态（不让人靠猜）',
+    r4tsc.out.split('\n').filter((l) => /类型检查/.test(l)).join(''),
+  );
+  check(
+    /f\/fail1\.mjs/.test(r4tsc.out),
+    '失败清单仍然列出了前置失败（tsc 通过不等于整条链通过）',
+  );
+
   // ── 5. 响亮失败：绝不静默跳过或猜测 ──
   console.log('');
   console.log('── 5. 未知形态必须响亮报错，不得静默跳过 ──');
