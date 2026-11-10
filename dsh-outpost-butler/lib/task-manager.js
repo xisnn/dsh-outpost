@@ -695,10 +695,18 @@ export class TaskManager {
     if (this.disposed || this.store.get(id)?.status !== 'preparing') return;
 
     const created = await this.sessionController.create({ cwd: task.cwd });
-    if (this.disposed || this.store.get(id)?.status !== 'preparing') return;
     const sessionId = created.sessionId;
+    // Record the session before yielding to cancellation. sessionController's
+    // contract has no close/delete, so a session that exists in the host but is
+    // referenced by nothing here can never be adopted, resumed or attributed an
+    // event again: it leaks for the life of the host process.
+    //
+    // The patch deliberately carries no status. persist() drops an entire patch
+    // that would move a terminal task backwards, so pairing sessionId with
+    // 'preparing' would lose the session id on exactly the cancelled task that
+    // needs it recorded.
     this.sessionToTask.set(sessionId, id);
-    task = await this.persist(id, { sessionId, status: 'preparing' });
+    task = await this.persist(id, { sessionId });
     if (this.disposed || this.store.get(id)?.status !== 'preparing') return;
 
     const agent = await this.resolveAgentCold(task);

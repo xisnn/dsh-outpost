@@ -150,6 +150,28 @@ test('create starts a session, resolves an agent and creates a goal', async () =
   assert.equal(goals.byAgent.get('session-1').phase, 'active');
 });
 
+test('a session allocated while the task is cancelled is still recorded', async () => {
+  const { manager, store, sessions } = await setup();
+  const realCreate = sessions.create.bind(sessions);
+  sessions.create = async (options) => {
+    const created = await realCreate(options);
+    // The cancel lands in the window between the host allocating a session and
+    // the manager recording it.
+    await manager.cancel(store.list()[0].id);
+    return created;
+  };
+
+  const created = await manager.create({ objective: 'o', cwd: WORKSPACE });
+  await waitFor(() => store.get(created.id).status === 'cancelled');
+
+  // The cancel stays authoritative, but sessionController's contract has no
+  // close/delete, so the recorded id is the only handle on the session. Losing
+  // it leaks the session for the life of the host and leaves its events
+  // unattributable.
+  assert.equal(store.get(created.id).sessionId, 'session-1');
+  assert.equal(manager.sessionToTask.get('session-1'), created.id);
+});
+
 test('goal complete maps the task to completed', async () => {
   const { manager, store, goals, sessions } = await setup();
   const created = await manager.create({ objective: 'o', cwd: WORKSPACE });
