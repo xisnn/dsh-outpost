@@ -35,10 +35,29 @@
 
 .DESCRIPTION
     返回一个对象：
-      ShouldCheck  —— 是否需要做这次检查（false 表示不适用：跳过开关/未装插件/无补丁脚本）
-      ExitCode     —— apply.mjs --check 的退出码（0 = 已应用；非 0 = 未应用或出错）
-      Output       —— apply.mjs 的原始输出（给用户看的详情）
-      Reason       —— 不检查的原因（ShouldCheck 为 false 时）
+      ShouldCheck      —— 是否需要做这次检查（false 表示不适用：跳过开关/未装插件/无补丁脚本）
+      ExitCode         —— apply.mjs --check 的退出码（0 = 已应用；非 0 = 未应用或出错）
+      Output           —— apply.mjs 的原始输出（给用户看的详情）
+      Reason           —— 不检查的原因（ShouldCheck 为 false 时）
+      ExitCodeProvided —— 检查器是否**真的**给出了一个可用的整数退出码
+
+    ## 为什么要有 ExitCodeProvided
+
+    `[int]$null` 在 PowerShell 里等于 **0**。所以检查器"什么都没说"
+    （返回缺 ExitCode 的哈希表、返回 `$null`、返回一个字符串……）时，
+    上面的 `ExitCode` 会是 0 —— 与"检查通过"**完全无法区分**。
+
+    这个字段就是在转换发生**之前**把这件事记下来。它是**纯附加**的：
+    `ExitCode` / `Output` 的算法逐字未改，局域网路径（start-dsh-web.ps1）
+    不读它，所以局域网行为完全不变。只有公网侧的
+    `Resolve-PublicTunnelGatewayGate` 会用它拒绝"未确认"的状态。
+
+    实测过的折叠形态：缺 ExitCode 键、ExitCode=$null、ExitCode=''、
+    返回字符串而非哈希表、什么都不返回、ExitCode=$false（`[int]$false` = 0，
+    最危险的一条）—— 全部记为 ExitCodeProvided = $false。
+    另一类（ExitCode='not-a-number'）会让 `[int]` 转换**抛异常**，
+    这个行为**刻意保留**：改成"安全返回 0"反而会让局域网从
+    "崩溃即拒绝"变成"放行"。
 
 .PARAMETER PatchScript
     apply.mjs 的路径。
@@ -71,28 +90,34 @@ function Test-GatewayPatchApplied {
     # 不适用的三种情况：明确返回 ShouldCheck=false，由调用方静默跳过。
     # 注意：这**不是**「把门禁关掉」——调用方仍然按 fail-closed 规则处理
     # 真正需要检查的场景。
+    #
+    # 三条都带 ExitCodeProvided = $false（没跑检查器，自然没有退出码），
+    # 使 gate 对象的**形状统一**：调用方不必先判断字段是否存在。
     if ($Skip) {
         return [pscustomobject]@{
-            ShouldCheck = $false
-            ExitCode    = 0
-            Output      = ''
-            Reason      = 'SkipGatewayPatchCheck'
+            ShouldCheck      = $false
+            ExitCode         = 0
+            Output           = ''
+            Reason           = 'SkipGatewayPatchCheck'
+            ExitCodeProvided = $false
         }
     }
     if (-not $PluginInstalled) {
         return [pscustomobject]@{
-            ShouldCheck = $false
-            ExitCode    = 0
-            Output      = ''
-            Reason      = 'plugin-not-installed'
+            ShouldCheck      = $false
+            ExitCode         = 0
+            Output           = ''
+            Reason           = 'plugin-not-installed'
+            ExitCodeProvided = $false
         }
     }
     if (-not (Test-Path -LiteralPath $PatchScript)) {
         return [pscustomobject]@{
-            ShouldCheck = $false
-            ExitCode    = 0
-            Output      = ''
-            Reason      = 'patch-script-missing'
+            ShouldCheck      = $false
+            ExitCode         = 0
+            Output           = ''
+            Reason           = 'patch-script-missing'
+            ExitCodeProvided = $false
         }
     }
 
@@ -118,11 +143,26 @@ function Test-GatewayPatchApplied {
     }
 
     $result = & $CheckRunner $PatchScript
+
+    # `[int]$null` 在 PowerShell 里等于 0 —— 检查器"什么都没说"会被折叠成
+    # "检查通过"，而这个信息一旦折叠就**再也拿不回来**。所以在转换之前先记下来。
+    #
+    # 这是**纯附加字段**：下面 ExitCode / Output 的算法逐字未改（包括
+    # `[int]'not-a-number'` 会抛转换异常这一点 —— 那个异常在两条路径上都是
+    # fail-closed 的，改成"安全返回 0"反而会让局域网从"崩溃即拒绝"变成"放行"）。
+    # 局域网路径不读这个字段，因此其行为完全不变。
+    $rawCode = $result.ExitCode
+    $codeProvided = ($null -ne $rawCode) -and (
+        ($rawCode -is [int]) -or ($rawCode -is [long]) -or
+        (($rawCode -is [string]) -and ($rawCode -match '^-?\d+$'))
+    )
+
     return [pscustomobject]@{
-        ShouldCheck = $true
-        ExitCode    = [int]$result.ExitCode
-        Output      = [string]$result.Output
-        Reason      = ''
+        ShouldCheck      = $true
+        ExitCode         = [int]$result.ExitCode
+        Output           = [string]$result.Output
+        Reason           = ''
+        ExitCodeProvided = [bool]$codeProvided
     }
 }
 
@@ -157,8 +197,22 @@ function Test-GatewayPatchApplied {
 
     ## 判定规则
 
-    **只有一条放行路径**：`ShouldCheck = $true` 且 `ExitCode` 严格等于整数 0。
+    **只有一条放行路径**：`ShouldCheck` 严格为布尔 `$true`、`ExitCodeProvided`
+    严格为布尔 `$true`、且 `ExitCode` 严格等于整数 `0`。
     其余一切状态（含无法判定、结果畸形、结果为空）全部拒绝。
+
+    三处类型检查都是**刻意**的严格，因为 PowerShell 的隐式转换会把
+    "未确认"变成"通过"：
+
+      · `[int]$null` = 0 —— 检查器没给退出码 → 看起来像通过。
+        靠 `ExitCodeProvided` 拦（`exit-code-not-provided`）。
+      · `if ('false')` 为真 —— 非空字符串一律 truthy。
+        所以 `ShouldCheck = 'false'` 会被当成"需要检查"，配上 ExitCode=0 就放行。
+        靠 `-isnot [bool]` 拦（`shouldcheck-not-boolean`）。
+      · `[int]$false` = 0 —— 同上，最隐蔽的一条。
+
+    字段缺失（含缺 `ExitCodeProvided`）一律算 `gate-result-malformed` 并拒绝：
+    旧形态的合成 gate 不该被默认放行。
 
     刻意**不**改 `Test-GatewayPatchApplied` 的语义 —— 局域网路径依赖它，
     收紧只发生在公网侧的这个翻译层。
@@ -188,7 +242,7 @@ function Resolve-PublicTunnelGatewayGate {
     }
 
     $names = @($Gate.PSObject.Properties.Name)
-    foreach ($required in @('ShouldCheck', 'ExitCode', 'Reason')) {
+    foreach ($required in @('ShouldCheck', 'ExitCode', 'Reason', 'ExitCodeProvided')) {
         if ($names -notcontains $required) {
             return [pscustomobject]@{
                 Allow  = $false
@@ -198,7 +252,34 @@ function Resolve-PublicTunnelGatewayGate {
         }
     }
 
+    # ShouldCheck 必须是**严格的布尔**。PowerShell 里 if ('false') 为真
+    # （非空字符串一律 truthy），所以不做类型检查的话，ShouldCheck = 'false'
+    # 会被当成"需要检查"，再配上 ExitCode = 0 就**放行**了。
+    if ($Gate.ShouldCheck -isnot [bool]) {
+        return [pscustomobject]@{
+            Allow  = $false
+            Reason = 'shouldcheck-not-boolean'
+            Detail = "门禁结果的 ShouldCheck 不是布尔值（实际类型：$(if ($null -eq $Gate.ShouldCheck) { 'null' } else { $Gate.ShouldCheck.GetType().Name })），无法判定。"
+        }
+    }
+
     if ($Gate.ShouldCheck) {
+        # 检查器有没有**真的**给出退出码。没有 → 折叠出来的 0 不算通过。
+        if ($Gate.ExitCodeProvided -isnot [bool]) {
+            return [pscustomobject]@{
+                Allow  = $false
+                Reason = 'gate-result-malformed'
+                Detail = '门禁结果的 ExitCodeProvided 不是布尔值，无法判定。'
+            }
+        }
+        if (-not $Gate.ExitCodeProvided) {
+            return [pscustomobject]@{
+                Allow  = $false
+                Reason = 'exit-code-not-provided'
+                Detail = '检查器没有返回有效的退出码；ExitCode 里的 0 是 [int]$null 折叠出来的，不代表检查通过。'
+            }
+        }
+
         $raw = $Gate.ExitCode
         $code = $null
         if ($raw -is [int] -or $raw -is [long]) {

@@ -391,7 +391,203 @@ function callGate(opts) {
       "  Write-Output 'NULLGATE|'",
       '} else {',
       '  Write-Output ("GATE|" + $gate.ShouldCheck + "|" + $gate.ExitCode + "|" + $gate.Reason)',
+      // 单独一行报告"检查器是否真的给了退出码"这个附加字段。
+      // 分成 hasField 与 value 两段，才能区分「字段根本不存在」和「字段存在但为 false」——
+      // 前者是修复前的状态，后者是修复后检查器没给码的状态。
+      '  $hasProv = @($gate.PSObject.Properties.Name) -contains "ExitCodeProvided"',
+      '  Write-Output ("PROVIDED|" + $hasProv + "|" + $gate.ExitCodeProvided)',
       '}',
+    ].join('\n'),
+  );
+  let out = '';
+  try {
+    out = execFileSync(
+      ps.exe,
+      ['-NoProfile', '-NonInteractive', '-ExecutionPolicy', 'Bypass', '-File', driver],
+      { encoding: 'utf8', timeout: 120000, stdio: ['ignore', 'pipe', 'pipe'] },
+    );
+  } catch (e) {
+    out = String(e.stdout || '') + String(e.stderr || '');
+  }
+  rmSync(fx.root, { recursive: true, force: true });
+  const lines = out
+    .split(/\r?\n/)
+    .map((s) => s.trim());
+  const gateLine = lines.find((s) => /^(GATE\||THREW\||NULLGATE\|)/.test(s));
+  const provLine = lines.find((s) => /^PROVIDED\|/.test(s));
+  return {
+    gate: gateLine || 'NO_OUTPUT|' + out.slice(0, 200).replace(/\s+/g, ' '),
+    // PROVIDED|<字段是否存在>|<字段值>
+    hasField: /^PROVIDED\|True\|/.test(provLine || ''),
+    providedValue: (provLine || '').split('|')[2] ?? '',
+    providedLine: provLine || 'NO_PROVIDED_LINE',
+    raw: out,
+  };
+}
+
+// 分支 1：Skip
+{
+  const r = callGate({ skip: true, pluginInstalled: true });
+  check(
+    /^GATE\|False\|0\|SkipGatewayPatchCheck$/.test(r.gate),
+    '分支1 $Skip → ShouldCheck=False / Reason=SkipGatewayPatchCheck',
+    r.gate,
+  );
+  check(r.hasField, '分支1 也带 ExitCodeProvided 字段（对象形状统一）', r.providedLine);
+}
+// 分支 2：插件未安装
+{
+  const r = callGate({ pluginInstalled: false });
+  check(
+    /^GATE\|False\|0\|plugin-not-installed$/.test(r.gate),
+    '分支2 插件未安装 → ShouldCheck=False / Reason=plugin-not-installed',
+    r.gate,
+  );
+  check(r.hasField, '分支2 也带 ExitCodeProvided 字段（对象形状统一）', r.providedLine);
+}
+// 分支 3：补丁脚本缺失
+{
+  const r = callGate({ pluginInstalled: true, patchScriptMissing: true });
+  check(
+    /^GATE\|False\|0\|patch-script-missing$/.test(r.gate),
+    '分支3 补丁脚本缺失 → ShouldCheck=False / Reason=patch-script-missing',
+    r.gate,
+  );
+  check(r.hasField, '分支3 也带 ExitCodeProvided 字段（对象形状统一）', r.providedLine);
+}
+// 分支 4：真正执行检查
+{
+  const r = callGate({ pluginInstalled: true, fixture: { patched: true } });
+  check(/^GATE\|True\|0\|$/.test(r.gate), '分支4 补丁已应用 → ShouldCheck=True / ExitCode=0', r.gate);
+  check(
+    r.hasField && r.providedValue === 'True',
+    '分支4 补丁已应用 → ExitCodeProvided=True（检查器确实给了整数退出码）',
+    r.providedLine,
+  );
+}
+{
+  const r = callGate({ pluginInstalled: true, fixture: { patched: false } });
+  check(/^GATE\|True\|1\|$/.test(r.gate), '分支4 补丁未应用 → ShouldCheck=True / ExitCode=1', r.gate);
+  check(
+    r.hasField && r.providedValue === 'True',
+    '分支4 补丁未应用 → ExitCodeProvided=True（非零码也是"给了码"）',
+    r.providedLine,
+  );
+}
+// 检查器抛异常
+{
+  const r = callGate({
+    pluginInstalled: true,
+    runner: "{ param($s) throw 'CHECKER_BOOM' }",
+  });
+  check(
+    /^THREW\|/.test(r.gate) && /CHECKER_BOOM/.test(r.gate),
+    '检查器抛异常 → 异常向上传播（不返回 gate）',
+    r.gate,
+  );
+}
+
+console.log('');
+console.log('── 4b. 检查器没给退出码：[int]$null 折叠成 0 的信息必须在模块层保住 ──');
+
+// 这是本轮（P2.2）要修的点。修复前：模块返回 ExitCode=0 且**没有**任何字段
+// 能区分"检查器说通过"和"检查器什么都没说"，决策函数因此无从判断。
+const NO_CODE_RUNNERS = [
+  { label: '返回的哈希表缺 ExitCode 键', runner: "{ param($s) return @{ Output = 'no-exit-code' } }" },
+  { label: '返回 ExitCode = $null', runner: "{ param($s) return @{ ExitCode = $null; Output = 'x' } }" },
+  { label: '返回 ExitCode = 空字符串', runner: "{ param($s) return @{ ExitCode = ''; Output = 'x' } }" },
+  { label: '返回一个字符串而不是哈希表', runner: "{ param($s) return 'just-a-string' }" },
+  { label: '什么都不返回（$null）', runner: '{ param($s) }' },
+  // 布尔能被 [int] 转换（$true→1、$false→0），所以**不抛异常**，
+  // 但同样不是"检查器给了一个退出码"。$false 那条尤其危险：
+  // [int]$false = 0，局域网会当成通过 —— 公网侧靠 ExitCodeProvided 拦住。
+  { label: '返回 ExitCode = 布尔 $true', runner: "{ param($s) return @{ ExitCode = $true; Output = 'x' } }" },
+  { label: '返回 ExitCode = 布尔 $false（[int]$false=0，最危险的一条）', runner: "{ param($s) return @{ ExitCode = $false; Output = 'x' } }" },
+];
+
+// 这一类**不会**被折叠成 0，而是让 `[int]$result.ExitCode` 直接抛转换异常。
+// 实测确认过：模块输出 THREW|Cannot convert value "not-a-number" to type "System.Int32"。
+//
+// 抛异常在这里是**可接受**的：公网路径有 try/catch → gate=$null → 拒绝；
+// 局域网路径没有 catch → 未捕获错误 → 脚本非零退出 → 同样不会启动。
+// 两边都是 fail-closed。
+//
+// ⚠️ 因此修复**必须保留**这行的抛异常行为。若把它改成"安全地返回 0"，
+// 局域网就会从"崩溃即拒绝"变成"ExitCode=0 即放行" —— 那是把 LAN 改坏了。
+const THROWING_RUNNERS = [
+  { label: '返回 ExitCode = 非数值字符串', runner: "{ param($s) return @{ ExitCode = 'not-a-number'; Output = 'x' } }" },
+];
+
+for (const c of THROWING_RUNNERS) {
+  const r = callGate({ pluginInstalled: true, runner: c.runner });
+  console.log(`       [诊断] ${c.label} → ${r.gate.slice(0, 110)}`);
+  check(
+    /^THREW\|/.test(r.gate),
+    `${c.label} → 模块抛转换异常（**刻意保留**：改成返回 0 会让局域网从"崩溃即拒绝"变成"放行"）`,
+    r.gate,
+  );
+}
+
+for (const c of NO_CODE_RUNNERS) {
+  const r = callGate({ pluginInstalled: true, runner: c.runner });
+  console.log(`       [诊断] ${c.label} → 模块返回 ${r.gate} / ${r.providedLine}`);
+  check(
+    r.hasField,
+    `${c.label} → gate 带 ExitCodeProvided 字段`,
+    r.providedLine,
+  );
+  check(
+    r.hasField && r.providedValue === 'False',
+    `${c.label} → **ExitCodeProvided=False**（折叠成 0 的事实被记录下来，而不是丢失）`,
+    r.providedLine,
+  );
+}
+
+// 对照：给了合法整数码（含 0 与非 0）时必须标记为 True，
+// 否则"收紧"会退化成"永远拒绝"，把正常启动也挡掉。
+const CODE_RUNNERS = [
+  { label: 'ExitCode = 0', runner: "{ param($s) return @{ ExitCode = 0; Output = 'ok' } }" },
+  { label: 'ExitCode = 1', runner: "{ param($s) return @{ ExitCode = 1; Output = 'bad' } }" },
+  { label: "ExitCode = '0'（数值字符串）", runner: "{ param($s) return @{ ExitCode = '0'; Output = 'ok' } }" },
+  { label: 'ExitCode = -1', runner: '{ param($s) return @{ ExitCode = -1; Output = "sig" } }' },
+];
+for (const c of CODE_RUNNERS) {
+  const r = callGate({ pluginInstalled: true, runner: c.runner });
+  check(
+    r.hasField && r.providedValue === 'True',
+    `${c.label} → ExitCodeProvided=True（正常路径不被误伤）`,
+    r.providedLine,
+  );
+}
+
+console.log('');
+console.log('── 4c. 真实组合：真 Test-GatewayPatchApplied → 真 Resolve-PublicTunnelGatewayGate ──');
+
+/**
+ * 在**同一个** PowerShell 进程里串起两个真实函数：
+ * 注入各种形态的检查器 → 拿到真实 gate → 交给真实决策函数。
+ * 这是最强的一层证据：不重新实现任何一端，也不靠字符串匹配。
+ */
+function composeGateThenDecide(runner) {
+  const fx = makeFixture({ patched: true });
+  const driver = path.join(fx.root, 'compose.ps1');
+  writePowerShellScript(
+    driver,
+    [
+      "$ErrorActionPreference = 'Stop'",
+      `. ${q(gateModule)}`,
+      'if (-not (Get-Command Resolve-PublicTunnelGatewayGate -ErrorAction SilentlyContinue)) {',
+      "  Write-Output 'COMP|NO_FUNCTION|'",
+      '  exit 0',
+      '}',
+      `$patchScript = ${q(path.join(fx.root, 'patches', 'mobile-gateway-mgmt-auth', 'apply.mjs'))}`,
+      '$gate = $null',
+      '$caught = ""',
+      'try {',
+      `  $gate = Test-GatewayPatchApplied -PatchScript $patchScript -Skip:$false -PluginInstalled:$true -CheckRunner ${runner}`,
+      '} catch { $caught = $_.Exception.Message; $gate = $null }',
+      '$d = Resolve-PublicTunnelGatewayGate -Gate $gate',
+      'Write-Output ("COMP|" + $d.Allow + "|" + $d.Reason)',
     ].join('\n'),
   );
   let out = '';
@@ -408,66 +604,38 @@ function callGate(opts) {
   const line = out
     .split(/\r?\n/)
     .map((s) => s.trim())
-    .find((s) => /^(GATE\||THREW\||NULLGATE\|)/.test(s));
+    .find((s) => /^COMP\|/.test(s));
   return line || 'NO_OUTPUT|' + out.slice(0, 200).replace(/\s+/g, ' ');
 }
 
-// 分支 1：Skip
-{
-  const r = callGate({ skip: true, pluginInstalled: true });
+for (const c of NO_CODE_RUNNERS) {
+  const r = composeGateThenDecide(c.runner);
   check(
-    /^GATE\|False\|0\|SkipGatewayPatchCheck$/.test(r),
-    '分支1 $Skip → ShouldCheck=False / Reason=SkipGatewayPatchCheck',
+    /^COMP\|False\|/.test(r),
+    `组合验证：${c.label} → 公网**必定拒绝**（不得放行）`,
     r,
   );
 }
-// 分支 2：插件未安装
 {
-  const r = callGate({ pluginInstalled: false });
+  const r = composeGateThenDecide("{ param($s) throw 'CHECKER_BOOM' }");
+  check(/^COMP\|False\|/.test(r), '组合验证：检查器抛异常 → 公网必定拒绝', r);
+}
+for (const c of THROWING_RUNNERS) {
+  const r = composeGateThenDecide(c.runner);
   check(
-    /^GATE\|False\|0\|plugin-not-installed$/.test(r),
-    '分支2 插件未安装 → ShouldCheck=False / Reason=plugin-not-installed',
+    /^COMP\|False\|/.test(r),
+    `组合验证：${c.label}（模块抛异常）→ 公网必定拒绝`,
     r,
   );
 }
-// 分支 3：补丁脚本缺失
 {
-  const r = callGate({ pluginInstalled: true, patchScriptMissing: true });
-  check(
-    /^GATE\|False\|0\|patch-script-missing$/.test(r),
-    '分支3 补丁脚本缺失 → ShouldCheck=False / Reason=patch-script-missing',
-    r,
-  );
-}
-// 分支 4：真正执行检查
-{
-  const r = callGate({ pluginInstalled: true, fixture: { patched: true } });
-  check(/^GATE\|True\|0\|$/.test(r), '分支4 补丁已应用 → ShouldCheck=True / ExitCode=0', r);
+  // 反向对照：检查器给了 0 → 必须放行。少了这条，"全部拒绝"也能让上面全绿。
+  const r = composeGateThenDecide("{ param($s) return @{ ExitCode = 0; Output = 'ok' } }");
+  check(/^COMP\|True\|/.test(r), '组合验证（反向对照）：检查器给了 ExitCode=0 → 放行', r);
 }
 {
-  const r = callGate({ pluginInstalled: true, fixture: { patched: false } });
-  check(/^GATE\|True\|1\|$/.test(r), '分支4 补丁未应用 → ShouldCheck=True / ExitCode=1', r);
-}
-// 检查器抛异常
-{
-  const r = callGate({
-    pluginInstalled: true,
-    runner: "{ param($s) throw 'CHECKER_BOOM' }",
-  });
-  check(/^THREW\|/.test(r) && /CHECKER_BOOM/.test(r), '检查器抛异常 → 异常向上传播（不返回 gate）', r);
-}
-// 检查器返回缺 ExitCode 的哈希表：[int]$null 在 PowerShell 里等于 0 → 会变成"看似通过"
-{
-  const r = callGate({
-    pluginInstalled: true,
-    runner: "{ param($s) return @{ Output = 'no-exit-code' } }",
-  });
-  console.log(`       [诊断] 检查器缺 ExitCode 时模块返回：${r}`);
-  check(
-    /^GATE\|True\|0\|/.test(r),
-    '已确认：检查器缺 ExitCode 时 [int]$null 被折叠成 0（这正是"状态未知"必须显式拒绝的原因）',
-    r,
-  );
+  const r = composeGateThenDecide("{ param($s) return @{ ExitCode = 1; Output = 'bad' } }");
+  check(/^COMP\|False\|/.test(r), '组合验证：检查器给了 ExitCode=1 → 拒绝', r);
 }
 
 // ── 5. 公网决策函数：只有一条放行路径 ───────────────────────────────
@@ -510,10 +678,25 @@ function decide(gateExpr) {
   return line || 'NO_OUTPUT|' + out.slice(0, 200).replace(/\s+/g, ' ');
 }
 
-const G = (o) => `[pscustomobject]@{ ShouldCheck = ${o.sc}; ExitCode = ${o.code}; Output = ${q(o.out || '')}; Reason = ${q(o.reason || '')} }`;
+// 构造一个合成 gate。provided 的三种取值：
+//   undefined → 带 ExitCodeProvided = $true（模拟修复后真实模块的输出）
+//   false     → 带 ExitCodeProvided = $false（检查器没给退出码）
+//   'omit'    → 完全不带这个字段（旧形态 / 畸形结果）
+const G = (o) => {
+  const parts = [
+    `ShouldCheck = ${o.sc}`,
+    `ExitCode = ${o.code}`,
+    `Output = ${q(o.out || '')}`,
+    `Reason = ${q(o.reason || '')}`,
+  ];
+  if (o.provided !== 'omit') {
+    parts.push(`ExitCodeProvided = ${o.provided === false ? '$false' : '$true'}`);
+  }
+  return `[pscustomobject]@{ ${parts.join('; ')} }`;
+};
 
 const decisionCases = [
-  { label: 'ShouldCheck=True / ExitCode=0 → **放行**（唯一放行路径）', expr: G({ sc: '$true', code: 0 }), want: 'True' },
+  { label: 'ShouldCheck=True / ExitCode=0 / ExitCodeProvided=True → **放行**（唯一放行路径）', expr: G({ sc: '$true', code: 0 }), want: 'True' },
   { label: 'ShouldCheck=True / ExitCode=1 → 拒绝', expr: G({ sc: '$true', code: 1 }), want: 'False' },
   { label: 'ShouldCheck=True / ExitCode=3 → 拒绝', expr: G({ sc: '$true', code: 3 }), want: 'False' },
   { label: 'ShouldCheck=True / ExitCode=-1 → 拒绝', expr: G({ sc: '$true', code: -1 }), want: 'False' },
@@ -526,6 +709,29 @@ const decisionCases = [
   { label: 'gate 缺 ExitCode 字段 → 拒绝（结果畸形）', expr: "[pscustomobject]@{ ShouldCheck = $true; Reason = ''; Output = '' }", want: 'False' },
   { label: 'gate 缺 ShouldCheck 字段 → 拒绝（结果畸形）', expr: "[pscustomobject]@{ ExitCode = 0; Reason = ''; Output = '' }", want: 'False' },
   { label: 'gate 是空对象 → 拒绝', expr: '[pscustomobject]@{ }', want: 'False' },
+
+  // ── 本轮（P2.2）新增：检查器没给退出码 ──
+  // 修复前这两条会**放行**：模块把 $null 折叠成 0，决策函数看到的与"检查通过"无异。
+  { label: '**ExitCodeProvided=False** 而 ExitCode=0 → 拒绝（折叠成 0 的假通过）', expr: G({ sc: '$true', code: 0, provided: false }), want: 'False' },
+  { label: '**缺 ExitCodeProvided 字段** 而 ExitCode=0 → 拒绝（旧形态/畸形，不得默认放行）', expr: G({ sc: '$true', code: 0, provided: 'omit' }), want: 'False' },
+  { label: 'ExitCodeProvided 不是布尔（字符串 "true"）→ 拒绝', expr: "[pscustomobject]@{ ShouldCheck = $true; ExitCode = 0; Output = ''; Reason = ''; ExitCodeProvided = 'true' }", want: 'False' },
+
+  // ── 本轮新增：ExitCode 为 $null / 非整数 ──
+  { label: '**ExitCode = $null**（字段存在但值为空）→ 拒绝', expr: G({ sc: '$true', code: '$null' }), want: 'False' },
+  { label: "ExitCode = 'abc'（非数值字符串）→ 拒绝", expr: G({ sc: '$true', code: "'abc'" }), want: 'False' },
+  { label: "ExitCode = ''（空字符串）→ 拒绝", expr: G({ sc: '$true', code: "''" }), want: 'False' },
+  { label: 'ExitCode = $true（布尔，PS 里 [int]$true=1）→ 拒绝', expr: G({ sc: '$true', code: '$true' }), want: 'False' },
+  { label: 'ExitCode = 0.0（浮点，不是整数）→ 拒绝', expr: G({ sc: '$true', code: '0.0' }), want: 'False' },
+
+  // ── 本轮新增：ShouldCheck 非布尔 ──
+  // PowerShell 里 if ('false') 为真 —— 非空字符串一律 truthy，
+  // 所以不做严格类型检查的话，ShouldCheck='false' 会被当成"需要检查"，
+  // 再配上 ExitCode=0 就**放行**了。
+  { label: "**ShouldCheck = 'false'**（字符串，PS 里 truthy）+ ExitCode=0 → 拒绝", expr: G({ sc: "'false'", code: 0 }), want: 'False' },
+  { label: "**ShouldCheck = 'true'**（字符串而非布尔）+ ExitCode=0 → 拒绝", expr: G({ sc: "'true'", code: 0 }), want: 'False' },
+  { label: '**ShouldCheck = $null** + ExitCode=0 → 拒绝', expr: G({ sc: '$null', code: 0 }), want: 'False' },
+  { label: '**ShouldCheck = 1**（整数而非布尔）+ ExitCode=0 → 拒绝', expr: G({ sc: '1', code: 0 }), want: 'False' },
+  { label: '**ShouldCheck = 0**（整数而非布尔）→ 拒绝（不得当成 False 走 Reason 分支）', expr: G({ sc: '0', code: 0, reason: 'plugin-not-installed' }), want: 'False' },
 ];
 
 let sawNoFunction = false;
