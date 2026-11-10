@@ -581,7 +581,7 @@
 
 | 复核约束 | 落实方式 | 证据 |
 |---|---|---|
-| **Node 20 兼容** | 只用 Node 20.0 就有的 API：`spawnSync` / `readFileSync` / `existsSync` / `path` / `fileURLToPath`。**刻意不用 `import.meta.dirname`**（20.11+ 才有），改用 `path.dirname(fileURLToPath(import.meta.url))`；不用 `toSorted` / `findLast` / `Object.hasOwn` / `structuredClone` / `.at()` | 静态扫描 `run-suite.mjs`：上述 API **零命中**（唯一一处 `import.meta.dirname` 出现在解释"为什么不用它"的注释里）。新 spec 也刻意不引入比被测对象更强的版本要求 |
+| **Node 20 兼容** | 只用 Node 20.0 就有的 API：`spawnSync` / `readFileSync` / `existsSync` / `path` / `fileURLToPath`（这五个就是 `run-suite.mjs` 的**全部** import）。**刻意不用 `import.meta.dirname`**（20.11+ 才有），改用 `path.dirname(fileURLToPath(import.meta.url))`；不用 `toSorted` / `findLast` / `Object.hasOwn` / `structuredClone` / `.at()` / `Array.fromAsync` | 静态扫描 `run-suite.mjs`：上述 API 在**代码里零命中**，4 处命中**全部在注释里**（`:24`、`:25`、`:32`、`:34`，都是在解释"为什么不用它们"）。新 spec 也刻意不引入比被测对象更强的版本要求 |
 | **不用 glob** | 命令**全部**来自 `package.json` 的传递展开，不扫描文件系统；执行用 `spawnSync(file, args, { shell: false })`，不经 shell | `--dry-run test:chain` 输出 **106 条**（本轮新增 1 条 spec 后），与 spec 里**独立重写**的展开算法逐字逐序一致 |
 | **保留 tsx / node / npm script 语义** | 只认三种可执行文件并各自解析到 **JS 入口**：`node` → `process.execPath`；`tsx` → `node_modules/tsx/dist/cli.mjs`；`tsc` → `node_modules/typescript/bin/tsc`。`--test` / `--require ./tests/support/node20-sim.cjs` 等前缀**逐字透传** | fixture 里用记录 argv 的桩证明：`tsx f/args.mjs --test` → 桩收到 `["f/args.mjs","--test"]`；`node f/args.mjs --test --require ./x.cjs` → argv 个数、顺序、内容全对。真实链的 5 条 `--require node20-sim.cjs` 命令在 `--dry-run` 里前缀完整 |
 | **收集全部失败** | 跑完全部再汇总；每条失败保留**各自的**退出码；末尾单独报告 `tsc --noEmit` 是否执行 | fixture ①：`pass → fail1(1) → fail2(2) → after` 四条，`&&` 链会在 fail1 处截断；聚合器**四条全部执行**（marker 文件为证）、失败清单列出**两个**、保留 fail2 的退出码 2、自身退出码 1。fixture ②（`fe0b305` 补）：`node f/fail1.mjs && tsc --noEmit` —— 前置必失败时 **tsc 桩仍被调用**、仍收到原样 `--noEmit`、汇总单独打印类型检查状态。**变异反证**：给执行循环插入 `if (code !== 0) break;` 模拟 `&&` 截断，spec 从 75 通过变成 **67 通过 / 8 失败**，两条 fixture 的关键断言全部转红 |
@@ -649,7 +649,18 @@ NPM_TEST_EXIT=0
 
 ### 回滚顺序
 
-下列 6 个 commit 互相独立，可任意单独 `git revert`（不含 `ad2a6ab` 与本次实施记录的文档提交）。若要全部回退，按**逆序**执行 —— 这不是形式要求：`9211da8` 把三个公开脚本改成了调聚合器、并把原链改名为 `test:chain` 等，而 `6a83f2c` / `f38d9e2` 各自往**当时的** `test` 链里插过脚本名。先退聚合器，`package.json` 回到旧形状，后面两个 revert 才能干净落地。同理 `fe0b305` 必须先于 `9211da8` 回退，否则后者删除 `suite-runner-spec.mjs` 时会撞上修改冲突。
+下列 6 个 commit 可单独 `git revert`。**这一点是实测的，不是推断的** —— 用 `git show <c> | git apply --check -R --3way`（`--3way` 与 `git revert` 的合并策略一致，`--check` 只校验、不改动工作区）逐个验证：
+
+| commit | 单独反向应用 | 说明 |
+|---|---|---|
+| `b302501` | ✅ 干净 | 不碰 `package.json` |
+| `f38d9e2` | ✅ 干净 | 碰 `package.json`，但插入点上下文仍可三方合并 |
+| `6a83f2c` | ✅ 干净 | 同上 |
+| `fe0b305` | ✅ 干净 | 只改 `suite-runner-spec.mjs` |
+| `9211da8` | ❌ **必须先回退 `fe0b305`** | 它**新建**了 `suite-runner-spec.mjs`，而 `fe0b305` 又**修改**了该文件 → 单独 revert 时删除操作撞上下游修改，报 `patch failed: dsh-mobile/tests/suite-runner-spec.mjs:1` |
+| `20b65ba` | ✅ 干净 | 纯文档 |
+
+若要全部回退，按**逆序**执行 —— 这也不是形式要求：`9211da8` 把三个公开脚本改成了调聚合器、并把原链改名为 `test:chain` 等，而 `6a83f2c` / `f38d9e2` 各自往**当时的** `test` 链里插过脚本名。先退聚合器，`package.json` 回到旧形状，后面两个 revert 才能干净落地。
 
 ```
 git revert fe0b305   # 聚合器 spec 的 tsc-after-failure 用例（纯测试）
