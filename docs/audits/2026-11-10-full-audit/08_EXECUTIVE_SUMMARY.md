@@ -35,8 +35,8 @@
 
 | 序 | 范围 | 对应编号 | 状态（2026-11-11 实施轮结束时） |
 |---|---|---|---|
-| 1 | 核实并修复 SEC-01 公网启动门禁缺口 | SEC-01 | ✅ **已实施** `b302501`（负向测试先行：修前 13 失败 → 修后 51/0） |
-| 2 | 建立 Node 20 兼容、能收集全部失败的测试聚合机制 | BUG-01 / TEST-01 | ✅ **已实施** `9211da8` + `fe0b305`（spec 75/0；`npm test` 106/106 通过） |
+| 1 | 核实并修复 SEC-01 公网启动门禁缺口 | SEC-01 | ⚠️→✅ `b302501` 实施后**被第二方复核驳回**（`if ($gate.ShouldCheck)` 放行了三条"无法确认"路径）；**P2.1 已修正** `5f11964`（新行为测试修前 51/29 → 修后 89/0，变异反证 55/34） |
+| 2 | 建立 Node 20 兼容、能收集全部失败的测试聚合机制 | BUG-01 / TEST-01 | ✅ **已实施** `9211da8` + `fe0b305`（spec 75/0；`npm test` 106/106 通过 → P2.1 后 **107/107**） |
 | 3 | 修复 CI 中关键测试静默 skip | TEST-03 | ✅ **已实施** `f38d9e2`（假绿已实测复现 → 守卫 spec 28/0） |
 | 4 | 接入已有 Android JVM 测试并验证 CI 可执行 | TEST-17(1) | ⚠️ **本地已实施** `6a83f2c`（本人实跑 gradlew 得 38/0/0/0；CI 接线 spec 31/0）。**"CI 环境可执行"仍待验证** —— 需真的触发一次 workflow，本轮不推送 |
 
@@ -177,7 +177,7 @@
 | **TEST-13 兼容矩阵** | AGP 8.11.0 + Gradle 8.14.3 + Kotlin 2.1.20 + JDK 21 是否互相支持 | 需要访问外部版本兼容表 |
 | **`07` §一 行为 2** | fold 的逐 `Step` 去重在 `assistant/message` 与 `tool/call` 携带**不同 `data.step`** 时是否产生两个块 | 需要一段**真实的、step 不匹配的**事件轨迹；本轮未抓取任何真实流量，仓库 fixture 里也没有这种样本 |
 | **PERF 全部"静态怀疑"条目** | 单次渲染 / 单次解析的**真实毫秒数** | **本轮未执行任何真机性能测量**。`04` §九 给出了 6 项待执行的测量计划（含工具与阈值） |
-| **测试套件当前是绿是红** | **部分解决（2026-11-11 实施轮）** | 审计轮未执行完整链，故当时不做断言。实施轮为了验证聚合器**本机实跑**了 CI 用的同一条命令 `npm test`：**两次独立完整实跑均 106 条命令 / 106 通过 / 0 失败 / exit 0**（433.4s 与 380.4s），含末条 `tsc --noEmit`（日志打印"类型检查（tsc --noEmit）：已执行且通过"；Node v24.13.0 / Windows）。**仍不能推断 CI 结果** —— CI 是 Node 20 / ubuntu-latest，两者在 `WebSocket` 全局对象、路径语义、PowerShell 版本（5.1 vs pwsh 7）上有差异，这正是仓库自带 `test:node20` 链的原因 |
+| **测试套件当前是绿是红** | **部分解决（2026-11-11 实施轮 + P2.1）** | 审计轮未执行完整链，故当时不做断言。实施轮与 P2.1 轮**本机实跑**了 CI 用的同一条命令 `npm test` **三次**：106 条 / 106 通过 / 433.4s，106 条 / 106 通过 / 380.4s，以及 P2.1 加入第 107 条后 **107 条 / 107 通过 / 483.5s**，三次均 exit 0 且 `tsc --noEmit` 已执行并通过（Node v24.13.0 / Windows）。**仍不能推断 CI 结果** —— CI 是 Node 20 / ubuntu-latest，两者在 `WebSocket` 全局对象、路径语义、PowerShell 版本（5.1 vs pwsh 7）上有差异，这正是仓库自带 `test:node20` 链的原因 |
 
 ---
 
@@ -533,6 +533,26 @@ $ git diff --stat HEAD -- . ':(exclude)docs/audits'
 
 > **`dsh-mobile/src/` 下零文件改动** —— fold / pendingSend / stream / transport 核心业务逻辑与全部 `src/` 产品代码均未被触碰，符合本轮硬约束。改动只落在测试、CI workflow 与 PowerShell 启动脚本上。
 
+P2 收尾时另有三个纯文档提交：`8ddd6a4`（实施记录）、`7a615b2`（把"回滚互相独立"从推断改为实测）、`6250e2f`（第二次完整链实跑结果）。
+
+### P2.1 交付验收修正（同日，复核**驳回** P2 合并后）
+
+第二方复核认可 P2 主要成果但暂不允许合并，理由是 SEC-01 公网门禁留有一条未覆盖的放行路径。**复核成立**：`b302501` 写的判定是 `if ($gate.ShouldCheck) { ... }`，而 `Test-GatewayPatchApplied` 有四条返回路径、其中三条 `ShouldCheck = $false`（skip / `plugin-not-installed` / `patch-script-missing`），那三条**静默放行** → 隧道会在从未确认 `/mgw/*` 有认证的情况下发布到公网。
+
+| commit | 内容 | 触碰的文件类别 |
+|---|---|---|
+| `5f11964` | **SEC-01 修正**：新增 `Resolve-PublicTunnelGatewayGate`，只有一条放行路径（`ShouldCheck=$true` 且 `ExitCode` 严格为整数 0）；`start-tunnel.ps1` 加 `try/catch`；新增行为测试 | 安全门禁模块 + 启动脚本 + 测试 |
+
+验证：新增的 `gateway-public-gate-spec.mjs` **真实执行**从 `start-tunnel.ps1` 原样提取的门禁代码块与**真实的** `apply.mjs`（不做源码字符串匹配）。修前 **51 通过 / 29 失败**（三条"无法验证"场景真实跑过门禁，`exit=0` + `GATE_PASSED`）→ 修后 **89 / 0** → 变异反证（决策函数改恒 `Allow=$true`）**55 / 34**。既有 `gateway-startup-gate-spec` 收紧后 **54 / 0**，并新增反向断言防止 `if ($gate.ShouldCheck)` 被重新引入。
+
+**刻意不跑整个 `start-tunnel.ps1`**（已实测确认危险）：`-Stop` 会 `Stop-Process` **全机所有** cloudflared；门禁之后 `Get-DshPath` 的候选里有硬编码的 `E:\DSH\...\dsh.cmd`，**该文件本机真实存在**，所以误放行会一路走到 `schtasks /Create` + `/Run` 真的启动 DSH。改为提取代码块在 fixture 中执行，并断言提取结果不含 `schtasks` / `Start-Process` / `cloudflared`。
+
+**回滚演练（真实执行）**：在临时 `git worktree` 中 (A) 逆序 revert 六个代码 commit **全部干净落地**，且 `git diff 2325d34 HEAD -- . ':(exclude)docs/audits'` **输出为空**（精确复原到基线）；(B) 只 revert `5f11964` 后，决策函数消失、`if ($gate.ShouldCheck)` 复活，把 HEAD 版 spec 拷回执行**转红且症状与修前一致**。演练副本已清理，主工作区未受影响。
+
+P2.1 后完整链：`npm test` **107 条 / 107 通过 / 0 失败 / 483.5s / exit 0**（链命令数 106 → 107，新增 `test:publicGate` 在第 7 位）；`test:integration` **5/5 / 23.7s**；`test:node20` **5/5 / 6.6s**；`./gradlew :agent-core:test` **BUILD SUCCESSFUL in 52s**，原始 XML 合计 **38 testcase / 0 failures / 0 errors / 0 skipped**（本次零网络拉取）。
+
+> **`dsh-mobile/src/` 下仍然零文件改动**。P2.1 只碰了安全门禁模块、公网启动脚本与测试。
+
 
 ---
 
@@ -555,9 +575,9 @@ $ git diff --stat HEAD -- . ':(exclude)docs/audits'
 
 > **注**：下列"未执行"描述的是 **2026-11-10 审计轮**（受"只允许运行不修改业务文件或外部状态的检查"约束）。**2026-11-11 的实施轮**为了验证修复，执行了其中三项，已在下方标注。
 
-- ⚠️ 完整 `npm test` 链、`test:integration`、`test:node20` —— 审计轮未执行；**实施轮三条全部执行**（本机 Node v24.13.0 / Windows）：`npm test` **两次独立实跑均 106 条 / 106 通过 / exit 0**（433.4s、380.4s）；`test:integration` **5 条 / 5 通过 / 29.3s**（含 2 条真 `tsx`）；`test:node20` **5 条 / 5 通过 / 7.0s**。最后一条是 `--require ./tests/support/node20-sim.cjs` 前缀在 `shell:false` 下仍然生效的**真实证据** —— 若该前缀丢失或路径解析失败，Node 会以 MODULE_NOT_FOUND 非零退出，而它是 exit 0
-- ⚠️ `tsc --noEmit` —— 审计轮未执行；**实施轮已执行**（作为 `npm test` 的第 106 条，通过）
-- ⚠️ 任何 `gradlew`（含 `:agent-core:test`）—— 审计轮未执行；**实施轮已执行** `./gradlew :agent-core:test`（BUILD SUCCESSFUL，38/0/0/0）
+- ⚠️ 完整 `npm test` 链、`test:integration`、`test:node20` —— 审计轮未执行；**实施轮与 P2.1 轮三条全部执行**（本机 Node v24.13.0 / Windows）：`npm test` 三次完整实跑 **106/106（433.4s）、106/106（380.4s）、107/107（483.5s）**，均 exit 0；`test:integration` **5/5**（29.3s → P2.1 复跑 23.7s，含 2 条真 `tsx`）；`test:node20` **5/5**（7.0s → P2.1 复跑 6.6s）。最后一条是 `--require ./tests/support/node20-sim.cjs` 前缀在 `shell:false` 下仍然生效的**真实证据** —— 若该前缀丢失或路径解析失败，Node 会以 MODULE_NOT_FOUND 非零退出，而它是 exit 0
+- ⚠️ `tsc --noEmit` —— 审计轮未执行；**实施轮与 P2.1 轮均已执行**（分别是 `npm test` 的第 106 / 107 条，通过）
+- ⚠️ 任何 `gradlew`（含 `:agent-core:test`）—— 审计轮未执行；**实施轮与 P2.1 轮各执行一次** `./gradlew :agent-core:test`，两次均 BUILD SUCCESSFUL；P2.1 那次从原始 XML 核对为 **38 testcase / 0 failures / 0 errors / 0 skipped**（14+13+7+4），且**零网络拉取**（依赖已缓存）
 - ❌ 任何 `npm ci` / 依赖安装 / 构建（实施轮也未执行；Gradle 为解析 `junit:4.13.2` 做过一次只读依赖拉取，仅写入本地 Gradle 缓存）
 - ❌ 任何模拟器 / instrumented 测试
 - ❌ 任何真机性能测量

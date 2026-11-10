@@ -696,5 +696,140 @@ git revert 20b65ba   # 审计文档的复核修订（可选，纯文档）
 
 ---
 
+## 九、P2.1 交付验收修正（2026-11-11，第二方复核驳回后）
+
+第二方复核认可 P2 主要成果，但**暂不允许合并**，理由是 SEC-01 的公网门禁留了一条未覆盖的放行路径。**复核意见成立**，且比它描述的更严重一点。
+
+### 缺口的真实形态
+
+`Test-GatewayPatchApplied` 有**四条**返回路径，其中三条是 `ShouldCheck = $false`：
+
+| # | 触发条件 | ShouldCheck | ExitCode | Reason | P2 的隧道脚本怎么处理 |
+|---|---|---|---|---|---|
+| 1 | `$Skip` | false | 0 | `SkipGatewayPatchCheck` | 隧道显式传 `-Skip:$false`，理论不可达 |
+| 2 | `-not $PluginInstalled` | false | 0 | `plugin-not-installed` | **静默放行** |
+| 3 | `-not (Test-Path $PatchScript)` | false | 0 | `patch-script-missing` | **静默放行** |
+| 4 | 其余 | true | 检查器退出码 | `''` | 非 0 才拒绝 ✅ |
+
+P2 写的判定是 `if ($gate.ShouldCheck) { ... }`，所以第 2、3 条**直接跳过门禁**，脚本继续走到 `schtasks /Create` 并启动 DSH、发布到公网 cloudflared URL —— 而此时**没有任何人确认过 `/mgw/*` 是否有认证**。
+
+### 为什么 `plugin-not-installed` 是最危险的一条
+
+它来自一次**路径探测**，而三处路径来源互不一致（均已实读确认）：
+
+| 位置 | 插件目录来源 |
+|---|---|
+| `start-tunnel.ps1:238` | `$env:DSH_HOME`，否则 `%USERPROFILE%\.dsh` |
+| `setup-gateway.ps1:35,58` | **硬编码** `%USERPROFILE%\.dsh` |
+| `apply.mjs:57-67` | `os.homedir()` |
+
+一旦 `DSH_HOME` 指向别处，探测就**假阴性**：插件其实装着、`/mgw/*` 其实开着且无认证，门禁却判定"不适用"而放行。
+
+关于「插件未安装时是否仍有可访问的管理接口」（复核任务一.5 要求先确认）：`/mgw/*` 由**上游插件独家提供**，仓库内没有 DSH 核心实现（证据：`patches/mobile-gateway-mgmt-auth/patch.mjs:6`「上游 `dsh-plugin-mobile-gateway`（0.10.3 / 0.11.1 均如此）把 `/mgw/*` …」）。所以"插件真的没装"时确实没有管理接口。**但"探测不到"不等于"真的没装"** —— 按复核要求采取默认拒绝，不允许未经验证就静默放行。
+
+### 修法
+
+新增 `Resolve-PublicTunnelGatewayGate`（`scripts/gateway-patch-gate.ps1`），**只有一条放行路径**：`ShouldCheck = $true` 且 `ExitCode` 严格为整数 `0`。其余全部拒绝：
+
+| 输入 | Reason | 结果 |
+|---|---|---|
+| `ShouldCheck=true` + `ExitCode=0` | `patch-verified` | ✅ **唯一放行** |
+| `ShouldCheck=true` + `ExitCode≠0` | `patch-not-applied` | ❌ |
+| `ShouldCheck=true` + `ExitCode` 非整数 | `exit-code-unknown` | ❌ |
+| `ShouldCheck=false` + `SkipGatewayPatchCheck` | `skip-not-allowed-on-public` | ❌ |
+| `ShouldCheck=false` + `plugin-not-installed` | `plugin-probe-inconclusive` | ❌ |
+| `ShouldCheck=false` + `patch-script-missing` | `patch-script-missing` | ❌ |
+| `ShouldCheck=false` + `Reason` 为空或未识别 | `unknown-state` | ❌ |
+| gate 缺 `ShouldCheck`/`ExitCode`/`Reason` 任一字段 | `gate-result-malformed` | ❌ |
+| gate 为 `$null`（检查器抛异常） | `gate-result-missing` | ❌ |
+
+两个实现细节值得记录：
+
+1. **退出码判定用类型检查而不是强制转换**。`[int]$null` 在 PowerShell 里等于 `0` —— 若直接 `[int]$Gate.ExitCode`，"检查器没给退出码"就会被折叠成"检查通过"。这个折叠是**实测到的**：注入一个只返回 `@{ Output = ... }` 的检查器，模块返回 `GATE|True|0|`。
+2. **`Test-GatewayPatchApplied` 的语义逐字未改**。收紧只发生在公网侧的翻译层，因此局域网路径 `start-dsh-web.ps1` 的行为、`-SkipGatewayPatchCheck` opt-out、以及拒绝文案**全部保持不变**（文案的新分支一律 gated 在 `-Public` 之内）。
+
+`start-tunnel.ps1` 另加 `try/catch`：检查器抛异常时得到 `$gate = $null` → 显式拒绝，而不是让未捕获错误"顺便"充当拒绝理由（那既不可测也说不清原因）。
+
+### 验证：为什么是「提取代码块执行」而不是「跑整个脚本」
+
+复核要求"测试必须执行实际门禁函数…不能仅依赖源码字符串匹配"，同时"使用隔离测试环境，不启动真实公网隧道"。**跑整个 `start-tunnel.ps1` 做不到第二点**，已实测确认两条危险路径：
+
+- `-Stop` 分支（`start-tunnel.ps1:151`）执行 `Get-Process -Name cloudflared | Stop-Process -Force` —— **杀掉全机所有 cloudflared 进程**，包括用户正在用的隧道。
+- 门禁之后第一个动作是 `Get-DshPath`（`:120-130`），其候选里有硬编码的 `E:\DSH\resources\runtime\cli\bin\dsh.cmd`，而**该文件在本机真实存在**。于是 `if (-not $dshExe) { exit 1 }`（`:315`）不会触发，脚本会继续走到 `schtasks /Create` + `/Run`（`:333-335`），**真的建计划任务并启动真实 DSH**。
+
+所以 `gateway-public-gate-spec.mjs` 的做法是：从 `start-tunnel.ps1` 里**原样提取**门禁代码块（锚点 `:220` 与 `:257`，均已核实唯一），在 fixture 环境中执行。它跑的是**真实生产代码文本**，但物理上到不了 schtasks / cloudflared。配套断言确保提取没有跑偏：代码块长度 > 200、必须含 `Test-GatewayPatchApplied`、且**不得含** `schtasks` / `Start-Process` / `cloudflared`。
+
+fixture 用**真实的** `apply.mjs` + `patch.mjs`（一起复制，因为前者 import 后者），所以 `--check` 的判定逻辑是真的，不是桩。
+
+### 测试结果
+
+| 阶段 | `gateway-public-gate-spec` | 说明 |
+|---|---|---|
+| **修复前** | **51 通过 / 29 失败** | 三条"无法验证"场景真实跑过门禁：`exit=0` 且打印 `GATE_PASSED` |
+| **修复后** | **89 通过 / 0 失败** | 全部 8 个要求场景 + 反向对照 |
+| **变异反证**（决策函数改成恒 `Allow=$true`） | **55 通过 / 34 失败** | 所有"拒绝"断言转红、"放行"断言仍绿 → 双向非恒真 |
+
+覆盖的场景（复核任务二的 7 项全部命中）：补丁正常→放行；补丁未生效→拒绝；检查脚本缺失→拒绝；插件文件不完整→拒绝；检查器异常退出（`exit 7` 与未捕获异常两种）→拒绝；检查状态未知（`$null` gate、缺字段、`Reason` 为空/未识别、非整数退出码共 14 例）→拒绝；`-Status` 真实执行 exit 0 未被拦、`-Stop` 顺序断言。
+
+**反向对照**：检查器只往 stderr 写东西但退出 0 时**仍应放行** —— 守的是 `gateway-patch-gate.ps1:102-114` 记载的坑（调用方是 `$ErrorActionPreference='Stop'`，若 runner 没临时改回 `Continue`，stderr 会变成终止错误，把"通过"误判成"异常"）。本 spec 开发时独立地又踩了一遍同一个坑，可见那段注释不是多余的。
+
+既有 `gateway-startup-gate-spec` 同步收紧：把匹配旧写法的 `if ($gate.ExitCode -ne 0)` 断言换成匹配新接线，并新增**反向断言**「隧道脚本不得再用 `if ($gate.ShouldCheck)`」，防止旁路被重新引入。该 spec **54 通过 / 0 失败**（回滚 `5f11964` 后为 50/4）。
+
+### 回滚演练（真实执行，非推断）
+
+在 `git worktree` 临时副本里做了两轮真实演练：
+
+**演练 A —— 全量回退**：按逆序 `git revert` 六个代码 commit（`5f11964 → fe0b305 → 9211da8 → 6a83f2c → f38d9e2 → b302501`），**六个全部干净落地**，随后 `git diff --stat 2325d34 HEAD -- . ':(exclude)docs/audits'` **输出为空** —— 回滚精确复原到审计基线。
+
+**演练 B —— 单项回退**：只 `git revert 5f11964`，确认 (a) revert 干净；(b) 决策函数从模块里消失（出现次数 0）；(c) `start-tunnel.ps1` 里 `if ($gate.ShouldCheck)` **复活**（出现次数 1）；(d) 把 HEAD 版的两个 spec 拷回副本执行，`gateway-public-gate-spec` **转红且症状与修复前一致**（`exit=0` + `GATE_PASSED`），`gateway-startup-gate-spec` **50 通过 / 4 失败**。
+
+结论：**回滚确实会移除保护，而测试确实能检出这种移除**。两个演练副本已用 `git worktree remove` 清理并 `prune`，主工作区未受影响（`git status` 干净）。
+
+### 本轮完整链结果
+
+| 命令 | 结果 |
+|---|---|
+| `npm test` | **107 条 / 107 通过 / 0 失败 / 483.5s / exit 0**（含 `tsc --noEmit`：已执行且通过） |
+| `npm run test:integration` | **5 / 5 通过，23.7s** |
+| `npm run test:node20` | **5 / 5 通过，6.6s** |
+| `./gradlew :agent-core:test` | **BUILD SUCCESSFUL in 52s**；原始 XML：AgentLoopTest 14 + CloudModelClientTest 13 + FileRunStoreTest 7 + RunRecoveryTest 4 = **38 testcase，0 failures，0 errors，0 skipped**。本次**零网络拉取**（junit 已缓存） |
+
+链命令数 106 → **107**（新增 `test:publicGate`，插在 `test:startupGate` 之后，即第 7 位）。
+
+### Node 20 兼容性复核（逐行扫描，区分代码与注释）
+
+本机只有 Node v24.13.0，**无 nvm、无第二个 Node**，因此无法真实执行 Node 20 —— 这点必须标明。改为逐行静态扫描 8 个新增/修改文件：
+
+| API | 最低版本 | 代码级命中 |
+|---|---|---|
+| `import.meta.dirname` | **20.11** | 3 处：`android-jvm-tests-ci-spec.mjs:49`、`contract-skip-guard-spec.mjs:55`、`gateway-startup-gate-spec.mjs:56`（**既有**） |
+| `run-suite.mjs` / `suite-runner-spec.mjs` | — | **代码级 0 命中**，只在注释里出现（解释为什么不用） |
+| `gateway-public-gate-spec.mjs`（本轮新增） | — | **0 命中**，用 `fileURLToPath(import.meta.url)` |
+| `toSorted` / `Array.fromAsync` / `Object.groupBy` / `Promise.withResolvers` / `process.getBuiltinModule` / `node:sqlite` / `navigator.` / `fs.glob` | 20~22+ | **全部 0 命中** |
+
+**结论**：聚合器本身（`run-suite.mjs`）兼容 **Node 20.0**；但**测试套件整体的事实下限是 Node 20.11**，因为全仓有 **16 个**测试文件在代码里用 `import.meta.dirname`（其中 14 个是 P2 之前就存在的）。这是**既有状态，不是 P2 引入的**：我新增的两个 spec 只是沿用了仓库惯例。
+
+残余不一致：`package.json` 的 `engines` 写 `>=20`，而事实下限是 `>=20.11`。CI 的 `node-version: 20` 会被 setup-node 解析成最新的 20.x（≥20.11），所以**CI 上不会出问题**；只有在 Node 20.0~20.10 上手动跑才会炸。**本轮未改 `engines`**（改它属于超出授权范围的声明变更），仅记录在此。
+
+### 只能在 GitHub Actions 上完成的验证
+
+已用 YAML 解析器（`yaml`，仅作一次性校验用，**未**写进任何提交的 spec —— 它只是传递依赖）确认两个 workflow 的触发器：
+
+```
+android.yml        on: { push: { tags: ['v*'] }, workflow_dispatch: {...} }
+signing-verify.yml on: { workflow_dispatch: {...} }
+```
+
+即：**没有 PR 触发，没有分支 push 触发**。因此以下各项**在本轮约束下（不推送、不建 tag、不发布）无法验证**：
+
+| 待验证项 | 为什么只能在 CI 上做 | 触发它需要什么 |
+|---|---|---|
+| `jvm-tests` job 在 ubuntu-latest 上是否通过 | 本机是 Windows + 本地 SDK（`E:/Android/Sdk`）；CI 要现装 SDK/NDK。`configure-on-demand` 未开启 → 会配置 `:app`，而 `app/build.gradle:86` 声明了 `ndkVersion`，故 `:agent-core:test` 是否需要 NDK 才能完成配置阶段**只有 CI 能回答** | push tag `v*`，或手动 `workflow_dispatch`（且分支需先推到远端） |
+| `signing-verify.yml` 补 `DSH_GATEWAY_PLUGIN_DIR` 后是否变红 | 那 15 条契约断言在该 workflow 里**从未真正执行过**；补上后会第一次运行。若上游插件与客户端已漂移就会立刻变红 —— 这是期望结果，但无法预知 | 该 workflow **只有** `workflow_dispatch`，永不自动运行 |
+| 完整链在 Node 20 / ubuntu-latest 上是绿是红 | 本机是 Node 24 / Windows，两者在 `WebSocket` 全局对象、路径语义、PowerShell 版本（5.1 vs pwsh 7）上有差异。`test:node20` 只是**模拟**（删掉 Node 21+ 全局 API），不是真 Node 20 | `test` job 随 tag push 或 dispatch 运行 |
+| 新增门禁在 Linux + pwsh 7 上的行为 | `gateway-public-gate-spec` 依赖 PowerShell；本机是 Windows PowerShell 5.1。`findPowerShell()` 在 Linux 上会选 `pwsh`，但**脚本是写给 5.1 的**（TEST-16 已记录这个既存风险） | 同上 |
+
+---
+
 *§一~§七 由只读审计产生，未修改任何业务代码；所有引用位置均来自真实读取的代码，标注为"待验证"的项已说明未能验证的原因。*
-*§八 是 2026-11-11 复核后实施轮的记录：该轮改动了测试、CI 与启动脚本，但 `dsh-mobile/src/` 下零文件改动。原始审计版本由 `ad2a6ab` 冻结，本文档的修订发生在独立分支 `opt/p2-review-remediation` 上。*
+*§八 是 2026-11-11 复核后实施轮（P2）的记录。§九 是同日 P2.1 交付验收修正的记录。两轮都改动了测试、CI 与启动脚本，但 `dsh-mobile/src/` 下始终零文件改动。原始审计版本由 `ad2a6ab` 冻结，全部修订发生在独立分支 `opt/p2-review-remediation` 上。*
