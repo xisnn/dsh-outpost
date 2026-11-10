@@ -177,7 +177,7 @@
 | **TEST-13 兼容矩阵** | AGP 8.11.0 + Gradle 8.14.3 + Kotlin 2.1.20 + JDK 21 是否互相支持 | 需要访问外部版本兼容表 |
 | **`07` §一 行为 2** | fold 的逐 `Step` 去重在 `assistant/message` 与 `tool/call` 携带**不同 `data.step`** 时是否产生两个块 | 需要一段**真实的、step 不匹配的**事件轨迹；本轮未抓取任何真实流量，仓库 fixture 里也没有这种样本 |
 | **PERF 全部"静态怀疑"条目** | 单次渲染 / 单次解析的**真实毫秒数** | **本轮未执行任何真机性能测量**。`04` §九 给出了 6 项待执行的测量计划（含工具与阈值） |
-| **测试套件当前是绿是红** | **部分解决（2026-11-11 实施轮 + P2.1）** | 审计轮未执行完整链，故当时不做断言。实施轮与 P2.1 轮**本机实跑**了 CI 用的同一条命令 `npm test` **三次**：106 条 / 106 通过 / 433.4s，106 条 / 106 通过 / 380.4s，以及 P2.1 加入第 107 条后 **107 条 / 107 通过 / 483.5s**，三次均 exit 0 且 `tsc --noEmit` 已执行并通过（Node v24.13.0 / Windows）。**仍不能推断 CI 结果** —— CI 是 Node 20 / ubuntu-latest，两者在 `WebSocket` 全局对象、路径语义、PowerShell 版本（5.1 vs pwsh 7）上有差异，这正是仓库自带 `test:node20` 链的原因 |
+| **测试套件当前是绿是红** | **部分解决（2026-11-11 实施轮 + P2.1 + P2.2）** | 审计轮未执行完整链，故当时不做断言。之后**本机实跑**了 CI 用的同一条命令 `npm test` **四次**：106/106（433.4s）、106/106（380.4s）、107/107（483.5s）、**107/107（371.4s）**，四次均 exit 0 且 `tsc --noEmit` 已执行并通过（Node v24.13.0 / Windows）。**仍不能推断 CI 结果** —— CI 是 Node 20 / ubuntu-latest，两者在 `WebSocket` 全局对象、路径语义、PowerShell 版本（5.1 vs pwsh 7）上有差异，这正是仓库自带 `test:node20` 链的原因 |
 
 ---
 
@@ -552,6 +552,22 @@ P2 收尾时另有三个纯文档提交：`8ddd6a4`（实施记录）、`7a615b2
 P2.1 后完整链：`npm test` **107 条 / 107 通过 / 0 失败 / 483.5s / exit 0**（链命令数 106 → 107，新增 `test:publicGate` 在第 7 位）；`test:integration` **5/5 / 23.7s**；`test:node20` **5/5 / 6.6s**；`./gradlew :agent-core:test` **BUILD SUCCESSFUL in 52s**，原始 XML 合计 **38 testcase / 0 failures / 0 errors / 0 skipped**（本次零网络拉取）。
 
 > **`dsh-mobile/src/` 下仍然零文件改动**。P2.1 只碰了安全门禁模块、公网启动脚本与测试。
+
+### P2.2 边界修正（同日，P2.1 报告 §1.2 记录过的残余风险）
+
+P2.1 只在模块层**诊断**了 `[int]$null` → 0 的折叠，没有在公网决策层堵住它。本轮关掉。
+
+| commit | 内容 | 触碰的文件类别 |
+|---|---|---|
+| `0b76e97` | **`[int]$null` 折叠**：检查器没给退出码时 `ExitCode` 是 0，与"检查通过"无法区分 → 公网放行。用两个真实函数组合复现 `COMP\|True\|patch-verified`。修法：转换前记录**纯附加字段** `ExitCodeProvided`，决策函数要求它存在且严格为 `$true`；顺带堵住 `if ('false')` 在 PowerShell 里为真导致的 `ShouldCheck` 非布尔放行 | 安全门禁模块 + 测试 |
+
+`start-dsh-web.ps1` 与 `start-tunnel.ps1` **本轮零改动**。局域网行为未变是**差分执行证明**的，不是推理：修复前后两个模块跑同样 9 个场景，LAN 可见的 `ShouldCheck`/`ExitCode`/`Reason`/`Output` 长度 **`diff -u` 输出为空**（含 `ExitCode='not-a-number'` 仍然 THREW —— 那个异常对 LAN 是承重的，改成"安全返回 0"会让 LAN 从"崩溃即拒绝"变成"放行"）。
+
+门禁行为测试：修前 **101 通过 / 31 失败** → 修后 **136 / 0**。三个语法有效的变异反证：去掉 `ExitCodeProvided` 检查 **129/7**、去掉 `ShouldCheck` 严格布尔检查 **133/3**、把 `[int]` 转换改成安全回退 **135/1**（失败的正是 LAN 承重行为的守卫）。既有 spec 无回归（`gateway-startup-gate` 54/0、`mobile-gateway-patch` 24/0、`desktop-packaging` 31/0、`butler-installer` 23/0）。完整链 `npm test` **107 条 / 107 通过 / 371.4s / exit 0**（链命令数不变，本轮只扩充既有 spec：89 → 136 条断言）。
+
+**回滚顺序新增一条依赖**（`git apply --check -R --3way` 实测）：`5f11964` 不再能单独回退，因为 `0b76e97` 改了同一批文件（实测报 `scripts/gateway-patch-gate.ps1 with conflicts`）—— **必须先退 `0b76e97`**。`0b76e97` 自身可单独干净回退。
+
+> **`dsh-mobile/src/` 下仍然零文件改动**；Android 核心业务代码零改动；门禁架构未重构。硬约束全部实测为 0（含 `start-dsh-web.ps1` 零改动）。
 
 
 ---

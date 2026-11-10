@@ -673,6 +673,8 @@ NPM_TEST_FINAL_EXIT=0
 若要全部回退，按**逆序**执行 —— 这也不是形式要求：`9211da8` 把三个公开脚本改成了调聚合器、并把原链改名为 `test:chain` 等，而 `6a83f2c` / `f38d9e2` 各自往**当时的** `test` 链里插过脚本名。先退聚合器，`package.json` 回到旧形状，后面两个 revert 才能干净落地。
 
 ```
+git revert 0b76e97   # P2.2：ExitCodeProvided + ShouldCheck 严格布尔（纯门禁模块 + 测试）
+git revert 5f11964   # P2.1：公网门禁 fail-closed 决策函数
 git revert fe0b305   # 聚合器 spec 的 tsc-after-failure 用例（纯测试）
 git revert 9211da8   # 测试聚合器（纯测试基础设施，src/ 零改动）
 git revert 6a83f2c   # CI: agent-core JVM 测试接入
@@ -680,6 +682,8 @@ git revert f38d9e2   # 契约测试静默 skip 守卫
 git revert b302501   # 公网隧道门禁
 git revert 20b65ba   # 审计文档的复核修订（可选，纯文档）
 ```
+
+> **⚠️ P2.2 之后新增的一条顺序依赖**（`git apply --check -R --3way` 实测）：`5f11964` **不再能单独回退**了 —— `0b76e97` 改了同一批文件（`scripts/gateway-patch-gate.ps1`、`gateway-public-gate-spec.mjs`），实测报 `Applied patch to 'scripts/gateway-patch-gate.ps1' with conflicts`。**必须先退 `0b76e97`**。`0b76e97` 自身可单独干净回退。（§九 记载的"演练 B：只 revert `5f11964` 干净"是**当时 HEAD 下**的事实，仍然准确，只是不再适用于当前 HEAD。）
 
 `ad2a6ab`（审计基线冻结）**不要回滚** —— 它是原始审计版本的唯一存档。
 
@@ -689,6 +693,8 @@ git revert 20b65ba   # 审计文档的复核修订（可选，纯文档）
 |---|---|---|
 | `b302501` | 公网隧道重新绕过鉴权门禁 → 配对码铸造对**整个互联网**可达 | **高**，应视为临时回退 |
 | `f38d9e2` | 同时移除 `signing-verify.yml` 的 `DSH_GATEWAY_PLUGIN_DIR`，该 workflow 回到"契约断言静默跳过"的假绿状态 | **高**，应视为临时回退 |
+| `5f11964` | 公网门禁退回 `if ($gate.ShouldCheck)` 判定 → patch-script-missing / plugin-not-installed / 探测假阴性三条"无法确认"路径重新静默放行；行为测试也被一并删除 | **高**，只应临时回退 |
+| `0b76e97` | 检查器没给退出码时重新被读成"通过"（`[int]$null`→0），且 `ShouldCheck` 非布尔值可绕过 → 公网放行。同时移除 LAN 承重行为（转换异常）的守卫 | **高**，只应临时回退 |
 | `6a83f2c` | `release` job 的 `needs` 退回 `[test, desktop]`，38 个 JVM 测试重新不被 CI 执行 | 中 |
 | `9211da8` | 测试链退回 `&&` 串联，第一个失败之后的结果全部丢失（回到 BUG-01 描述的行为） | 中 |
 | `fe0b305` | 仅移除一条 spec 用例；聚合器行为不变，但"tsc 在前置失败时仍执行"失去回归保护 | 低 |
@@ -831,5 +837,108 @@ signing-verify.yml on: { workflow_dispatch: {...} }
 
 ---
 
+## 十、P2.2 边界修正（2026-11-11，`[int]$null` 折叠）
+
+P2.1 报告 §1.2 里记录过这条残余风险，但当时**只在模块层做了诊断，没有在公网决策层堵住**。本轮把它关掉。
+
+### 缺口
+
+`[int]$null` 在 PowerShell 里等于 **0**。所以检查器"什么都没说"时，`Test-GatewayPatchApplied` 返回的 `ExitCode` 是 0 —— 与"检查通过"**完全无法区分**，而 `Resolve-PublicTunnelGatewayGate` 拿到的已经是折叠后的值，无从识别。
+
+用**两个真实函数在同一个 PowerShell 进程里串起来**复现（不是重新实现任何一端）：
+
+```
+COMP|True|patch-verified
+```
+
+即：检查器没给退出码 → 公网隧道**放行**。
+
+实测到的折叠形态有 6 种：缺 `ExitCode` 键、`ExitCode=$null`、`ExitCode=''`、返回字符串而非哈希表、什么都不返回、以及 `ExitCode=$false`（`[int]$false = 0`，**最隐蔽的一条**）。
+
+另有 1 种**不折叠而是抛异常**：`ExitCode='not-a-number'` → `[int]` 转换失败。
+
+### 顺带发现并一并堵住的第二个缺口
+
+`Resolve-PublicTunnelGatewayGate` 原先写的是 `if ($Gate.ShouldCheck)`。而 PowerShell 里 **`if ('false')` 为真**（非空字符串一律 truthy），所以 `ShouldCheck = 'false'`（字符串）会被当成"需要检查"，再配上 `ExitCode = 0` 就**放行**。同类还有 `ShouldCheck = 1`、`'true'`。
+
+### 修法（最小范围）
+
+1. `Test-GatewayPatchApplied` 在 `[int]` 转换**之前**把事实记下来，作为**纯附加字段** `ExitCodeProvided`（bool）。四条返回路径都带这个字段，使 gate 对象形状统一。
+2. `Resolve-PublicTunnelGatewayGate` 增加两道严格类型检查：
+   - `ShouldCheck -isnot [bool]` → 拒绝（`shouldcheck-not-boolean`）
+   - `ExitCodeProvided` 必须**存在且严格为 `$true`** → 否则拒绝（缺失算 `gate-result-malformed`，为 `$false` 算 `exit-code-not-provided`）
+
+放行路径因此收紧为三个条件同时成立：`ShouldCheck` 严格布尔 `$true`、`ExitCodeProvided` 严格布尔 `$true`、`ExitCode` 严格整数 `0`。
+
+### 为什么 `[int]$result.ExitCode` 那行**必须原样保留**
+
+它对局域网是**承重**的。`start-dsh-web.ps1` 没有 `try/catch`，所以 `ExitCode='not-a-number'` 时的转换异常会让脚本非零退出 —— **崩溃即拒绝**。若把这行改成"安全地回退成 0"，局域网就会从"拒绝"变成"`ExitCode=0` 即放行"，那是把 LAN 改坏。
+
+这一点由变异 C 实测证明：把该行改成 `$(if ($codeProvided) { [int]$rawCode } else { 0 })` 后，spec 从 136/0 变成 **135 通过 / 1 失败**，失败的正是"模块抛转换异常（刻意保留）"那条，模块输出从 `THREW|...` 变成 `GATE|True|0|`。
+
+### 局域网行为未变的**差分证明**
+
+不靠推理，靠执行：把修复前的模块（`git show HEAD:scripts/gateway-patch-gate.ps1`）与修复后的模块，用同一个驱动器跑**同样的 9 个场景**，比较局域网会读到的四个字段：
+
+```
+场景           修复前                                 修复后
+skip           SC=False|EC=0|RS=SkipGatewayPatchCheck|OL=0     （相同）
+no-plugin      SC=False|EC=0|RS=plugin-not-installed|OL=0      （相同）
+no-script      SC=False|EC=0|RS=patch-script-missing|OL=0      （相同）
+code-0         SC=True|EC=0|RS=|OL=2                           （相同）
+code-1         SC=True|EC=1|RS=|OL=10                          （相同）
+no-code        SC=True|EC=0|RS=|OL=7                           （相同 ← 折叠仍然发生，LAN 语义不变）
+null-result    SC=True|EC=0|RS=|OL=0                           （相同）
+str-result     SC=True|EC=0|RS=|OL=0                           （相同）
+bad-str-code   THREW                                           （相同 ← 崩溃即拒绝被保留）
+```
+
+`diff -u` 输出为**空** → 9/9 场景逐字相同。
+
+### 测试结果
+
+| 阶段 | `gateway-public-gate-spec` |
+|---|---|
+| **修复前** | **101 通过 / 31 失败** |
+| **修复后** | **136 通过 / 0 失败 / 0 跳过** |
+
+新增覆盖：§4b 六种折叠形态各自断言 `ExitCodeProvided=False`；四种**给了合法整数码**的形态（0 / 1 / `'0'` / −1）断言 `=True`（否则"收紧"会退化成"永远拒绝"，把正常启动也挡掉）；§4c 真实组合验证 8 条必定拒绝 + 2 条反向对照（给 0 → 放行、给 1 → 拒绝）；§5 决策函数新增 `ExitCodeProvided` 三态、`ExitCode` 为 `$null`/`'abc'`/`''`/`$true`/`0.0`、`ShouldCheck` 为 `'false'`/`'true'`/`$null`/`1`/`0` 共 13 条负向用例。
+
+**三个变异反证**（全部语法有效）：
+
+| 变异 | 结果 | 失败的正是 |
+|---|---|---|
+| A：去掉 `ExitCodeProvided` 检查 | **129 / 7** | 6 条组合验证 + 1 条决策用例，全部显示 `COMP\|True\|patch-verified`（放行） |
+| B：去掉 `ShouldCheck` 严格布尔检查 | **133 / 3** | `'false'` / `'true'` / `1` 三条，全部 `DEC\|True\|patch-verified` |
+| C：把 `[int]` 转换改成安全回退 | **135 / 1** | "模块抛转换异常（刻意保留）" —— 即上文所述 LAN 回归 |
+
+### 开发中被测试自己纠正的两处预期错误
+
+1. 最初把 `ExitCode='not-a-number'` 归入"折叠成 0"类，实测发现它是**抛异常**（`Cannot convert value "not-a-number" to type "System.Int32"`）。已按真实行为改为断言 `THREW`，并把它变成 LAN 承重行为的守卫。
+2. 最初把 `ExitCode=$true` 也归入抛异常类，实测 `[int]$true = 1`，**不抛**。已改归入折叠类，并补上 `$false`（`[int]$false = 0`）这条最危险的形态。
+
+两处都是"先按想象写断言、被真实执行纠正"，已写进 spec 注释。
+
+### 既有测试无回归
+
+`gateway-startup-gate-spec` **54/0**、`mobile-gateway-patch-spec` **24/0**、`desktop-packaging-spec` **31/0**、`butler-installer-spec` **23/0**。三个 `.ps1` PS 5.1 解析 PARSE_OK、BOM 完好。
+
+**完整链**（CI 调用的同一条命令 `npm test`）：
+
+```
+套件汇总：107 条命令，107 通过，0 失败，耗时 371.4s
+全部通过。
+类型检查（tsc --noEmit）：已执行且通过
+P22_NPM_TEST_EXIT=0
+```
+
+链命令数仍为 **107**（本轮没有新增 spec 文件，只是扩充了 `gateway-public-gate-spec.mjs`：89 → 136 条断言）。
+
+### 未触碰
+
+`start-dsh-web.ps1` **零改动**（局域网行为完全不变，已由差分证明）；`start-tunnel.ps1` **零改动**（P2.1 的接线已经会把新的拒绝原因透传给 `Write-GatewayPatchRefusal -Public -Reason`）；门禁架构未重构（只是在既有函数上加了一个附加字段与两道类型检查）；Android 核心业务代码零改动。
+
+---
+
 *§一~§七 由只读审计产生，未修改任何业务代码；所有引用位置均来自真实读取的代码，标注为"待验证"的项已说明未能验证的原因。*
-*§八 是 2026-11-11 复核后实施轮（P2）的记录。§九 是同日 P2.1 交付验收修正的记录。两轮都改动了测试、CI 与启动脚本，但 `dsh-mobile/src/` 下始终零文件改动。原始审计版本由 `ad2a6ab` 冻结，全部修订发生在独立分支 `opt/p2-review-remediation` 上。*
+*§八 是 2026-11-11 复核后实施轮（P2）的记录。§九 是同日 P2.1 交付验收修正的记录。§十 是同日 P2.2 边界修正的记录。三轮都改动了测试、CI 与启动脚本，但 `dsh-mobile/src/` 下始终零文件改动。原始审计版本由 `ad2a6ab` 冻结，全部修订发生在独立分支 `opt/p2-review-remediation` 上。*
