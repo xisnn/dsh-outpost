@@ -3,7 +3,7 @@ import crypto from 'node:crypto';
 import {PassThrough} from 'node:stream';
 import {serveDshRuntime} from '../runtime/host.mjs';
 
-function fixture({tasks = [{id:'existing-task',status:'waiting_user',revision:1,pendingApproval:null}], fetch: fetchOverride} = {}) {
+function fixture({tasks = [{id:'existing-task',status:'waiting_user',revision:1,pendingApproval:null}], fetch: fetchOverride, heartbeatMs} = {}) {
   const input=new PassThrough(), output=new PassThrough();
   const key=crypto.randomBytes(32),generation=crypto.randomUUID();
   process.env.OUTPOST_LAUNCH_ID=generation;process.env.OUTPOST_PIPE_TOKEN=key.toString('base64');
@@ -19,7 +19,7 @@ function fixture({tasks = [{id:'existing-task',status:'waiting_user',revision:1,
       return new Response(JSON.stringify(request.url.endsWith('health')?{status:'ok'}:{tasks}));
     }};
   }}};
-  const host=serveDshRuntime(ctx,{input,output,exit:code=>exits.push(code)});
+  const host=serveDshRuntime(ctx,{input,output,exit:code=>exits.push(code),heartbeatMs});
   let n=0;
   function request(op,{id=crypto.randomUUID(),frameGeneration=generation,signingKey=key,number=++n,args={}}={}) {
     const payload=Buffer.from(JSON.stringify({op,args})).toString('base64');
@@ -326,4 +326,27 @@ const butlerUrl='http://127.0.0.1/api/outpost/butler/';
 for(const op of ['url','fetch','file','shell','exec','approval','shutdown?url=https://example.invalid']) {
   const f=fixture();f.request(op);await settle();assert.deepEqual(f.exits,[1]);assert.equal(f.calls.length,0);
 }
-console.log('Local DSH host: P1 auth/replay fencing and bounded task pages; P2 fixed Butler routes, unchanged command retransmission, redacted business errors, stale generation, strict receipt args, UTF-8 limits and no implicit retries passed; real model calls=0');
+{
+  // Liveness. RuntimeSupervisor stops the runtime after 15s without a heartbeat
+  // frame, so an unchanged activity must still be sent on every tick, and a
+  // transient probe failure must skip that tick instead of disposing the fiber
+  // and abandoning every in-flight task.
+  const tasks=[{id:'task-beat',status:'waiting_user',revision:1,pendingApproval:null}];
+  let failures=1;
+  const f=fixture({heartbeatMs:5,tasks,fetch:call=>{
+    if(call.url.endsWith('/tasks')&&failures>0){failures--;throw Error('TRANSIENT');}
+    return new Response(JSON.stringify(call.url.endsWith('health')?{status:'ok'}:{tasks}));
+  }});
+  await new Promise(resolve=>setTimeout(resolve,150));
+  const beats=f.frames.filter(frame=>frame.kind==='heartbeat');
+  assert.equal(failures,0);
+  assert.ok(beats.length>=3,`expected the interval to keep beating, got ${beats.length} frames`);
+  assert.deepEqual([...new Set(beats.map(frame=>JSON.parse(Buffer.from(frame.payload,'base64')).activity))],['waiting']);
+  assert.deepEqual(f.exits,[]);assert.equal(f.disposed,0);
+  // send() advances the sequence counter only after a successful write, so the
+  // skipped tick must leave no gap; a gap would make the supervisor reject every
+  // later frame with WIRE_IDENTITY.
+  assert.deepEqual(beats.map(frame=>frame.n),beats.map((_,index)=>index+2));
+  f.request('shutdown');await settle();assert.deepEqual(f.exits,[0]);assert.equal(f.disposed,1);
+}
+console.log('Local DSH host: P1 auth/replay fencing and bounded task pages; P2 fixed Butler routes, unchanged command retransmission, redacted business errors, stale generation, strict receipt args, UTF-8 limits and no implicit retries passed; heartbeat survives a transient probe failure and keeps beating while idle; real model calls=0');

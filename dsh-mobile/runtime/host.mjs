@@ -11,7 +11,7 @@ const MEMORY_KINDS = new Set(['preference','project']);
 /** An authenticated, inherited-pipe bridge around the real DSH context.
  * No listener, shell dispatcher or generic URL proxy. Business writes remain Butler's API.
  */
-export function serveDshRuntime(ctx, { input = process.stdin, output = process.stdout, exit = code => process.exit(code) } = {}) {
+export function serveDshRuntime(ctx, { input = process.stdin, output = process.stdout, exit = code => process.exit(code), heartbeatMs = 2000 } = {}) {
   const generation = process.env.OUTPOST_LAUNCH_ID;
   const encodedKey = process.env.OUTPOST_PIPE_TOKEN;
   delete process.env.OUTPOST_PIPE_TOKEN;
@@ -268,10 +268,20 @@ export function serveDshRuntime(ctx, { input = process.stdin, output = process.s
       const awaitingUser = task => task.status === 'waiting_user' || task.pendingApproval || task.pendingApprovals?.length;
       const activity = tasks.some(task => ['running', 'preparing'].includes(task.status) && !awaitingUser(task)) ? 'busy'
         : tasks.some(awaitingUser) ? 'waiting' : 'idle';
+      // Sent on every tick even when activity is unchanged. RuntimeSupervisor
+      // treats 15s without a frame as a dead runtime, so this is a liveness
+      // signal, not a change notification; suppressing repeats would kill an
+      // idle host.
       send('heartbeat', '', {activity});
-    } catch { void shutdown(1); }
-    finally { probing = false; }
-  }, 2000);
+    } catch {
+      // A jammed pipe (WIRE_BACKPRESSURE) or a momentarily busy butler is
+      // transient. Terminating here would dispose the fiber and abandon every
+      // in-flight task for one missed tick. Skipping costs nothing: the
+      // supervisor owns liveness and stops the runtime after 15s with its state
+      // intact, and its own 20s scheduler guard covers a wedged watcher, so a
+      // permanently failing probe is still bounded.
+    } finally { probing = false; }
+  }, heartbeatMs);
   send('ready', '', { protocol: 1, implementation: 'dsh-outpost' });
   return { changed() { send('changed', '', {}); }, close: () => shutdown(0) };
 }
