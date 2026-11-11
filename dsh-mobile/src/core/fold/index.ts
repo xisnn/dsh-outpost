@@ -850,6 +850,19 @@ function areBlockArraysEqual(a: readonly Block[], b: readonly Block[]): boolean 
   return true;
 }
 
+function areUnattributedEqual(
+  a: readonly UnattributedToolResult[] | undefined,
+  b: readonly UnattributedToolResult[] | undefined,
+): boolean {
+  const la = a ?? [];
+  const lb = b ?? [];
+  if (la.length !== lb.length) return false;
+  return la.every((x, i) => {
+    const y = lb[i]!;
+    return x.seq === y.seq && x.step === y.step && x.reason === y.reason;
+  });
+}
+
 export function areTurnsStructurallyEqual(a: Turn, b: Turn): boolean {
   if (a === b) return true;
   if (
@@ -859,7 +872,8 @@ export function areTurnsStructurallyEqual(a: Turn, b: Turn): boolean {
     a.endedAt !== b.endedAt ||
     a.reason !== b.reason ||
     a.delegated !== b.delegated ||
-    a.completionTaskCount !== b.completionTaskCount
+    a.completionTaskCount !== b.completionTaskCount ||
+    !areUnattributedEqual(a.unattributedResults, b.unattributedResults)
   ) {
     return false;
   }
