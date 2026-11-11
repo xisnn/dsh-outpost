@@ -740,7 +740,8 @@ export function ChatScreen({
   const lastTurnNo = chat.turns.length > 0 ? chat.turns[chat.turns.length - 1]!.turn : -1;
   const approvalCard = readOnly ? null : (
     <ApprovalBanner
-      key={sessionId}
+      // 与同一输入区里的 ChatComposer 是兄弟节点，key 不能都等于 sessionId
+      key={`approval:${sessionId}`}
       inline={butler}
       sessionId={sessionId}
       relatedSessionIds={butler ? relatedApprovalSessions : undefined}
