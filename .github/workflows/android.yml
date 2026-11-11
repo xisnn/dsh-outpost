@@ -175,9 +175,50 @@ jobs:
           chmod +x gradlew
           ./gradlew --no-daemon --console=plain :agent-core:test
 
-      # 失败时把 HTML/XML 报告留下来，否则只能看到一句 "BUILD FAILED"
+      # 把真实条数打出来，并且「一条都没跑」时硬失败。
+      #
+      # --console=plain 不输出测试条数，而 XML 报告原先只在 failure() 时上传，
+      # 于是 "BUILD SUCCESSFUL" 既可能是 38 条全过、也可能是压根没发现测试 ——
+      # 这两种情况在日志里长得一模一样，无法据此声称「38 项已在 CI 执行」。
+      - name: Report agent-core test counts
+        working-directory: dsh-mobile/android
+        run: |
+          set -euo pipefail
+          DIR=agent-core/build/test-results/test
+          if [ ! -d "$DIR" ]; then
+            echo "::error::找不到 JUnit 结果目录：$DIR"
+            exit 1
+          fi
+          attr() { printf '%s' "$2" | sed -n "s/.* $1=\"\([0-9]\{1,\}\)\".*/\1/p"; }
+          total=0; fails=0; errs=0; skips=0; files=0
+          for f in "$DIR"/TEST-*.xml; do
+            [ -e "$f" ] || continue
+            hdr=$(tr '\n' ' ' < "$f" | grep -o '<testsuite[^>]*>' | head -1)
+            if [ -z "$hdr" ]; then
+              echo "::error::无法解析 testsuite 头：$f"
+              exit 1
+            fi
+            n=$(attr tests "$hdr"); ff=$(attr failures "$hdr")
+            ee=$(attr errors "$hdr"); ss=$(attr skipped "$hdr")
+            n=${n:-0}; ff=${ff:-0}; ee=${ee:-0}; ss=${ss:-0}
+            echo "  $(basename "$f"): tests=$n failures=$ff errors=$ee skipped=$ss"
+            total=$((total + n)); fails=$((fails + ff))
+            errs=$((errs + ee)); skips=$((skips + ss)); files=$((files + 1))
+          done
+          echo "agent-core JVM 合计：files=$files tests=$total failures=$fails errors=$errs skipped=$skips"
+          if [ "$total" -eq 0 ]; then
+            echo "::error::一条测试都没执行 —— BUILD SUCCESSFUL 属于空跑，不接受"
+            exit 1
+          fi
+          if [ "$fails" -ne 0 ] || [ "$errs" -ne 0 ]; then
+            echo "::error::存在失败或错误的测试"
+            exit 1
+          fi
+
+      # 无论成败都留下 HTML/XML 报告：成功时它是「真的跑了这么多条」的证据，
+      # 失败时它是定位依据。只在 failure() 上传会让绿色运行无法复核条数。
       - name: Upload agent-core test report
-        if: failure()
+        if: always()
         uses: actions/upload-artifact@v4
         with:
           name: agent-core-test-report
