@@ -210,6 +210,23 @@ await check('CI 的 node-version 和 engines 不矛盾', () => {
 // 又是「本地过、CI 挂」。这个检查直接读 package.json 的脚本，
 // 确认「import 了 .ts 的测试」必须用 tsx 启动。
 
+/**
+ * 从一条 package.json 脚本里取出「由 node 直接启动」的测试文件。
+ *
+ * 必须按 && 切段后逐段判断，并收下该段里的**全部**测试文件：
+ * `node --test a b c d` 是常见写法，旧逻辑只认「node 紧跟单个文件」，
+ * 于是整组文件都没被扫描 —— 分组里任何一个 import .ts 都会逃过门禁。
+ */
+function nodeLaunchedTestFiles(cmd) {
+  const files = [];
+  for (const segment of cmd.split('&&')) {
+    const s = segment.trim();
+    if (!/^node(\s|$)/.test(s)) continue;
+    for (const m of s.matchAll(/tests\/[\w.-]+\.mjs/g)) files.push(m[0]);
+  }
+  return files;
+}
+
 await check('import .ts 的测试必须用 tsx 启动', () => {
   const pkg = JSON.parse(readFileSync('package.json', 'utf8'));
   const scripts = pkg.scripts ?? {};
@@ -218,8 +235,7 @@ await check('import .ts 的测试必须用 tsx 启动', () => {
   for (const [name, cmd] of Object.entries(scripts)) {
     if (typeof cmd !== 'string') continue;
     // 找出这条命令里通过 node 直接跑的测试文件
-    for (const m of cmd.matchAll(/node\s+(?:--require\s+\S+\s+)?(tests\/[\w.-]+\.mjs)/g)) {
-      const file = m[1];
+    for (const file of nodeLaunchedTestFiles(cmd)) {
       let src;
       try {
         src = readFileSync(file, 'utf8');
@@ -254,6 +270,34 @@ await check('TEST_TS_IMPORT 守卫：本文件检测逻辑本身有效', () => {
   const sample = `import x from '../src/core/transport/index.ts';`;
   const re = /from\s+['"][^'"]*\/src\/[^'"]*\.ts['"]/;
   return re.test(sample) ? true : '检测逻辑失效了（正则匹配不到 import .ts）';
+});
+
+await check('守卫必须覆盖 node --test 多文件分组里的每一个文件', () => {
+  // 真实踩坑：motion-collapse-spec 是 `node --test a b c d` 里的第 3 个文件，
+  // 旧提取逻辑只认「node 紧跟单个文件」，于是它从未被扫描 ——
+  // 它 import 了 .ts，本地 Node 24 过、CI Node 20 挂。
+  const group = 'node --test tests/nav-motion-spec.mjs tests/adaptive-navigation-spec.mjs tests/motion-collapse-spec.mjs tests/motion-primitives-spec.mjs';
+  const got = nodeLaunchedTestFiles(group);
+  const want = [
+    'tests/nav-motion-spec.mjs',
+    'tests/adaptive-navigation-spec.mjs',
+    'tests/motion-collapse-spec.mjs',
+    'tests/motion-primitives-spec.mjs',
+  ];
+  const missing = want.filter((f) => !got.includes(f));
+  return missing.length === 0 ? true : `分组里这些文件没被扫描：${missing.join('、')}`;
+});
+
+await check('守卫仍认单文件与 --require 前缀，且不误收 tsx 启动的文件', () => {
+  const single = nodeLaunchedTestFiles('node tests/foo-spec.mjs');
+  const req = nodeLaunchedTestFiles('node --require ./tests/support/node20-sim.cjs tests/bar-spec.mjs');
+  const viaTsx = nodeLaunchedTestFiles('tsx tests/baz-spec.mjs');
+  const mixed = nodeLaunchedTestFiles('node tests/a-spec.mjs && tsx tests/b-spec.mjs');
+  if (single.join() !== 'tests/foo-spec.mjs') return '单文件形式识别失败';
+  if (req.join() !== 'tests/bar-spec.mjs') return '--require 前缀形式识别失败';
+  if (viaTsx.length !== 0) return 'tsx 启动的文件不该被当成 node 启动';
+  if (mixed.join() !== 'tests/a-spec.mjs') return '混合链里应只收 node 段';
+  return true;
 });
 
 // ── 5. 集成测试能在这个 Node 版本上真跑 ──────────────────────
