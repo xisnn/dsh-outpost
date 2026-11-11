@@ -4,9 +4,23 @@ import { readFileSync } from 'node:fs';
 import vm from 'node:vm';
 import ts from 'typescript';
 
-// ToolCard 现在共用真实的状态判定模块；这里注入真实实现而不是桩，
+// ToolCard 现在共用真实的状态判定模块。这里注入**真实实现**而不是桩，
 // 免得 motion 用例跑在一个和产品不同的状态逻辑上。
-const toolStatusModule = await import('../src/core/toolStatus.ts');
+//
+// ⚠️ 不能在运行时直接加载 ../src/core/toolStatus.ts：本文件在链里由
+// `node --test` 启动，Node 20 不认 .ts 扩展名（ERR_UNKNOWN_FILE_EXTENSION），
+// 而 Node 24 有原生类型剥离 —— 会变成「本地过、CI 挂」。
+// 因此按本文件加载 TSX 的同一套办法：转译后在 vm 里求值。
+const toolStatusModule = (() => {
+  const src = readFileSync(new URL('../src/core/toolStatus.ts', import.meta.url), 'utf8');
+  const code = ts.transpileModule(src, { compilerOptions: {
+    target: ts.ScriptTarget.ES2021, module: ts.ModuleKind.CommonJS,
+  } }).outputText;
+  const exports = {};
+  // toolStatus.ts 只有 type-only import，转译后不产生 require
+  vm.runInNewContext(code, { exports, require: () => ({}) });
+  return exports;
+})();
 
 const MOTION = { press: 100, enter: 160, exit: 120, layout: 240, navigation: 240 };
 const source = name => readFileSync(new URL('../src/components/' + name, import.meta.url), 'utf8');
