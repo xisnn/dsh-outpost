@@ -4,6 +4,10 @@ import { readFileSync } from 'node:fs';
 import vm from 'node:vm';
 import ts from 'typescript';
 
+// ToolCard 现在共用真实的状态判定模块；这里注入真实实现而不是桩，
+// 免得 motion 用例跑在一个和产品不同的状态逻辑上。
+const toolStatusModule = await import('../src/core/toolStatus.ts');
+
 const MOTION = { press: 100, enter: 160, exit: 120, layout: 240, navigation: 240 };
 const source = name => readFileSync(new URL('../src/components/' + name, import.meta.url), 'utf8');
 function load(name, modules, extra = '') {
@@ -82,6 +86,7 @@ function harness(name = 'MotionCollapse.tsx', extra = '') {
     '../design/theme': { useTheme: () => ({}) },
     '../design/tokens': { motion: { thinkingCycleMs: 1600 }, toolMeta: () => ({}) },
     '../core/toolDiff': {}, './ui': { Collapse: 'Collapse' },
+    '../core/toolStatus': toolStatusModule,
     './MotionPressable': { MotionPressable: 'Pressable' }, './ToolOutputViewer': {},
   }, extra);
   Component = exports.MotionCollapse || exports.Decoration;

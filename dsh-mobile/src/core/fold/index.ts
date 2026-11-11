@@ -88,6 +88,11 @@ export interface ToolBlock {
   isError?: boolean;
   /** 还没收到 tool/result */
   pending?: boolean;
+  /**
+   * 轮次已收尾但始终没收到结果 —— 与「仍在执行」和「已确认失败」都不同。
+   * 既不能显示成完成，也不能显示成失败。迟到的真实结果可以覆盖它。
+   */
+  resultUnconfirmed?: boolean;
 }
 
 /** 交付物：助手通过 present 工具发给用户的文件（图片/PDF 等） */
@@ -579,6 +584,8 @@ export function foldEvents(records: EventRecord[]): Turn[] {
           target.output = output;
           target.isError = isError;
           target.pending = false;
+          // 真实结果到达即推翻「未确认」，包括 turn/end 之后迟到的结果。
+          target.resultUnconfirmed = undefined;
         } else if (callId) {
           // 找不到调用记录：单独建一个已完成的工具块
           const stepNo = num(d.step) ?? currentStepNo ?? 1;
@@ -604,6 +611,13 @@ export function foldEvents(records: EventRecord[]): Turn[] {
         b.turn.running = false;
         b.turn.endedAt = ev.time;
         b.turn.reason = reason?.kind;
+        // 轮次已结束却仍没有结果的工具：落「结果未确认」，
+        // 不能继续显示「执行中」（永远转圈），也不能当成完成或失败。
+        for (const s of b.turn.steps) {
+          for (const blk of s.blocks) {
+            if (blk.kind === 'tool' && blk.pending) blk.resultUnconfirmed = true;
+          }
+        }
         if (current?.turn.turn === turnNo) current = undefined;
         currentStepNo = undefined;
         break;
@@ -791,7 +805,8 @@ function areBlocksEqual(a: Block, b: Block): boolean {
       argsEqual &&
       a.output === b.output &&
       a.isError === b.isError &&
-      a.pending === b.pending
+      a.pending === b.pending &&
+      a.resultUnconfirmed === b.resultUnconfirmed
     );
   }
   return false;

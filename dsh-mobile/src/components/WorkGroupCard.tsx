@@ -14,6 +14,7 @@ import { ActivityIndicator, StyleSheet, Text, View } from 'react-native';
 import { MotionPressable as Pressable } from './MotionPressable';
 
 import { workGroupSummary, type WorkGroupView } from '../core/workGroup';
+import { toolStatus, TOOL_STATUS_LABEL } from '../core/toolStatus';
 import { useTheme } from '../design/theme';
 import { radius, space, type, weight, toolMeta } from '../design/tokens';
 import { AssistantText } from './Message';
@@ -37,13 +38,13 @@ export function WorkGroupCard({
 
   const statusColor = group.failed
     ? tv.colors.danger
-    : group.running
+    : group.running || group.hasUnconfirmedTool
       ? tv.colors.textTertiary
       : tv.colors.success;
 
   const latest = group.latestTool;
   const latestText = latest
-    ? `${toolMeta(latest.name).label}${latest.pending ? ' · 执行中' : latest.isError ? ' · 失败' : ' · 完成'}`
+    ? `${toolMeta(latest.name).label} · ${TOOL_STATUS_LABEL[toolStatus(latest)]}`
     : '';
 
   return (
@@ -56,7 +57,7 @@ export function WorkGroupCard({
         ]}
         accessibilityRole="button"
         accessibilityState={{ expanded: open }}
-        accessibilityLabel={group.running ? '执行过程，进行中' : '执行过程，已完成'}
+        accessibilityLabel={group.running ? '执行过程，进行中' : group.hasUnconfirmedTool ? '执行过程，有结果未确认' : '执行过程，已完成'}
       >
         <View style={styles.iconCol}>
           {group.running ? (
@@ -64,7 +65,7 @@ export function WorkGroupCard({
           ) : (
             <View style={[styles.iconBadge, { borderColor: statusColor + '44' }]}>
               <Text style={[styles.iconChar, { color: statusColor }]}>
-                {group.failed ? '!' : '✓'}
+                {group.failed ? '!' : group.hasUnconfirmedTool ? '?' : '✓'}
               </Text>
             </View>
           )}

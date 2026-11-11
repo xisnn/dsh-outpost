@@ -39,10 +39,15 @@ export interface WorkGroupView {
   finalStep?: number;
   toolCount: number;
   reasoningCount: number;
-  /** 是否还有工具在跑（pending） */
+  /** 是否还有工具在跑（pending，不含已收尾但未确认的） */
   hasPendingTool: boolean;
-  /** 是否有工具失败 */
+  /** 是否有工具已确认失败 */
   failed: boolean;
+  /** 轮次已收尾但结果缺失的工具数 —— 既不算成功也不算失败 */
+  unconfirmedCount: number;
+  hasUnconfirmedTool: boolean;
+  /** 已拿到结果的工具数（成功或失败都算已执行） */
+  executedCount: number;
   running: boolean;
   /** 最近一次工具调用（用于「正在执行」时展示动态） */
   latestTool?: Extract<Block, { kind: 'tool' }>;
@@ -110,8 +115,10 @@ export function buildWorkGroup(turn: Turn): WorkGroupView | null {
     return null;
   }
 
-  const hasPendingTool = toolBlocks.some((b) => b.pending);
-  const failed = toolBlocks.some((b) => b.isError);
+  const hasPendingTool = toolBlocks.some((b) => b.pending && !b.resultUnconfirmed);
+  const failed = toolBlocks.some((b) => b.isError && !b.resultUnconfirmed);
+  const unconfirmedCount = toolBlocks.filter((b) => b.resultUnconfirmed).length;
+  const executedCount = toolBlocks.filter((b) => !b.pending).length;
   const running = !!turn.running || hasPendingTool;
 
   let durationSec: number | undefined;
@@ -128,6 +135,9 @@ export function buildWorkGroup(turn: Turn): WorkGroupView | null {
     reasoningCount,
     hasPendingTool,
     failed,
+    unconfirmedCount,
+    hasUnconfirmedTool: unconfirmedCount > 0,
+    executedCount,
     running,
     latestTool: toolBlocks.length > 0 ? toolBlocks[toolBlocks.length - 1] : undefined,
     startedAt: turn.startedAt,
@@ -151,12 +161,16 @@ export function buildWorkGroupMap(turns: Turn[]): Map<number, WorkGroupView> {
 /**
  * 折叠态摘要。
  * 例：「已执行 8 步 · 耗时 25 秒」/「执行失败 · 已执行 3 步 · 耗时 6 秒」
+ *     「已执行 1 步 · 2 步结果未确认 · 耗时 6 秒」
+ *
+ * 只把拿到结果的工具算作「已执行」—— 结果缺失既不算成功也不算失败。
  */
 export function workGroupSummary(group: WorkGroupView): string {
   const parts: string[] = [];
   if (group.failed) parts.push('执行失败');
-  if (group.toolCount > 0) parts.push(`已执行 ${group.toolCount} 步`);
-  else if (group.reasoningCount > 0) parts.push(`已思考 ${group.reasoningCount} 段`);
+  if (group.executedCount > 0) parts.push(`已执行 ${group.executedCount} 步`);
+  else if (group.unconfirmedCount === 0 && group.reasoningCount > 0) parts.push(`已思考 ${group.reasoningCount} 段`);
+  if (group.unconfirmedCount > 0) parts.push(`${group.unconfirmedCount} 步结果未确认`);
   if (group.durationSec !== undefined) parts.push(`耗时 ${group.durationSec} 秒`);
   return parts.join(' · ');
 }

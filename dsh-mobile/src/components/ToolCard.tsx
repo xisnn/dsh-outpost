@@ -22,6 +22,7 @@ import {
   View,
 } from 'react-native';
 import type { ToolBlock } from '../core/fold';
+import { toolStatus, TOOL_STATUS_LABEL } from '../core/toolStatus';
 import { buildOutputPreview, parseToolDiff, toolPath, type DiffLine, type ToolDiff } from '../core/toolDiff';
 import { useTheme } from '../design/theme';
 import { useReduceMotion } from '../design/useReduceMotion';
@@ -149,17 +150,18 @@ export function ToolCard({ block }: { block: ToolBlock }) {
   const inputText = useMemo(() => typeof block.input === 'string' ? block.input : JSON.stringify(block.input, null, 2) ?? '(无参数)', [block.input]);
   const inputPreview = useMemo(() => buildOutputPreview(inputText, 12, 1200, '参数'), [inputText]);
 
-  const statusColor = block.pending
+  const status = toolStatus(block);
+  const statusColor = status === 'running' || status === 'unconfirmed'
     ? tv.colors.textTertiary
-    : block.isError
+    : status === 'failed'
       ? tv.colors.danger
       : tv.colors.success;
-  const statusText = block.pending ? '执行中' : block.isError ? '失败' : '完成';
+  const statusText = TOOL_STATUS_LABEL[status];
 
   const toggle = () => setOpen((v) => !v);
 
   return (
-    <View style={[styles.card, block.isError && styles.cardError]}>
+    <View style={[styles.card, status === 'failed' && styles.cardError]}>
       {/* 只有头部负责展开/收起：卡片正文里还有按钮，整卡 Pressable 会抢点击 */}
       <Pressable
         onPress={toggle}
@@ -173,7 +175,7 @@ export function ToolCard({ block }: { block: ToolBlock }) {
         accessibilityHint="展开或收起工具详情"
       >
         <View style={styles.iconCol}>
-          {block.pending ? (
+          {status === 'running' ? (
             <PulseDot color={tv.colors.textTertiary} styles={styles} />
           ) : (
             <View style={[styles.iconBadge, { borderColor: statusColor + '44' }]}>
@@ -227,10 +229,10 @@ export function ToolCard({ block }: { block: ToolBlock }) {
           </DetailSection>
 
           <DetailSection title="输出" open={outputOpen} onToggle={() => setOutputOpen(value => !value)} styles={styles}
-            detail={<Text style={styles.sectionHint}>{block.output === undefined && block.pending ? '等待返回' : `${outputPreview.totalLines} 行`}</Text>}>
-            {outputPreview.text ? <Text style={[styles.code, block.isError && { color: tv.colors.danger }]} selectable>
+            detail={<Text style={styles.sectionHint}>{block.output === undefined && status === 'unconfirmed' ? '未收到结果' : block.output === undefined && status === 'running' ? '等待返回' : `${outputPreview.totalLines} 行`}</Text>}>
+            {outputPreview.text ? <Text style={[styles.code, status === 'failed' && { color: tv.colors.danger }]} selectable>
               {outputPreview.text}
-            </Text> : <Text style={styles.emptyText}>{block.pending && block.output === undefined ? '等待工具返回输出…' : '(无输出)'}</Text>}
+            </Text> : <Text style={styles.emptyText}>{status === 'unconfirmed' ? '本轮已结束，但没有收到这个工具的结果' : status === 'running' ? '等待工具返回输出…' : '(无输出)'}</Text>}
             {outputPreview.truncated ? (
               <Pressable onPress={() => setViewer('output')} style={styles.linkBtn}
                 accessibilityRole="button" accessibilityLabel="查看完整输出">
