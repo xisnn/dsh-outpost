@@ -62,6 +62,21 @@ export interface ReasoningBlock {
   streaming?: boolean;
 }
 
+/**
+ * 未能归属到任何工具调用的结果，只留诊断线索。
+ *
+ * 刻意不记录工具输出、也不记录 ID 值：这些可能含敏感内容，
+ * 而诊断只需要「哪一条事件、为什么没绑上」。
+ */
+export interface UnattributedToolResult {
+  seq: number;
+  step?: number;
+  reason: 'missing-id' | 'conflicting-id';
+}
+
+/** 每轮诊断条数上限，避免长会话里无界增长。 */
+const MAX_UNATTRIBUTED_RESULTS = 5;
+
 export interface ToolBlock {
   kind: 'tool';
   callId: string;
@@ -114,6 +129,8 @@ export interface Turn {
   /** completed / aborted / error / 未结束 */
   reason?: string;
   running: boolean;
+  /** 未归属的工具结果诊断（有界，不含输出）。正常会话里不存在此字段。 */
+  unattributedResults?: UnattributedToolResult[];
 }
 
 const EMPTY = '';
@@ -207,6 +224,23 @@ function toolResultIsError(message: Record<string, unknown>, data: Record<string
       && (b as { type?: unknown }).type === 'tool-result'
       && (b as { isError?: unknown }).isError === true,
   );
+}
+
+/**
+ * 只接受明确且一致的工具调用 ID。
+ *
+ * 多个非空来源不一致时返回 conflict，调用方必须放弃绑定 —— 按字段优先级
+ * 静默挑一个会把结果归属到错误的调用上。空串与非字符串一律不算 ID，
+ * 也不允许退化成「按到达顺序认领第一个未决块」。
+ */
+function resolveCallId(candidates: unknown[]): { callId: string; conflict: boolean } {
+  const ids = new Set<string>();
+  for (const c of candidates) {
+    if (typeof c === 'string' && c) ids.add(c);
+  }
+  if (ids.size === 0) return { callId: '', conflict: false };
+  if (ids.size > 1) return { callId: '', conflict: true };
+  return { callId: [...ids][0], conflict: false };
 }
 
 function reasoningOf(blocks: unknown): string {
@@ -333,6 +367,17 @@ export function foldEvents(records: EventRecord[]): Turn[] {
       builder.turn.steps.push(s);
     }
     return s;
+  };
+
+  const noteUnattributed = (
+    turn: Turn,
+    seq: number,
+    step: number | undefined,
+    reason: UnattributedToolResult['reason'],
+  ): void => {
+    const list = turn.unattributedResults ?? (turn.unattributedResults = []);
+    if (list.length >= MAX_UNATTRIBUTED_RESULTS) return;
+    list.push({ seq, ...(step === undefined ? {} : { step }), reason });
   };
 
   for (const ev of events) {
@@ -475,11 +520,18 @@ export function foldEvents(records: EventRecord[]): Turn[] {
         const existing = callId
           ? step.blocks.find((x): x is ToolBlock => x.kind === 'tool' && x.callId === callId)
           : undefined;
+        const { input, raw } = parseArguments(d.arguments);
+        const toolName = typeof d.name === 'string' ? d.name : 'tool';
         if (existing) {
           if (existing.output === undefined) existing.pending = true;
+          // 结果先到时建的是占位块（name='tool'、空参数），真实调用到达后补齐。
+          if (existing.name === 'tool' && toolName !== 'tool') {
+            existing.name = toolName;
+            existing.input = input;
+            existing.rawArguments = raw;
+            if (DELEGATING_TOOLS.has(toolName)) b.turn.delegated = true;
+          }
         } else {
-          const { input, raw } = parseArguments(d.arguments);
-          const toolName = typeof d.name === 'string' ? d.name : 'tool';
           step.blocks.push({
             kind: 'tool',
             callId,
@@ -500,9 +552,21 @@ export function foldEvents(records: EventRecord[]): Turn[] {
         const turnNo = num(d.turn) ?? current?.turn.turn ?? 0;
         const b = ensureTurn(turnNo);
         const message = (d.message ?? {}) as Record<string, unknown>;
-        const callId =
-          (typeof message.toolCallId === 'string' && message.toolCallId) ||
-          (typeof d.toolCallId === 'string' ? d.toolCallId : '');
+        const source = (message.source ?? {}) as Record<string, unknown>;
+        const { callId, conflict } = resolveCallId([
+          message.toolCallId,
+          source.callId,
+          d.toolCallId,
+          d.callId,
+        ]);
+
+        // 没有明确一致的 ID 就不认领任何块：宁可在界面上保持「结果未确认」，
+        // 也不能把结果挂到错误的调用上。
+        if (!callId) {
+          noteUnattributed(b.turn, ev.seq, num(d.step), conflict ? 'conflicting-id' : 'missing-id');
+          current = b;
+          break;
+        }
 
         // 在所有 step 里找对应工具块
         const target = b.turn.steps
