@@ -175,6 +175,40 @@ function textOf(blocks: unknown): string {
     .join('');
 }
 
+/**
+ * tool/result 的 content 有两个形状：扁平 `[{type:'text'}]`，
+ * 以及 `[{type:'tool-result', content:[{type:'text'}]}]`（真实 Host 的嵌套形状，
+ * 网关 v0.10.3 的 toolResultDetails 也按这两个分支遍历）。
+ * 只认扁平形状会把整个 JSON 结构当成输出显示给用户。
+ */
+function toolResultText(content: unknown): string {
+  if (!Array.isArray(content)) return EMPTY;
+  const parts: string[] = [];
+  const visit = (blocks: unknown[]): void => {
+    for (const b of blocks) {
+      if (!b || typeof b !== 'object') continue;
+      const blk = b as { type?: unknown; text?: unknown; content?: unknown };
+      if (blk.type === 'text' && typeof blk.text === 'string') parts.push(blk.text);
+      else if (blk.type === 'tool-result' && Array.isArray(blk.content)) visit(blk.content);
+    }
+  };
+  visit(content);
+  return parts.join('');
+}
+
+/** 失败判定要覆盖嵌套块上的 isError 与 data.error，与网关 buildWireEvent 的口径一致。 */
+function toolResultIsError(message: Record<string, unknown>, data: Record<string, unknown>): boolean {
+  if (message.isError === true) return true;
+  if (data.error) return true;
+  const content = message.content;
+  if (!Array.isArray(content)) return false;
+  return content.some(
+    (b) => !!b && typeof b === 'object'
+      && (b as { type?: unknown }).type === 'tool-result'
+      && (b as { isError?: unknown }).isError === true,
+  );
+}
+
 function reasoningOf(blocks: unknown): string {
   if (!Array.isArray(blocks)) return EMPTY;
   return blocks
@@ -475,10 +509,11 @@ export function foldEvents(records: EventRecord[]): Turn[] {
           .flatMap((s) => s.blocks)
           .find((x): x is ToolBlock => x.kind === 'tool' && x.callId === callId);
 
-        const output = textOf(message.content) || asText(message.content);
+        const output = toolResultText(message.content) || asText(message.content);
+        const isError = toolResultIsError(message, d);
         if (target) {
           target.output = output;
-          target.isError = message.isError === true;
+          target.isError = isError;
           target.pending = false;
         } else if (callId) {
           // 找不到调用记录：单独建一个已完成的工具块
@@ -490,7 +525,7 @@ export function foldEvents(records: EventRecord[]): Turn[] {
             name: 'tool',
             input: {},
             output,
-            isError: message.isError === true,
+            isError,
             pending: false,
           });
         }
