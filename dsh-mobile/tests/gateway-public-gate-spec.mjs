@@ -891,6 +891,14 @@ console.log('── 7. -Stop / -Status：原有行为不受门禁影响 ──')
         env: Object.assign({}, process.env, {
           DSH_STATE_DIR: stateDir,
           DSH_POCKET_ROOT: tmp,
+          // start-tunnel.ps1 是 Windows 脚本：cloudflared 探测的回退分支会
+          // Join-Path $env:LOCALAPPDATA / $env:ProgramFiles（:74-75）。这两个
+          // 变量在 ubuntu runner 上不存在，Join-Path 收到 $null 会直接抛
+          // ParameterArgumentValidationErrorNullNotAllowed，脚本在走到 -Status
+          // 自己的逻辑之前就 exit 1 —— 看起来像门禁拦了它，其实不是。
+          // 只在缺失时补临时目录，Windows 上沿用原值，行为不变。
+          LOCALAPPDATA: process.env.LOCALAPPDATA || tmp,
+          ProgramFiles: process.env.ProgramFiles || tmp,
         }),
       },
     );
