@@ -1,0 +1,31 @@
+{
+  "version": "0.10.3",
+  "variant": "mgmt-auth-patched",
+  "files": {
+    "lib/index.mjs": {
+      "pristineHash": "602a3ed1f45e0f11cb28fc0b30900019cb7bddb9af6fbfb13b1f265f55cb9fcb",
+      "patchedHash": "868e159b0f664f44b3e29ebe8581a5a8507adf7852394277e9ad1b60bf411dcc"
+    },
+    "lib/devices.js": {
+      "pristineHash": "633957558c0fb05fced1b73cfa8b76f7fdfb9bad8cb09fbd9f1af5d82bae3503",
+      "patchedHash": "6226d4d7437d630d2743d66b75b845cd88553ea29477fd6a3cc6457321265d9b"
+    },
+    "lib/gateway-state.mjs": {
+      "pristineHash": "971fbc1052ee49a1585db7124c20f16b36dddfe4c49759e4a6c48ca13b553c75",
+      "patchedHash": "5989227004a1de26c38db08697935a321dddee4647ba66e661fb142266f8b67c"
+    },
+    "lib/home-paths.mjs": {
+      "pristineHash": null,
+      "patchedHash": "08eec1839713961fb001bb27b0922bde03c8494a2a8efacc184f9f03520a9b37"
+    },
+    "lib/registry-lock.js": {
+      "pristineHash": null,
+      "patchedHash": "b55c9bfb23176095a23175867635b7781d1457ddcdd8b657b19b2554c978663e"
+    }
+  },
+  "addedFiles": [
+    "lib/home-paths.mjs",
+    "lib/registry-lock.js"
+  ],
+  "at": "2026-11-11T17:37:49.417Z"
+}
