@@ -378,83 +378,104 @@ export class DshConnection {
     const ctrl = new AbortController();
     const timer = setTimeout(() => ctrl.abort(), timeoutMs);
     const url = `${this.baseUrl}/api/${endpoint}`;
-    let res: Response;
+    // 定时器必须覆盖到**响应体读完**，与 request() 的 finally 对齐。
+    //
+    // 此前是在收到响应头时就 clearTimeout，于是下面的 `await res.json()`
+    // 完全没有超时保护：服务端回了 200 头再卡住 body，Promise 就永久挂起 ——
+    // 不报错、不返回，上层 pending 状态永远结束不了（发送按钮死掉、spinner 永转）。
     try {
-      res = await this.fetchImpl(url, {
-        method: 'POST',
-        headers: {
-          'Content-Type': 'application/json',
-          Cookie: this.cookie,
-        },
-        body: JSON.stringify(body),
-        // ⚠️ 必须有超时。
+      let res: Response;
+      try {
+        res = await this.fetchImpl(url, {
+          method: 'POST',
+          headers: {
+            'Content-Type': 'application/json',
+            Cookie: this.cookie,
+          },
+          body: JSON.stringify(body),
+          // ⚠️ 必须有超时。
+          //
+          // 之前没有 signal，一旦网络半死不活（信号弱、切网、服务端卡住），
+          // fetch 会**永久挂起** —— 不报错、不返回、也不重试。
+          // 表现就是：界面一直转圈、连接状态卡在「检测中」、发消息没反应。
+          // 手机关掉再开 WiFi 才恢复。
+          signal: ctrl.signal,
+        });
+      } catch (e) {
+        const err = e as { name?: string; message?: string };
+        if (__DEV__) console.log('[transport] fetch failed', url, err?.name, err?.message);
+        // 超时单独给一条提示：和「连不上」不是一回事，
+        // 用户能做的事也不同（等一下再试 vs 检查地址/网络）。
+        if (err?.name === 'AbortError') {
+          throw makeRpcError(
+            endpoint,
+            'network',
+            `请求超时（${Math.round(timeoutMs / 1000)} 秒无响应）`,
+            e,
+          );
+        }
+        // 网络层的错误统一包一层可操作提示 —— 用户看到
+        // 「Network request failed」是不知道该怎么做的。
+        throw makeRpcError(endpoint, 'network', `${err?.name ?? ''}: ${err?.message ?? ''}`.trim(), e);
+      }
+      if (!res.ok) {
+        // HTTP 状态码本身也带信息：401 = 鉴权失效，403 = 访问地址限制，5xx = 服务端内部错
+        throw makeRpcError(endpoint, 'http', `HTTP ${res.status}`);
+      }
+      // P0-3：如果服务端在成功响应头中下发了轮换后的 dsh-auth Set-Cookie，同步更新内存 Cookie
+      try {
+        const setCookie = res.headers?.get?.('set-cookie');
+        if (setCookie && setCookie.includes('dsh-auth')) {
+          const rotated = extractCookie([setCookie]);
+          if (rotated && rotated.startsWith('dsh-auth') && rotated !== this.cookie) {
+            this.cookie = rotated;
+            void import('../cookieJar')
+              .then(({ syncNativeCookieJar }) => syncNativeCookieJar(this.baseUrl, rotated))
+              .catch(() => undefined);
+          }
+        }
+      } catch {
+        /* ignore header read differences across environments */
+      }
+      // 解析失败不能把原始异常抛给上层 —— 用户会看到
+      // "Unexpected token < in JSON" 这种完全看不懂的东西。
+      let parsed: { result?: RpcResult<T> } | undefined;
+      try {
+        parsed = (await res.json()) as { result?: RpcResult<T> };
+      } catch (e) {
+        // 响应体阶段被超时 abort 时，必须仍然说「超时」。
         //
-        // 之前没有 signal，一旦网络半死不活（信号弱、切网、服务端卡住），
-        // fetch 会**永久挂起** —— 不报错、不返回、也不重试。
-        // 表现就是：界面一直转圈、连接状态卡在「检测中」、发消息没反应。
-        // 手机关掉再开 WiFi 才恢复。
-        signal: ctrl.signal,
-      });
-      clearTimeout(timer);
-    } catch (e) {
-      clearTimeout(timer);
-      const err = e as { name?: string; message?: string };
-      if (__DEV__) console.log('[transport] fetch failed', url, err?.name, err?.message);
-      // 超时单独给一条提示：和「连不上」不是一回事，
-      // 用户能做的事也不同（等一下再试 vs 检查地址/网络）。
-      if (err?.name === 'AbortError') {
+        // 下面的 catch 原本无条件把 parsed 置空，于是 abort 会一路走到
+        // 「malformed response（没有 result 字段）」—— 把超时说成上游改了
+        // 返回格式，两者的可操作建议完全不同，也破坏了 fetch 阶段
+        // 已经建立的「超时单独提示」约定。
+        if (ctrl.signal.aborted || (e as { name?: string })?.name === 'AbortError') {
+          throw makeRpcError(
+            endpoint,
+            'network',
+            `请求超时（${Math.round(timeoutMs / 1000)} 秒无响应）`,
+            e,
+          );
+        }
+        parsed = undefined;
+      }
+      const result = parsed?.result;
+      if (!result) {
+        // 能拿到 200 但结构不对 —— 典型的「上游改了返回格式」
+        throw makeRpcError(endpoint, 'malformed', 'malformed response（没有 result 字段）');
+      }
+      if (result.ok === false) {
+        const err = result.error;
         throw makeRpcError(
           endpoint,
-          'network',
-          `请求超时（${Math.round(timeoutMs / 1000)} 秒无响应）`,
-          e,
+          'rpc',
+          `${err?.code ?? 'unknown'} ${err?.message ?? ''}`.trim(),
         );
       }
-      // 网络层的错误统一包一层可操作提示 —— 用户看到
-      // 「Network request failed」是不知道该怎么做的。
-      throw makeRpcError(endpoint, 'network', `${err?.name ?? ''}: ${err?.message ?? ''}`.trim(), e);
+      return result.value as T;
+    } finally {
+      clearTimeout(timer);
     }
-    if (!res.ok) {
-      // HTTP 状态码本身也带信息：401 = 鉴权失效，403 = 访问地址限制，5xx = 服务端内部错
-      throw makeRpcError(endpoint, 'http', `HTTP ${res.status}`);
-    }
-    // P0-3：如果服务端在成功响应头中下发了轮换后的 dsh-auth Set-Cookie，同步更新内存 Cookie
-    try {
-      const setCookie = res.headers?.get?.('set-cookie');
-      if (setCookie && setCookie.includes('dsh-auth')) {
-        const rotated = extractCookie([setCookie]);
-        if (rotated && rotated.startsWith('dsh-auth') && rotated !== this.cookie) {
-          this.cookie = rotated;
-          void import('../cookieJar')
-            .then(({ syncNativeCookieJar }) => syncNativeCookieJar(this.baseUrl, rotated))
-            .catch(() => undefined);
-        }
-      }
-    } catch {
-      /* ignore header read differences across environments */
-    }
-    // 解析失败不能把原始异常抛给上层 —— 用户会看到
-    // "Unexpected token < in JSON" 这种完全看不懂的东西。
-    let parsed: { result?: RpcResult<T> } | undefined;
-    try {
-      parsed = (await res.json()) as { result?: RpcResult<T> };
-    } catch {
-      parsed = undefined;
-    }
-    const result = parsed?.result;
-    if (!result) {
-      // 能拿到 200 但结构不对 —— 典型的「上游改了返回格式」
-      throw makeRpcError(endpoint, 'malformed', 'malformed response（没有 result 字段）');
-    }
-    if (result.ok === false) {
-      const err = result.error;
-      throw makeRpcError(
-        endpoint,
-        'rpc',
-        `${err?.code ?? 'unknown'} ${err?.message ?? ''}`.trim(),
-      );
-    }
-    return result.value as T;
   }
 
   /**

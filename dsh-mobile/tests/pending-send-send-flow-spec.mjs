@@ -77,7 +77,7 @@ class MemoryPersistence {
 
 let clock = 1_800_000_000_000;
 let seq = 0;
-function makeHarness() {
+function makeHarness(connOpts = {}) {
   const backend = new MemoryPersistence();
   const pending = new PendingSendStore({
     persistence: backend,
@@ -87,6 +87,7 @@ function makeHarness() {
   const conn = new DshConnection({
     baseUrl: 'http://127.0.0.1:1',
     cookie: 'dsh-auth-test=v1',
+    ...connOpts,
   });
   const prompts = [];
   const store = new Store(conn, {
@@ -335,6 +336,142 @@ await check('事件乱序：confirmed 先于 accepted 到达时状态不倒退',
   // 迟到的 accepted 事件必须是 no-op，不能把 confirmed 退回去。
   await pending.apply(rec.requestId, { type: 'accept' });
   assert.equal((await pending.get(rec.requestId)).state, 'confirmed');
+});
+
+// ── BUG-02 的下游行为：session/prompt 响应体卡死 ────────────────────
+//
+// 上面的用例都 stub 掉 store.api.prompt，那会**绕过真实 transport**，
+// 测不到 BUG-02。这里改为注入一个「200 响应头已回、body 永久卡死」的
+// fetchImpl，让真实的 call() → 超时 → abort → 抛错 → store 落 unknown
+// 整条链真的跑一遍。
+//
+// session/prompt 的 __timeoutMs 在 rpc/session.ts:117 硬编码 180_000，
+// 测试不可能等 3 分钟。下面只把 >= 60s 的定时器缩短，不动其它定时器
+// （重连退避、节流等），因此仍然走真实代码路径，而不是改产品常量。
+
+async function withShortRpcTimeouts(shortMs, fn) {
+  const realSet = globalThis.setTimeout;
+  globalThis.setTimeout = (cb, ms, ...rest) =>
+    realSet(cb, typeof ms === 'number' && ms >= 60_000 ? shortMs : ms, ...rest);
+  try {
+    return await fn();
+  } finally {
+    globalThis.setTimeout = realSet;
+  }
+}
+
+/**
+ * 给可能永久挂起的 Promise 加一个上限。
+ *
+ * BUG-02 的故障形态就是「永不 settle」：修前跑这组用例，Node 会直接报
+ * "Detected unsettled top-level await" 并以 13 退出，整条 CI 链被拖死。
+ * 加上限后，即使将来有人把修复改回去，也是**一条清晰的失败**而不是挂起。
+ */
+function withDeadline(promise, ms, label) {
+  let timer;
+  return Promise.race([
+    promise,
+    new Promise((_resolve, reject) => {
+      timer = setTimeout(() => reject(new Error(`${label}：${ms}ms 内未结束（永久挂起）`)), ms);
+    }),
+  ]).finally(() => clearTimeout(timer));
+}
+
+async function hangingPromptHarness() {
+  const state = { mode: 'hang', calls: [] };
+  const h = makeHarness({
+    WebSocketImpl: class {},
+    fetchImpl: async (url, init) => {
+      state.calls.push({ url, body: JSON.parse(init.body) });
+      if (state.mode === 'ok') {
+        return {
+          ok: true, status: 200, headers: { get: () => null },
+          json: async () => ({ result: { ok: true, value: undefined } }),
+        };
+      }
+      return {
+        ok: true, status: 200, headers: { get: () => null },
+        json: () => new Promise((_resolve, reject) => {
+          init.signal.addEventListener(
+            'abort',
+            () => reject(Object.assign(new Error('aborted'), { name: 'AbortError' })),
+            { once: true },
+          );
+        }),
+      };
+    },
+  });
+  await h.pending.hydrate();
+  // makeHarness 会给 store.api.prompt 挂一个 own property 桩，那会绕过
+  // 真实 transport。删掉它以恢复 SessionApi.prototype.prompt，让
+  // call('session/prompt') 真的走一遍网络层。
+  delete h.store.api.prompt;
+  return { ...h, state };
+}
+
+await check('BUG-02：session/prompt 响应体卡死 → 超时 → 记录进入 unknown', async () => {
+  const h = await hangingPromptHarness();
+  await withShortRpcTimeouts(30, async () => {
+    await assert.rejects(withDeadline(h.store.sendPending('s1', 'hang-me'), 2000, 'hang-me'), (e) => {
+      assert.match(e.message, /请求超时/);
+      // 只把 clearTimeout 移进 finally 而不判别 abort，会误报成 malformed
+      assert.doesNotMatch(e.message, /malformed/);
+      return true;
+    });
+  });
+  const rec = (await h.pending.list('s1'))[0];
+  assert.equal(rec.state, 'unknown', '结果未确认必须是 unknown，不能停在 sending 或假装 accepted');
+  assert.equal(h.state.calls.length, 1);
+  assert.equal(h.state.calls[0].url, 'http://127.0.0.1:1/api/session/prompt');
+});
+
+await check('BUG-02：超时后禁止自动重发（等待后请求次数不变）', async () => {
+  const h = await hangingPromptHarness();
+  await withShortRpcTimeouts(30, async () => {
+    await assert.rejects(withDeadline(h.store.sendPending('s1', 'no-auto-retry'), 2000, 'no-auto-retry'));
+  });
+  const after = h.state.calls.length;
+  assert.equal(after, 1);
+  // 等足够长，覆盖任何可能的自动重试退避
+  await new Promise((r) => setTimeout(r, 300));
+  assert.equal(h.state.calls.length, after, '超时后不得自动重发 session/prompt');
+  assert.equal((await h.pending.list('s1'))[0].state, 'unknown');
+});
+
+await check('BUG-02：超时后显式 retryPending 复用同一 requestId', async () => {
+  const h = await hangingPromptHarness();
+  await withShortRpcTimeouts(30, async () => {
+    await assert.rejects(withDeadline(h.store.sendPending('s1', 'retry-same-id'), 2000, 'retry-same-id'));
+  });
+  const before = (await h.pending.list('s1'))[0];
+  assert.equal(before.state, 'unknown');
+  const firstId = h.state.calls[0].body.payload.args.request.requestId;
+  assert.equal(firstId, before.requestId, '首次发送必须把 requestId 透传给 session/prompt');
+
+  h.state.mode = 'ok';
+  const retried = await h.store.retryPending('s1', before.requestId);
+  assert.equal(retried.requestId, before.requestId, '重试必须复用旧 requestId');
+  assert.equal(retried.state, 'accepted');
+  assert.equal(h.state.calls.length, 2, '只应有显式重试这一次额外请求');
+  assert.equal(
+    h.state.calls[1].body.payload.args.request.requestId,
+    firstId,
+    '重试请求体里的 requestId 必须与首次相同（服务端以它为幂等键）',
+  );
+});
+
+await check('BUG-02：超时记录重启后仍是 unknown，且不会被自动补发', async () => {
+  const h = await hangingPromptHarness();
+  await withShortRpcTimeouts(30, async () => {
+    await assert.rejects(withDeadline(h.store.sendPending('s1', 'survive-restart'), 2000, 'survive-restart'));
+  });
+  const before = (await h.pending.list('s1'))[0];
+  const restored = new PendingSendStore({ persistence: h.backend, now: () => clock });
+  await restored.hydrate();
+  const after = (await restored.list('s1'))[0];
+  assert.equal(after.requestId, before.requestId);
+  assert.equal(after.state, 'unknown', '重启后必须仍是 unknown，不能变成 accepted 或消失');
+  assert.equal(h.state.calls.length, 1, '恢复过程不得自动补发');
 });
 
 console.log('');

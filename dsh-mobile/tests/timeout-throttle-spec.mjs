@@ -60,32 +60,96 @@ check('探测类接口有更短的超时（不拖住界面）', () => {
     : `探测超时 ${probe}ms 不够短（应该 < 30s）`;
 });
 
-check('call() 里用了 AbortController + signal', () => {
+/**
+ * 取 call() 的完整函数体。
+ *
+ * 原先用 slice(i, i + 3000/3500) 这种固定窗口，函数一变长就会**静默截断**，
+ * 于是断言检查看似通过、其实根本没看到后半段代码。改为切到下一个方法
+ * （request()）为止，与函数长度无关。
+ */
+function callBody() {
   const i = transportSrc.indexOf('async call<T');
-  if (i < 0) return '找不到 call()';
-  const body = transportSrc.slice(i, i + 3000);
+  if (i < 0) return null;
+  const j = transportSrc.indexOf('async request<', i);
+  return j > i ? transportSrc.slice(i, j) : transportSrc.slice(i);
+}
+
+check('call() 里用了 AbortController + signal', () => {
+  const body = callBody();
+  if (!body) return '找不到 call()';
   if (!body.includes('AbortController')) return '没有 AbortController';
   if (!body.includes('signal: ctrl.signal')) return '没有把 signal 传给 fetch';
   return true;
 });
 
-check('call() 在成功/失败路径都 clearTimeout', () => {
-  const i = transportSrc.indexOf('async call<T');
-  const body = transportSrc.slice(i, i + 3500);
+// 这条原先是「clearTimeout(timer) 出现次数 >= 2」。
+//
+// 那是把实现细节当契约：分散在成功/失败两处清理只是**当时**的写法，
+// 而正确的修复恰恰是收敛成单一 finally（与 request() 对齐），次数会变成 1，
+// 于是旧断言会反过来阻碍修复。真正要守的性质是：
+//   1. 每条退出路径都清了定时器 → 用 finally 保证，且只此一处
+//   2. 清理发生在**响应体读完之后** → 否则 res.json() 卡死时无人 abort
+//
+// ⚠️ 定位必须锚定到**真实语句**，不能用裸 indexOf：call() 的注释里也
+// 出现了 `await res.json()`，裸 indexOf 会命中注释，导致检查范围退回
+// 整个函数体、把 fetch 阶段的 AbortError 误当成响应体阶段的判别。
+function callCodePositions(body) {
+  const json = body.match(/^\s*parsed = \(await res\.json\(\)\)/m);
+  const fin = body.match(/^\s*\} finally \{/m);
+  const clear = body.match(/^\s*clearTimeout\(timer\);/m);
+  return {
+    jsonAt: json ? json.index : -1,
+    finallyAt: fin ? fin.index : -1,
+    clearAt: clear ? clear.index : -1,
+  };
+}
+
+check('call() 用单一 finally 清定时器，且覆盖到响应体读完', () => {
+  const body = callBody();
+  if (!body) return '找不到 call()';
   const count = (body.match(/clearTimeout\(timer\)/g) || []).length;
-  return count >= 2 ? true : `只清了 ${count} 处，有路径会泄漏定时器`;
+  if (count !== 1) return `clearTimeout(timer) 出现 ${count} 处，应收敛为单一 finally`;
+  const { jsonAt, finallyAt, clearAt } = callCodePositions(body);
+  if (finallyAt < 0) return '没有 finally —— 无法保证每条退出路径都清定时器';
+  if (clearAt < 0) return '找不到 clearTimeout(timer) 语句';
+  if (clearAt < finallyAt) return 'clearTimeout 不在 finally 内';
+  if (jsonAt < 0) return '找不到响应体读取语句 parsed = (await res.json())';
+  if (jsonAt > clearAt) {
+    return '定时器在读取响应体之前就被清掉了 —— body 卡死时会永久挂起（BUG-02）';
+  }
+  return true;
 });
 
 check('超时错误和普通网络错误分开提示', () => {
-  const i = transportSrc.indexOf('async call<T');
-  const body = transportSrc.slice(i, i + 3500);
+  const body = callBody();
+  if (!body) return '找不到 call()';
   if (!/AbortError/.test(body)) return '没有识别超时';
   return /请求超时/.test(body) ? true : '超时提示不明确';
 });
 
+// 响应体阶段的 abort 也必须说「超时」。
+// call() 的 catch 会把解析失败一律降级成 malformed，如果不判别 abort，
+// 超时就会被说成「上游改了返回格式」，两者的可操作建议完全不同。
+check('call() 响应体阶段判别 abort，不把超时误报成 malformed', () => {
+  const body = callBody();
+  if (!body) return '找不到 call()';
+  const { jsonAt } = callCodePositions(body);
+  if (jsonAt < 0) return '找不到响应体读取语句';
+  // 只看真实语句之后的代码，且去掉注释行，避免注释里的词造成假通过
+  const after = body
+    .slice(jsonAt)
+    .split('\n')
+    .filter((l) => !/^\s*(\/\/|\*|\/\*)/.test(l))
+    .join('\n');
+  if (!/ctrl\.signal\.aborted/.test(after) && !/AbortError/.test(after)) {
+    return '响应体的 catch 没有判别 abort —— 超时会落到 malformed 分支';
+  }
+  return true;
+});
+
 check('__timeoutMs 不会发给服务端', () => {
-  const i = transportSrc.indexOf('async call<T');
-  const body = transportSrc.slice(i, i + 2000);
+  const body = callBody();
+  if (!body) return '找不到 call()';
   // 必须把内部参数摘掉，用 realArgs 发请求
   if (!/__timeoutMs/.test(body)) return '没有 __timeoutMs 支持';
   return /\.\.\.realArgs|args: realArgs/.test(body)
