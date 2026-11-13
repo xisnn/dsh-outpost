@@ -15,6 +15,23 @@
 //   * several components inside ONE process may open the same file - they are
 //     reentrant and share a reference count, so sequential reuse keeps working;
 //   * a lock left behind by a crashed process is reclaimed once its pid is gone.
+//
+// Concurrency contract (P4-0.1, fixes the P4-0 stale-reclaim TOCTOU):
+//   * Every creation is an atomic exclusive create (`wx` -> CREATE_NEW on
+//     Windows, O_EXCL on POSIX). It is the only arbitration primitive.
+//   * Reclaiming a dead owner's lock never unlinks the live lock path. It runs
+//     under a per-stale-token reclaim ticket (itself an atomic `wx` create) and
+//     finishes with an atomic rename-replace of a fully written temp record.
+//     Rename-replace leaves no window in which the lock path is absent, so no
+//     third process can slip in an exclusive create mid-reclaim.
+//   * A reclaim ticket is only ever removed after its recorded owner pid is
+//     proven dead. While a ticket exists no other ticket can be created at that
+//     name, so removing a dead ticket cannot destroy a live one.
+//   * Release renames the lock to a private graveyard name and unlinks that,
+//     and only after re-reading the record and confirming our own token. A
+//     process never deletes a lock that names somebody else.
+//   * Unreadable, malformed, permission-denied or live-foreign state fails
+//     closed. There is no fallback to an unlocked mode.
 'use strict'
 
 const fs = require('node:fs')
@@ -23,6 +40,8 @@ const crypto = require('node:crypto')
 
 const LOCK_SUFFIX = '.lock'
 const LOCK_VERSION = 1
+const TICKET_KIND = 'reclaim-ticket'
+const MAX_ATTEMPTS = 6
 
 // canonical path -> { refs, token }
 const held = new Map()
@@ -53,18 +72,79 @@ function isAlive(pid) {
   }
 }
 
+function sleepSync(ms) {
+  Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, ms)
+}
+
+function isRecord(rec) {
+  return !!rec && rec.version === LOCK_VERSION
+    && Number.isInteger(rec.pid) && typeof rec.token === 'string' && rec.token !== ''
+}
+
+// A lock is briefly empty between its exclusive create and its first write.
+// Retry reads a few times so a concurrent writer does not cause a spurious
+// fail-closed startup; a persistently unreadable lock still fails closed.
+function readRecord(lockPath) {
+  for (let i = 0; i < 3; i += 1) {
+    let text
+    try {
+      text = fs.readFileSync(lockPath, 'utf8')
+    } catch (error) {
+      if (error && error.code === 'ENOENT') return { ok: false, code: 'missing' }
+      return { ok: false, code: 'unreadable', error }
+    }
+    try {
+      const rec = JSON.parse(text)
+      if (isRecord(rec)) return { ok: true, rec }
+      return { ok: false, code: 'malformed' }
+    } catch {
+      if (i === 2) return { ok: false, code: 'unreadable' }
+      sleepSync(20)
+    }
+  }
+  return { ok: false, code: 'unreadable' }
+}
+
+function writeRecordFully(fd, rec) {
+  fs.writeSync(fd, `${JSON.stringify(rec, null, 2)}\n`)
+  try {
+    fs.fsyncSync(fd)
+  } catch {
+    // Some filesystems reject fsync on a fresh file; the close below still
+    // publishes the record. Never treat this as ownership.
+  }
+}
+
+// Remove the on-disk lock only if it still names `token`. Renaming to a private
+// graveyard first means we never unlink a path that a new owner may have
+// created: the graveyard name carries our own token.
+function releaseOnDisk(key, token) {
+  const lockPath = key + LOCK_SUFFIX
+  const current = readRecord(lockPath)
+  if (!current.ok || current.rec.token !== token) return
+  const grave = `${lockPath}.released.${token}`
+  try {
+    fs.renameSync(lockPath, grave)
+  } catch {
+    // Already gone or not ours to move: nothing left to release.
+    return
+  }
+  const moved = readRecord(grave)
+  if (moved.ok && moved.rec.token === token) {
+    try {
+      fs.unlinkSync(grave)
+    } catch {
+      // Leftover graveyard file is inert; never delete anything else.
+    }
+  }
+}
+
 function installExitHook() {
   if (exitHookInstalled) return
   exitHookInstalled = true
   process.on('exit', () => {
     for (const [key, entry] of held) {
-      try {
-        const lockPath = key + LOCK_SUFFIX
-        const current = JSON.parse(fs.readFileSync(lockPath, 'utf8'))
-        if (current && current.token === entry.token) fs.unlinkSync(lockPath)
-      } catch {
-        // Already removed or unreadable: nothing left to release.
-      }
+      releaseOnDisk(key, entry.token)
     }
     held.clear()
   })
@@ -80,18 +160,62 @@ function makeRelease(key, token) {
     entry.refs -= 1
     if (entry.refs > 0) return
     held.delete(key)
-    const lockPath = key + LOCK_SUFFIX
-    try {
-      const current = JSON.parse(fs.readFileSync(lockPath, 'utf8'))
-      if (current && current.token === token) fs.unlinkSync(lockPath)
-    } catch {
-      // The lock is already gone; releasing must not throw during shutdown.
-    }
+    releaseOnDisk(key, token)
   }
 }
 
 function lockError(label, file, reason, cause) {
   return new Error(`failed to lock ${label} ${file}: ${reason}`, cause ? { cause } : undefined)
+}
+
+function ownerMessage(label, file, lockPath, pid) {
+  return lockError(
+    label, file,
+    `already owned by live process ${pid}. Two independent instances must not share one `
+    + 'device registry: they would overwrite each other\'s snapshots and keep honouring revoked '
+    + 'credentials. Give each instance its own DSH_HOME or deviceFile. If that process is gone, '
+    + `remove ${lockPath} and retry.`,
+  )
+}
+
+// Try to become the sole reclaimer of the stale lock named `staleToken`.
+// Returns 'created' | 'stale-ticket' | 'held-by-live' | 'bad'.
+function claimReclaimTicket(ticketPath, staleToken, myToken, label, file) {
+  let fd
+  try {
+    fd = fs.openSync(ticketPath, 'wx')
+  } catch (error) {
+    if (!error || error.code !== 'EEXIST') {
+      throw lockError(label, file, `cannot create the reclaim ticket (${error.message})`, error)
+    }
+    const t = readRecord(ticketPath)
+    if (!t.ok || t.rec.kind !== TICKET_KIND || t.rec.staleToken !== staleToken) {
+      return 'bad'
+    }
+    if (t.rec.pid === process.pid) {
+      // Our own earlier attempt died inside this process; the ticket is inert.
+      try { fs.unlinkSync(ticketPath) } catch { /* raced away */ }
+      return 'stale-ticket'
+    }
+    if (isAlive(t.rec.pid)) return 'held-by-live'
+    // Dead ticket owner. While this ticket exists nobody else can create one at
+    // this name, so unlinking it cannot destroy a live reclaimer's ticket.
+    try { fs.unlinkSync(ticketPath) } catch { /* raced away */ }
+    return 'stale-ticket'
+  }
+  try {
+    writeRecordFully(fd, {
+      kind: TICKET_KIND,
+      version: LOCK_VERSION,
+      pid: process.pid,
+      token: myToken,
+      staleToken,
+      createdAt: new Date().toISOString(),
+    })
+  } finally {
+    fs.closeSync(fd)
+  }
+  return 'created'
 }
 
 /**
@@ -119,7 +243,7 @@ function acquireRegistryLock(file, label) {
   }
 
   const token = crypto.randomUUID()
-  for (let attempt = 0; attempt < 2; attempt += 1) {
+  for (let attempt = 0; attempt < MAX_ATTEMPTS; attempt += 1) {
     let descriptor
     try {
       descriptor = fs.openSync(lockPath, 'wx')
@@ -127,38 +251,80 @@ function acquireRegistryLock(file, label) {
       if (!error || error.code !== 'EEXIST') {
         throw lockError(label, file, `cannot create the lock file (${error.message})`, error)
       }
-      let owner
-      try {
-        owner = JSON.parse(fs.readFileSync(lockPath, 'utf8'))
-      } catch (readError) {
-        throw lockError(label, file, 'the lock file is unreadable; refusing to share the data file', readError)
-      }
-      if (!owner || owner.version !== LOCK_VERSION || !Number.isInteger(owner.pid) || typeof owner.token !== 'string') {
-        throw lockError(label, file, 'the lock file is malformed; refusing to share the data file')
-      }
-      if (owner.pid === process.pid) {
-        // Same process, but untracked (a previous owner never released). Adopt
-        // it rather than deadlock: components in one process may share.
-        held.set(key, { refs: 1, token: owner.token })
-        return makeRelease(key, owner.token)
-      }
-      if (isAlive(owner.pid)) {
+      const owner = readRecord(lockPath)
+      if (!owner.ok) {
         throw lockError(
           label, file,
-          `already owned by live process ${owner.pid}. Two independent instances must not share one `
-          + 'device registry: they would overwrite each other\'s snapshots and keep honouring revoked '
-          + 'credentials. Give each instance its own DSH_HOME or deviceFile. If that process is gone, '
-          + `remove ${lockPath} and retry.`,
+          owner.code === 'missing'
+            ? 'the lock file disappeared while reading it; refusing to guess ownership'
+            : `the lock file is ${owner.code}; refusing to share the data file (manual recovery: inspect ${lockPath})`,
+          owner.error,
         )
       }
-      try {
-        fs.unlinkSync(lockPath)
-      } catch (unlinkError) {
-        if (!unlinkError || unlinkError.code !== 'ENOENT') {
-          throw lockError(label, file, `cannot reclaim the stale lock (${unlinkError.message})`, unlinkError)
-        }
+      if (owner.rec.pid === process.pid) {
+        // Same process, but untracked (a previous owner never released). Adopt
+        // it rather than deadlock: components in one process may share.
+        held.set(key, { refs: 1, token: owner.rec.token })
+        return makeRelease(key, owner.rec.token)
       }
-      continue
+      if (isAlive(owner.rec.pid)) throw ownerMessage(label, file, lockPath, owner.rec.pid)
+
+      // Dead owner: reclaim under an atomic ticket, then publish by atomic
+      // rename-replace so the lock path is never absent mid-reclaim.
+      const staleToken = owner.rec.token
+      const ticketPath = `${lockPath}.reclaim.${staleToken}`
+      const ticket = claimReclaimTicket(ticketPath, staleToken, token, label, file)
+      if (ticket === 'bad') {
+        throw lockError(label, file, `the reclaim ticket is malformed; refusing to share the data file (manual recovery: inspect ${ticketPath})`)
+      }
+      if (ticket === 'held-by-live') {
+        throw lockError(label, file, `another live process is reclaiming the stale lock (${ticketPath}); refusing to start concurrently`)
+      }
+      if (ticket === 'stale-ticket') {
+        sleepSync(20)
+        continue
+      }
+
+      // We hold the ticket. Re-verify the lock is still exactly the stale
+      // record we saw; only then may we replace it.
+      const underTicket = readRecord(lockPath)
+      if (!underTicket.ok || underTicket.rec.token !== staleToken || isAlive(underTicket.rec.pid)) {
+        try { fs.unlinkSync(ticketPath) } catch { /* inert */ }
+        sleepSync(20)
+        continue
+      }
+
+      const tmp = `${lockPath}.tmp.${token}`
+      let tmpFd
+      try {
+        tmpFd = fs.openSync(tmp, 'wx')
+        writeRecordFully(tmpFd, {
+          version: LOCK_VERSION,
+          pid: process.pid,
+          token,
+          label,
+          file: key,
+          createdAt: new Date().toISOString(),
+        })
+      } catch (error) {
+        if (tmpFd !== undefined) fs.closeSync(tmpFd)
+        try { fs.unlinkSync(tmp) } catch { /* inert */ }
+        try { fs.unlinkSync(ticketPath) } catch { /* inert */ }
+        throw lockError(label, file, `cannot prepare the replacement lock (${error.message})`, error)
+      }
+      fs.closeSync(tmpFd)
+      try {
+        // Atomic replace on POSIX and Windows; no absence window.
+        fs.renameSync(tmp, lockPath)
+      } catch (error) {
+        try { fs.unlinkSync(tmp) } catch { /* inert */ }
+        try { fs.unlinkSync(ticketPath) } catch { /* inert */ }
+        throw lockError(label, file, `cannot publish the replacement lock (${error.message})`, error)
+      }
+      try { fs.unlinkSync(ticketPath) } catch { /* inert leftover */ }
+      try { fs.chmodSync(lockPath, 0o600) } catch { /* Windows has no POSIX bits */ }
+      held.set(key, { refs: 1, token })
+      return makeRelease(key, token)
     }
 
     const record = {
@@ -170,7 +336,7 @@ function acquireRegistryLock(file, label) {
       createdAt: new Date().toISOString(),
     }
     try {
-      fs.writeSync(descriptor, `${JSON.stringify(record, null, 2)}\n`)
+      writeRecordFully(descriptor, record)
     } finally {
       fs.closeSync(descriptor)
     }
@@ -183,7 +349,7 @@ function acquireRegistryLock(file, label) {
     return makeRelease(key, token)
   }
 
-  throw lockError(label, file, 'could not acquire ownership after reclaiming a stale lock')
+  throw lockError(label, file, 'could not acquire ownership after bounded reclaim attempts; refusing to start')
 }
 
 module.exports = { acquireRegistryLock, LOCK_SUFFIX }

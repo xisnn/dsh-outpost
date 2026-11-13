@@ -1,0 +1,247 @@
+// P4-0.1 P0-1 formal regression: registry-lock cross-process exclusivity.
+//
+// Covers the stale-reclaim TOCTOU fixed in P4-0.1 plus the ownership contract:
+// crash recovery, normal-exit release, non-owner release refusal, an old holder
+// never deleting a new holder's lock, corrupted/undreadable state failing closed,
+// reclaim-ticket crash recovery, and single-owner revocation safety.
+//
+// The multi-process stress race is the independent reproduction of the P4-0
+// defect: on the P4-0 module it reports double ownership (RED); on the fixed
+// module exactly one racer wins every round (GREEN).
+//
+// Env:
+//   P4_LOCK_MODULE      module under test (default: the controlled patch payload)
+//   P4_LOCK_RACE_ROUNDS stress rounds (default 12; use 25 for RED/GREEN capture)
+'use strict';
+import fs from 'node:fs';
+import os from 'node:os';
+import path from 'node:path';
+import { spawn, spawnSync } from 'node:child_process';
+import { createRequire } from 'node:module';
+import { fileURLToPath } from 'node:url';
+
+const require = createRequire(import.meta.url);
+const __dirname = path.dirname(fileURLToPath(import.meta.url));
+const repoRoot = path.resolve(__dirname, '..');
+const modulePath = process.env.P4_LOCK_MODULE
+  ? path.resolve(process.env.P4_LOCK_MODULE)
+  : path.join(repoRoot, '..', 'patches', 'mobile-gateway-home-isolation', 'files', 'registry-lock.js');
+const child = path.join(__dirname, 'helpers', 'lock-race-child.cjs');
+const rounds = Number(process.env.P4_LOCK_RACE_ROUNDS ?? 12);
+const racers = 4;
+
+let passed = 0;
+let failed = 0;
+function ok(name) { passed += 1; console.log(`  OK    ${name}`); }
+function bad(name, detail) { failed += 1; console.log(`  FAIL  ${name}${detail ? ' :: ' + detail : ''}`); }
+function check(cond, name, detail) { cond ? ok(name) : bad(name, detail); }
+
+const root = fs.mkdtempSync(path.join(os.tmpdir(), 'mgw-lock-race-'));
+function tempDir(prefix) {
+  const d = path.join(root, prefix + Math.random().toString(36).slice(2, 8));
+  fs.mkdirSync(d, { recursive: true });
+  return d;
+}
+function sleep(ms) { spawnSync(process.execPath, ['-e', `setTimeout(()=>{},${ms})`], { stdio: 'ignore' }); }
+function deadPid() { return spawnSync(process.execPath, ['-e', 'process.exit(0)'], { stdio: 'ignore' }).pid; }
+function readOut(p) { return fs.existsSync(p) ? fs.readFileSync(p, 'utf8') : ''; }
+function waitExit(kids, timeoutMs) {
+  const deadline = Date.now() + timeoutMs;
+  while (kids.some((k) => k.exitCode === null) && Date.now() < deadline) sleep(40);
+  for (const k of kids) if (k.exitCode === null) k.kill('SIGKILL');
+}
+function staleLock(lockFile, token) {
+  fs.writeFileSync(lockFile + '.lock', JSON.stringify({
+    version: 1, pid: deadPid(), token, label: 'device registry', file: lockFile,
+    createdAt: new Date().toISOString(),
+  }, null, 2) + '\n');
+}
+
+console.log('mobile-gateway registry-lock concurrency regression (P4-0.1 P0-1)');
+console.log(`module under test: ${modulePath}`);
+
+// ── 1. crash recovery: SIGKILL leaves a dead-owner lock that is reclaimed ──
+{
+  const d = tempDir('crash-');
+  const lockFile = path.join(d, 'devices.json');
+  const out = path.join(d, 'out.txt');
+  const kid = spawn(process.execPath, [child, modulePath, 'hold', lockFile, out], { stdio: 'ignore' });
+  const deadline = Date.now() + 15000;
+  while (!/ACQUIRED/.test(readOut(out)) && Date.now() < deadline) sleep(40);
+  check(/ACQUIRED/.test(readOut(out)), 'crash: child acquires before being killed');
+  kid.kill('SIGKILL');
+  waitExit([kid], 8000);
+  check(fs.existsSync(lockFile + '.lock'), 'crash: SIGKILL leaves the lock behind');
+  const owner = JSON.parse(fs.readFileSync(lockFile + '.lock', 'utf8'));
+  check(owner.pid === kid.pid, 'crash: leftover lock names the dead child');
+  const { acquireRegistryLock } = require(modulePath);
+  let rel;
+  try {
+    rel = acquireRegistryLock(lockFile, 'device registry');
+    ok('crash: dead-owner lock is reclaimed by the next start');
+  } catch (e) { bad('crash: dead-owner lock is reclaimed by the next start', e.message); }
+  if (rel) rel();
+  check(!fs.existsSync(lockFile + '.lock'), 'crash: reclaiming owner releases cleanly');
+}
+
+// ── 2. normal exit releases the lock ──
+{
+  const d = tempDir('exit-');
+  const lockFile = path.join(d, 'devices.json');
+  const out = path.join(d, 'out.txt');
+  const kid = spawn(process.execPath, [child, modulePath, 'exit', lockFile, out], { stdio: 'ignore' });
+  waitExit([kid], 15000);
+  check(/ACQUIRED/.test(readOut(out)), 'exit: child acquired');
+  check(!fs.existsSync(lockFile + '.lock'), 'exit: normal exit removes the lock');
+}
+
+// ── 3. a live owner blocks a second process; the lock is untouched ──
+{
+  const d = tempDir('live-');
+  const lockFile = path.join(d, 'devices.json');
+  const outA = path.join(d, 'a.txt');
+  const outB = path.join(d, 'b.txt');
+  const a = spawn(process.execPath, [child, modulePath, 'hold', lockFile, outA], { stdio: 'ignore' });
+  const deadline = Date.now() + 15000;
+  while (!/ACQUIRED/.test(readOut(outA)) && Date.now() < deadline) sleep(40);
+  const before = fs.readFileSync(lockFile + '.lock', 'utf8');
+  const b = spawn(process.execPath, [child, modulePath, 'probe', lockFile, outB], { stdio: 'ignore' });
+  waitExit([b], 15000);
+  check(/REFUSED/.test(readOut(outB)), 'live owner: second process is refused');
+  check(fs.readFileSync(lockFile + '.lock', 'utf8') === before, 'live owner: refusal leaves the lock byte-identical');
+  a.kill('SIGKILL');
+  waitExit([a], 8000);
+}
+
+// ── 4. an old holder must never delete a new holder's lock ──
+{
+  const d = tempDir('oldnew-');
+  const lockFile = path.join(d, 'devices.json');
+  const out = path.join(d, 'out.txt');
+  const signal = path.join(d, 'overwritten');
+  const a = spawn(process.execPath, [child, modulePath, 'release-after-overwrite', lockFile, out, signal], { stdio: 'ignore' });
+  const deadline = Date.now() + 15000;
+  while (!/ACQUIRED/.test(readOut(out)) && Date.now() < deadline) sleep(40);
+  // simulate a new legitimate owner taking the file while the old closure lives
+  fs.writeFileSync(lockFile + '.lock', JSON.stringify({
+    version: 1, pid: process.pid, token: 'new-owner-token', label: 'device registry',
+    file: lockFile, createdAt: new Date().toISOString(),
+  }, null, 2) + '\n');
+  fs.writeFileSync(signal, 'go');
+  waitExit([a], 15000);
+  check(/RELEASED/.test(readOut(out)), 'old holder: release() ran');
+  const still = fs.existsSync(lockFile + '.lock');
+  check(still, 'old holder: release() did NOT delete the new holder lock');
+  if (still) {
+    const rec = JSON.parse(fs.readFileSync(lockFile + '.lock', 'utf8'));
+    check(rec.token === 'new-owner-token', 'old holder: new holder record intact');
+  }
+}
+
+// ── 5. corrupted / unreadable lock fails closed and is not overwritten ──
+{
+  const d = tempDir('corrupt-');
+  const lockFile = path.join(d, 'devices.json');
+  fs.writeFileSync(lockFile + '.lock', '{ not json', 'utf8');
+  const { acquireRegistryLock } = require(modulePath);
+  let threw = false;
+  try { acquireRegistryLock(lockFile, 'device registry'); } catch { threw = true; }
+  check(threw, 'corrupt: malformed lock fails closed');
+  check(fs.readFileSync(lockFile + '.lock', 'utf8') === '{ not json', 'corrupt: malformed lock not overwritten');
+}
+{
+  const d = tempDir('isdir-');
+  const lockFile = path.join(d, 'devices.json');
+  fs.mkdirSync(lockFile + '.lock'); // a directory where the lock should be: unreadable as a record
+  const { acquireRegistryLock } = require(modulePath);
+  let threw = false;
+  let msg = '';
+  try { acquireRegistryLock(lockFile, 'device registry'); } catch (e) { threw = true; msg = e.message; }
+  check(threw, 'unreadable: lock path occupied by a directory fails closed');
+  check(/refusing|unreadable|cannot/i.test(msg), 'unreadable: error explains the refusal', msg);
+  check(fs.statSync(lockFile + '.lock').isDirectory(), 'unreadable: foreign object left untouched');
+}
+
+// ── 6. reclaim ticket: dead ticket is recovered, live ticket blocks ──
+{
+  const d = tempDir('ticket-dead-');
+  const lockFile = path.join(d, 'devices.json');
+  staleLock(lockFile, 'stale-ticket-dead');
+  fs.writeFileSync(lockFile + '.lock.reclaim.stale-ticket-dead', JSON.stringify({
+    kind: 'reclaim-ticket', version: 1, pid: deadPid(), token: 'dead-reclaimer',
+    staleToken: 'stale-ticket-dead', createdAt: new Date().toISOString(),
+  }, null, 2) + '\n');
+  const { acquireRegistryLock } = require(modulePath);
+  let rel;
+  try { rel = acquireRegistryLock(lockFile, 'device registry'); ok('ticket: dead reclaimer ticket is recovered'); }
+  catch (e) { bad('ticket: dead reclaimer ticket is recovered', e.message); }
+  if (rel) rel();
+}
+{
+  const d = tempDir('ticket-live-');
+  const lockFile = path.join(d, 'devices.json');
+  staleLock(lockFile, 'stale-ticket-live');
+  // The reclaimer must be a DIFFERENT live process. Using process.pid here would
+  // be read by the module as its own inert leftover and correctly recovered, so
+  // spawn a live child and name its pid to exercise the held-by-live refusal.
+  const reclaimer = spawn(process.execPath, ['-e', 'setTimeout(()=>{},30000)'], { stdio: 'ignore' });
+  fs.writeFileSync(lockFile + '.lock.reclaim.stale-ticket-live', JSON.stringify({
+    kind: 'reclaim-ticket', version: 1, pid: reclaimer.pid, token: 'live-reclaimer',
+    staleToken: 'stale-ticket-live', createdAt: new Date().toISOString(),
+  }, null, 2) + '\n');
+  const { acquireRegistryLock } = require(modulePath);
+  let threw = false;
+  let msg = '';
+  try { acquireRegistryLock(lockFile, 'device registry'); } catch (e) { threw = true; msg = e.message; }
+  check(threw, 'ticket: live reclaimer blocks a concurrent start');
+  check(/reclaiming/i.test(msg), 'ticket: refusal names the in-progress reclaim', msg);
+  reclaimer.kill();
+}
+
+// ── 7. shared registry never yields two live owners (revocation safety) ──
+{
+  const d = tempDir('two-');
+  const lockFile = path.join(d, 'devices.json');
+  const outA = path.join(d, 'a.txt');
+  const outB = path.join(d, 'b.txt');
+  const a = spawn(process.execPath, [child, modulePath, 'hold', lockFile, outA], { stdio: 'ignore' });
+  const b = spawn(process.execPath, [child, modulePath, 'hold', lockFile, outB], { stdio: 'ignore' });
+  const deadline = Date.now() + 15000;
+  while ((!/ACQUIRED|REFUSED/.test(readOut(outA)) || !/ACQUIRED|REFUSED/.test(readOut(outB))) && Date.now() < deadline) sleep(40);
+  const acq = [readOut(outA), readOut(outB)].filter((t) => /ACQUIRED/.test(t)).length;
+  check(acq === 1, 'two live processes on one registry: exactly one owner', `acquired=${acq}`);
+  a.kill('SIGKILL'); b.kill('SIGKILL');
+  waitExit([a, b], 8000);
+}
+
+// ── 8. independent stale-reclaim race reproduction (stress) ──
+let violations = 0;
+for (let round = 1; round <= rounds; round += 1) {
+  const d = tempDir(`race${round}-`);
+  const lockFile = path.join(d, 'devices.json');
+  const barrier = path.join(d, 'go');
+  const out = path.join(d, 'results.txt');
+  staleLock(lockFile, `stale-${round}`);
+  const kids = [];
+  for (let i = 0; i < racers; i += 1) {
+    kids.push(spawn(process.execPath, [child, modulePath, 'race', lockFile, out, barrier, '400'], { stdio: 'ignore' }));
+  }
+  // wait until every racer reports READY, then release them together
+  const deadline = Date.now() + 20000;
+  while ((readOut(out).match(/^READY /gm) || []).length < racers && Date.now() < deadline) sleep(30);
+  fs.writeFileSync(barrier, 'go');
+  waitExit(kids, 20000);
+  const text = readOut(out);
+  const acquired = (text.match(/^ACQUIRED /gm) || []).length;
+  const lost = (text.match(/^STILLOWNS \d+ NO/gm) || []).length;
+  if (acquired > 1 || lost > 0) {
+    violations += 1;
+    console.log(`  race round ${round}: VIOLATION acquired=${acquired} lost=${lost}`);
+    console.log(text.split('\n').filter(Boolean).map((l) => '      ' + l).join('\n'));
+  }
+}
+check(violations === 0, `stress race: ${rounds} rounds x ${racers} racers, no double ownership`, `violations=${violations}`);
+
+fs.rmSync(root, { recursive: true, force: true });
+console.log(`\nmobile-gateway lock concurrency: ${passed} passed, ${failed} failed`);
+process.exit(failed > 0 ? 1 : 0);
