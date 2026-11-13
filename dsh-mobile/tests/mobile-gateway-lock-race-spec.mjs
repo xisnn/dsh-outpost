@@ -1,17 +1,20 @@
-// P4-0.1 P0-1 formal regression: registry-lock cross-process exclusivity.
+// P4-0.1 P0-1 / P4-0.2 formal regression: registry-lock cross-process exclusivity.
 //
-// Covers the stale-reclaim TOCTOU fixed in P4-0.1 plus the ownership contract:
-// crash recovery, normal-exit release, non-owner release refusal, an old holder
-// never deleting a new holder's lock, corrupted/undreadable state failing closed,
-// reclaim-ticket crash recovery, and single-owner revocation safety.
+// Covers the stale-reclaim TOCTOU fixed in P4-0.1, the reclaim-ticket TOCTOU
+// fixed in P4-0.2 (atomic take-away + exclusive create replace the racy ticket),
+// plus the ownership contract: crash recovery, normal-exit release, non-owner
+// release refusal, an old holder never deleting a new holder's lock,
+// corrupted/unreadable state failing closed, crashed-reclaim recovery, and
+// single-owner revocation safety.
 //
-// The multi-process stress race is the independent reproduction of the P4-0
-// defect: on the P4-0 module it reports double ownership (RED); on the fixed
-// module exactly one racer wins every round (GREEN).
+// The multi-process stress races are the independent reproductions of the P4-0
+// and P4-0.1 defects: on the vulnerable modules they report double ownership
+// (RED); on the fixed module exactly one racer wins every round (GREEN).
 //
 // Env:
-//   P4_LOCK_MODULE      module under test (default: the controlled patch payload)
-//   P4_LOCK_RACE_ROUNDS stress rounds (default 12; use 25 for RED/GREEN capture)
+//   P4_LOCK_MODULE        module under test (default: the controlled patch payload)
+//   P4_LOCK_RACE_ROUNDS   stress rounds (default 12; use 25 for RED/GREEN capture)
+//   P4_LOCK_TICKET_ROUNDS reclaim-ticket TOCTOU rounds (default 15)
 'use strict';
 import fs from 'node:fs';
 import os from 'node:os';
@@ -57,7 +60,7 @@ function staleLock(lockFile, token) {
   }, null, 2) + '\n');
 }
 
-console.log('mobile-gateway registry-lock concurrency regression (P4-0.1 P0-1)');
+console.log('mobile-gateway registry-lock concurrency regression (P4-0.1 P0-1 / P4-0.2)');
 console.log(`module under test: ${modulePath}`);
 
 // ── 1. crash recovery: SIGKILL leaves a dead-owner lock that is reclaimed ──
@@ -162,40 +165,70 @@ console.log(`module under test: ${modulePath}`);
   check(fs.statSync(lockFile + '.lock').isDirectory(), 'unreadable: foreign object left untouched');
 }
 
-// ── 6. reclaim ticket: dead ticket is recovered, live ticket blocks ──
+// ── 6. reclaim handoff (P4-0.2): no racy ticket; atomic take-away + publish ──
+// The P4-0.1 reclaim ticket was removed: ownership is now arbitrated solely by
+// the atomic exclusive create, and a dead lock is taken away by atomic rename.
+// These tests pin the new contract and old-user compatibility (an inert ticket
+// left by a previous version must not block reclaim).
 {
-  const d = tempDir('ticket-dead-');
+  const d = tempDir('ticket-inert-');
   const lockFile = path.join(d, 'devices.json');
-  staleLock(lockFile, 'stale-ticket-dead');
-  fs.writeFileSync(lockFile + '.lock.reclaim.stale-ticket-dead', JSON.stringify({
+  staleLock(lockFile, 'stale-ticket-inert');
+  // A leftover OLD-format reclaim ticket from a previous version is inert: the
+  // new module ignores it and still reclaims the dead owner.
+  fs.writeFileSync(lockFile + '.lock.reclaim.stale-ticket-inert', JSON.stringify({
     kind: 'reclaim-ticket', version: 1, pid: deadPid(), token: 'dead-reclaimer',
-    staleToken: 'stale-ticket-dead', createdAt: new Date().toISOString(),
+    staleToken: 'stale-ticket-inert', createdAt: new Date().toISOString(),
   }, null, 2) + '\n');
   const { acquireRegistryLock } = require(modulePath);
   let rel;
-  try { rel = acquireRegistryLock(lockFile, 'device registry'); ok('ticket: dead reclaimer ticket is recovered'); }
-  catch (e) { bad('ticket: dead reclaimer ticket is recovered', e.message); }
+  try { rel = acquireRegistryLock(lockFile, 'device registry'); ok('handoff: inert old-format ticket does not block reclaim'); }
+  catch (e) { bad('handoff: inert old-format ticket does not block reclaim', e.message); }
   if (rel) rel();
 }
 {
-  const d = tempDir('ticket-live-');
+  // A crashed reclaimer leaves a dead marker + a grave holding a dead record,
+  // with the lock path absent. The next start recovers them and acquires.
+  const d = tempDir('crashed-reclaim-');
   const lockFile = path.join(d, 'devices.json');
-  staleLock(lockFile, 'stale-ticket-live');
-  // The reclaimer must be a DIFFERENT live process. Using process.pid here would
-  // be read by the module as its own inert leftover and correctly recovered, so
-  // spawn a live child and name its pid to exercise the held-by-live refusal.
-  const reclaimer = spawn(process.execPath, ['-e', 'setTimeout(()=>{},30000)'], { stdio: 'ignore' });
-  fs.writeFileSync(lockFile + '.lock.reclaim.stale-ticket-live', JSON.stringify({
-    kind: 'reclaim-ticket', version: 1, pid: reclaimer.pid, token: 'live-reclaimer',
-    staleToken: 'stale-ticket-live', createdAt: new Date().toISOString(),
+  const graveToken = 'crashed-reclaimer-token';
+  fs.writeFileSync(lockFile + '.lock.reclaiming.' + graveToken, JSON.stringify({
+    version: 1, pid: deadPid(), token: graveToken, staleToken: 'gone', createdAt: new Date().toISOString(),
+  }, null, 2) + '\n');
+  fs.writeFileSync(lockFile + '.lock.reclaim.' + graveToken, JSON.stringify({
+    version: 1, pid: deadPid(), token: 'gone', label: 'device registry', file: lockFile,
+    createdAt: new Date().toISOString(),
+  }, null, 2) + '\n');
+  const { acquireRegistryLock } = require(modulePath);
+  let rel;
+  try { rel = acquireRegistryLock(lockFile, 'device registry'); ok('handoff: crashed reclaimer marker/grave recovered'); }
+  catch (e) { bad('handoff: crashed reclaimer marker/grave recovered', e.message); }
+  if (rel) rel();
+  check(!fs.existsSync(lockFile + '.lock.reclaiming.' + graveToken), 'handoff: dead reclaim marker cleaned up');
+}
+{
+  // A crashed reclaimer that took a LIVE owner's record and died before
+  // restoring it leaves an orphaned live record in a dead grave. The next start
+  // must restore that live owner and refuse to displace it (fail closed).
+  const d = tempDir('orphan-live-');
+  const lockFile = path.join(d, 'devices.json');
+  const live = spawn(process.execPath, ['-e', 'setTimeout(()=>{},30000)'], { stdio: 'ignore' });
+  const graveToken = 'crashed-orphan-token';
+  fs.writeFileSync(lockFile + '.lock.reclaiming.' + graveToken, JSON.stringify({
+    version: 1, pid: deadPid(), token: graveToken, staleToken: 'orphan', createdAt: new Date().toISOString(),
+  }, null, 2) + '\n');
+  fs.writeFileSync(lockFile + '.lock.reclaim.' + graveToken, JSON.stringify({
+    version: 1, pid: live.pid, token: 'orphan', label: 'device registry', file: lockFile,
+    createdAt: new Date().toISOString(),
   }, null, 2) + '\n');
   const { acquireRegistryLock } = require(modulePath);
   let threw = false;
-  let msg = '';
-  try { acquireRegistryLock(lockFile, 'device registry'); } catch (e) { threw = true; msg = e.message; }
-  check(threw, 'ticket: live reclaimer blocks a concurrent start');
-  check(/reclaiming/i.test(msg), 'ticket: refusal names the in-progress reclaim', msg);
-  reclaimer.kill();
+  try { acquireRegistryLock(lockFile, 'device registry'); } catch { threw = true; }
+  check(threw, 'handoff: orphaned live owner is restored, start refused');
+  let restoredPid = null;
+  try { restoredPid = JSON.parse(fs.readFileSync(lockFile + '.lock', 'utf8')).pid; } catch { /* absent */ }
+  check(restoredPid === live.pid, 'handoff: orphaned live record put back at the lock path', `pid=${restoredPid}`);
+  live.kill();
 }
 
 // ── 7. shared registry never yields two live owners (revocation safety) ──
@@ -241,6 +274,45 @@ for (let round = 1; round <= rounds; round += 1) {
   }
 }
 check(violations === 0, `stress race: ${rounds} rounds x ${racers} racers, no double ownership`, `violations=${violations}`);
+
+// ── 9. P4-0.2 reclaim-ticket TOCTOU regression ──
+// Plant a dead owner AND a dead reclaim ticket (the P4-0.1 trigger), then race.
+// On the P4-0.1 module two racers both judge the ticket dead, one deletes the
+// other's live ticket, and both publish (RED). On the P4-0.2 module there is no
+// ticket: the atomic take-away + exclusive create yield exactly one owner.
+{
+  const ticketRounds = Number(process.env.P4_LOCK_TICKET_ROUNDS ?? 15);
+  let ticketViolations = 0;
+  for (let round = 1; round <= ticketRounds; round += 1) {
+    const d = tempDir(`ticket-race${round}-`);
+    const lockFile = path.join(d, 'devices.json');
+    const barrier = path.join(d, 'go');
+    const out = path.join(d, 'results.txt');
+    const staleToken = `stale-ticket-${round}`;
+    staleLock(lockFile, staleToken);
+    fs.writeFileSync(lockFile + '.lock.reclaim.' + staleToken, JSON.stringify({
+      kind: 'reclaim-ticket', version: 1, pid: deadPid(), token: `dead-reclaimer-${round}`,
+      staleToken, createdAt: new Date().toISOString(),
+    }, null, 2) + '\n');
+    const kids = [];
+    for (let i = 0; i < racers; i += 1) {
+      kids.push(spawn(process.execPath, [child, modulePath, 'race', lockFile, out, barrier, '400'], { stdio: 'ignore' }));
+    }
+    const deadline = Date.now() + 20000;
+    while ((readOut(out).match(/^READY /gm) || []).length < racers && Date.now() < deadline) sleep(30);
+    fs.writeFileSync(barrier, 'go');
+    waitExit(kids, 20000);
+    const text = readOut(out);
+    const acquired = (text.match(/^ACQUIRED /gm) || []).length;
+    const lost = (text.match(/^STILLOWNS \d+ NO/gm) || []).length;
+    if (acquired > 1 || lost > 0) {
+      ticketViolations += 1;
+      console.log(`  ticket-race round ${round}: VIOLATION acquired=${acquired} lost=${lost}`);
+      console.log(text.split('\n').filter(Boolean).map((l) => '      ' + l).join('\n'));
+    }
+  }
+  check(ticketViolations === 0, `reclaim-ticket TOCTOU: ${ticketRounds} rounds x ${racers} racers, exactly one owner`, `violations=${ticketViolations}`);
+}
 
 fs.rmSync(root, { recursive: true, force: true });
 console.log(`\nmobile-gateway lock concurrency: ${passed} passed, ${failed} failed`);

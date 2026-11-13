@@ -16,20 +16,28 @@
 //     reentrant and share a reference count, so sequential reuse keeps working;
 //   * a lock left behind by a crashed process is reclaimed once its pid is gone.
 //
-// Concurrency contract (P4-0.1, fixes the P4-0 stale-reclaim TOCTOU):
-//   * Every creation is an atomic exclusive create (`wx` -> CREATE_NEW on
-//     Windows, O_EXCL on POSIX). It is the only arbitration primitive.
-//   * Reclaiming a dead owner's lock never unlinks the live lock path. It runs
-//     under a per-stale-token reclaim ticket (itself an atomic `wx` create) and
-//     finishes with an atomic rename-replace of a fully written temp record.
-//     Rename-replace leaves no window in which the lock path is absent, so no
-//     third process can slip in an exclusive create mid-reclaim.
-//   * A reclaim ticket is only ever removed after its recorded owner pid is
-//     proven dead. While a ticket exists no other ticket can be created at that
-//     name, so removing a dead ticket cannot destroy a live one.
-//   * Release renames the lock to a private graveyard name and unlinks that,
-//     and only after re-reading the record and confirming our own token. A
-//     process never deletes a lock that names somebody else.
+// Concurrency contract (P4-0.2, fixes the P4-0.1 reclaim-ticket TOCTOU):
+//   * Ownership is established if and only if a process wins an atomic exclusive
+//     create (`wx` -> CREATE_NEW on Windows, O_EXCL on POSIX) of the lock path.
+//     That single primitive is the only ownership arbitration. The P4-0.1
+//     reclaim ticket - a second mutable file whose deletion raced - is gone.
+//   * Reclaiming a dead owner's lock is an atomic rename take-away: exactly one
+//     racer can move the dead record to a private grave (the filesystem permits
+//     one winner; losers see ENOENT and re-read). The winner verifies it took
+//     precisely the dead record it judged, then publishes by exclusive create.
+//     No shared state is ever unlinked on a stale judgment, so two processes can
+//     no longer both judge a ticket dead and delete each other's live ticket.
+//   * The take-away leaves the lock path briefly absent. A reclaim marker naming
+//     the LIVE reclaiming pid guards that window: a fresh creator that lands in
+//     it backs off, so no second owner slips in mid-reclaim. A marker left by a
+//     crashed reclaimer names a dead pid and is inert: it is recovered, never
+//     honoured, so crash recovery still works.
+//   * If a take-away ever lands on a live record (a concurrent reclaimer
+//     published in the read->take window), the record is atomically restored and
+//     the process refuses to start. A live owner's record is never destroyed.
+//   * Release takes the lock to a private grave and unlinks it only after
+//     re-reading and confirming our own token. A process never deletes a lock
+//     that names somebody else.
 //   * Unreadable, malformed, permission-denied or live-foreign state fails
 //     closed. There is no fallback to an unlocked mode.
 'use strict'
@@ -40,8 +48,10 @@ const crypto = require('node:crypto')
 
 const LOCK_SUFFIX = '.lock'
 const LOCK_VERSION = 1
-const TICKET_KIND = 'reclaim-ticket'
 const MAX_ATTEMPTS = 6
+const RECLAIM_PREFIX = '.reclaim.'
+const RECLAIMING_PREFIX = '.reclaiming.'
+const RELEASED_PREFIX = '.released.'
 
 // canonical path -> { refs, token }
 const held = new Map()
@@ -128,28 +138,41 @@ function writeRecordFully(fd, rec) {
   }
 }
 
-// Remove the on-disk lock only if it still names `token`. Renaming to a private
-// graveyard first means we never unlink a path that a new owner may have
-// created: the graveyard name carries our own token.
-function releaseOnDisk(key, token) {
-  const lockPath = key + LOCK_SUFFIX
+function makeRecord(token, label, key) {
+  return {
+    version: LOCK_VERSION,
+    pid: process.pid,
+    token,
+    label,
+    file: key,
+    createdAt: new Date().toISOString(),
+  }
+}
+
+// Take a record to a private grave and unlink it only if it still names `token`.
+// Used for release and for backing off a fresh create; never deletes a record
+// that names somebody else. Returns true if our record was removed.
+function takeAwayIfOurs(lockPath, token, gravePrefix) {
   const current = readRecord(lockPath)
-  if (!current.ok || current.rec.token !== token) return
-  const grave = `${lockPath}.released.${token}`
+  if (!current.ok || current.rec.token !== token) return false
+  const grave = `${lockPath}${gravePrefix}${token}`
   try {
     fs.renameSync(lockPath, grave)
   } catch {
-    // Already gone or not ours to move: nothing left to release.
-    return
+    return false
   }
   const moved = readRecord(grave)
   if (moved.ok && moved.rec.token === token) {
-    try {
-      fs.unlinkSync(grave)
-    } catch {
-      // Leftover graveyard file is inert; never delete anything else.
-    }
+    try { fs.unlinkSync(grave) } catch { /* inert leftover */ }
+    return true
   }
+  // Not ours after the move (should not happen for a live owner): put it back.
+  try { fs.renameSync(grave, lockPath) } catch { /* leave for manual recovery */ }
+  return false
+}
+
+function releaseOnDisk(key, token) {
+  takeAwayIfOurs(key + LOCK_SUFFIX, token, RELEASED_PREFIX)
 }
 
 function installExitHook() {
@@ -191,44 +214,61 @@ function ownerMessage(label, file, lockPath, pid) {
   )
 }
 
-// Try to become the sole reclaimer of the stale lock named `staleToken`.
-// Returns 'created' | 'stale-ticket' | 'held-by-live' | 'bad'.
-function claimReclaimTicket(ticketPath, staleToken, myToken, label, file) {
-  let fd
+// Reclaim markers and graves live beside the lock as `<lock>.reclaiming.<uuid>`
+// (the live reclaimer's identity) and `<lock>.reclaim.<uuid>` (the taken record).
+function sidecars(lockPath, prefix) {
+  const dir = path.dirname(lockPath)
+  const base = path.basename(lockPath) + prefix
+  let names
   try {
-    fd = fs.openSync(ticketPath, 'wx')
-  } catch (error) {
-    if (!error || error.code !== 'EEXIST') {
-      throw lockError(label, file, `cannot create the reclaim ticket (${error.message})`, error)
-    }
-    const t = readRecord(ticketPath)
-    if (!t.ok || t.rec.kind !== TICKET_KIND || t.rec.staleToken !== staleToken) {
-      return 'bad'
-    }
-    if (t.rec.pid === process.pid) {
-      // Our own earlier attempt died inside this process; the ticket is inert.
-      try { fs.unlinkSync(ticketPath) } catch { /* raced away */ }
-      return 'stale-ticket'
-    }
-    if (isAlive(t.rec.pid)) return 'held-by-live'
-    // Dead ticket owner. While this ticket exists nobody else can create one at
-    // this name, so unlinking it cannot destroy a live reclaimer's ticket.
-    try { fs.unlinkSync(ticketPath) } catch { /* raced away */ }
-    return 'stale-ticket'
+    names = fs.readdirSync(dir)
+  } catch {
+    return []
   }
-  try {
-    writeRecordFully(fd, {
-      kind: TICKET_KIND,
-      version: LOCK_VERSION,
-      pid: process.pid,
-      token: myToken,
-      staleToken,
-      createdAt: new Date().toISOString(),
-    })
-  } finally {
-    fs.closeSync(fd)
+  return names.filter((n) => n.startsWith(base)).map((n) => path.join(dir, n))
+}
+
+// A fresh create that landed in the lock-absent window must defer to any live
+// reclaimer (its marker names a live pid). Returns true if a live reclaim is in
+// progress, meaning the fresh creator must back off rather than become owner.
+function liveReclaimInProgress(lockPath) {
+  for (const marker of sidecars(lockPath, RECLAIMING_PREFIX)) {
+    const rec = readRecord(marker)
+    if (rec.ok && isAlive(rec.rec.pid)) return true
   }
-  return 'created'
+  return false
+}
+
+// A crashed reclaimer may have taken a LIVE owner's record and died before
+// restoring it, leaving that record in a grave while its marker names a dead
+// pid and the lock path is absent. Restore such an orphaned live record so its
+// owner is not displaced by a fresh create; clean inert dead graves. Returns
+// true if an orphan was restored (caller must fail closed: that process owns).
+function recoverCrashedReclaim(lockPath) {
+  let restored = false
+  for (const marker of sidecars(lockPath, RECLAIMING_PREFIX)) {
+    const m = readRecord(marker)
+    if (m.ok && isAlive(m.rec.pid)) continue // live reclaimer: not ours to touch
+    // Dead reclaimer. Its grave (if any) holds the record it took.
+    const grave = m.ok ? `${lockPath}${RECLAIM_PREFIX}${m.rec.token}` : null
+    if (grave) {
+      const taken = readRecord(grave)
+      if (taken.ok && isAlive(taken.rec.pid)) {
+        // Orphaned LIVE owner displaced by a crashed reclaim: put it back.
+        try {
+          fs.linkSync(grave, lockPath)
+          try { fs.unlinkSync(grave) } catch { /* inert */ }
+          restored = true
+        } catch {
+          // Lock path re-occupied by a legitimate owner; leave the grave.
+        }
+      } else {
+        try { fs.unlinkSync(grave) } catch { /* inert dead record */ }
+      }
+    }
+    try { fs.unlinkSync(marker) } catch { /* inert */ }
+  }
+  return restored
 }
 
 /**
@@ -282,74 +322,112 @@ function acquireRegistryLock(file, label) {
       }
       if (isAlive(owner.rec.pid)) throw ownerMessage(label, file, lockPath, owner.rec.pid)
 
-      // Dead owner: reclaim under an atomic ticket, then publish by atomic
-      // rename-replace so the lock path is never absent mid-reclaim.
+      // Dead owner: mark the reclaim window with our LIVE pid, take the dead
+      // record atomically, verify, then publish by exclusive create.
       const staleToken = owner.rec.token
-      const ticketPath = `${lockPath}.reclaim.${staleToken}`
-      const ticket = claimReclaimTicket(ticketPath, staleToken, token, label, file)
-      if (ticket === 'bad') {
-        throw lockError(label, file, `the reclaim ticket is malformed; refusing to share the data file (manual recovery: inspect ${ticketPath})`)
-      }
-      if (ticket === 'held-by-live') {
-        throw lockError(label, file, `another live process is reclaiming the stale lock (${ticketPath}); refusing to start concurrently`)
-      }
-      if (ticket === 'stale-ticket') {
-        sleepSync(20)
-        continue
-      }
-
-      // We hold the ticket. Re-verify the lock is still exactly the stale
-      // record we saw; only then may we replace it.
-      const underTicket = readRecord(lockPath)
-      if (!underTicket.ok || underTicket.rec.token !== staleToken || isAlive(underTicket.rec.pid)) {
-        try { fs.unlinkSync(ticketPath) } catch { /* inert */ }
-        sleepSync(20)
-        continue
-      }
-
-      const tmp = `${lockPath}.tmp.${token}`
-      let tmpFd
+      const marker = `${lockPath}${RECLAIMING_PREFIX}${token}`
+      let markerFd
       try {
-        tmpFd = fs.openSync(tmp, 'wx')
-        writeRecordFully(tmpFd, {
-          version: LOCK_VERSION,
-          pid: process.pid,
-          token,
-          label,
-          file: key,
-          createdAt: new Date().toISOString(),
-        })
-      } catch (error) {
-        if (tmpFd !== undefined) fs.closeSync(tmpFd)
-        try { fs.unlinkSync(tmp) } catch { /* inert */ }
-        try { fs.unlinkSync(ticketPath) } catch { /* inert */ }
-        throw lockError(label, file, `cannot prepare the replacement lock (${error.message})`, error)
+        markerFd = fs.openSync(marker, 'wx')
+        writeRecordFully(markerFd, { version: LOCK_VERSION, pid: process.pid, token, staleToken })
+      } catch (markerError) {
+        if (markerFd !== undefined) fs.closeSync(markerFd)
+        if (markerError && markerError.code === 'EEXIST') {
+          // Our per-attempt marker name collided (a leftover of our own earlier
+          // attempt). Clear it and retry; markers never arbitrate ownership.
+          try { fs.unlinkSync(marker) } catch { /* inert */ }
+          sleepSync(20)
+          continue
+        }
+        throw lockError(label, file, `cannot mark the reclaim (${markerError.message})`, markerError)
       }
-      fs.closeSync(tmpFd)
+      fs.closeSync(markerFd)
+
+      const grave = `${lockPath}${RECLAIM_PREFIX}${token}`
       try {
-        // Atomic replace on POSIX and Windows; no absence window.
-        fs.renameSync(tmp, lockPath)
-      } catch (error) {
-        try { fs.unlinkSync(tmp) } catch { /* inert */ }
-        try { fs.unlinkSync(ticketPath) } catch { /* inert */ }
-        throw lockError(label, file, `cannot publish the replacement lock (${error.message})`, error)
+        // Re-confirm dead immediately before the take; the post-take check is
+        // the authoritative guard against a concurrent live publication.
+        const confirm = readRecord(lockPath)
+        if (!confirm.ok || confirm.rec.token !== staleToken || isAlive(confirm.rec.pid)) {
+          sleepSync(20)
+          continue
+        }
+        try {
+          fs.renameSync(lockPath, grave)
+        } catch (renameError) {
+          if (renameError && renameError.code === 'ENOENT') {
+            sleepSync(20)
+            continue
+          }
+          throw lockError(label, file, `cannot take the stale lock (${renameError.message})`, renameError)
+        }
+        const taken = readRecord(grave)
+        if (!taken.ok || taken.rec.token !== staleToken || isAlive(taken.rec.pid)) {
+          // Took a live/foreign record: restore it atomically, never own over it.
+          try {
+            fs.linkSync(grave, lockPath)
+            try { fs.unlinkSync(grave) } catch { /* inert */ }
+          } catch {
+            throw lockError(label, file, `a concurrent reclaim changed the lock; refusing to start (manual recovery: inspect ${grave})`)
+          }
+          sleepSync(20)
+          continue
+        }
+        // We provably hold the dead record. Publish exclusively; a fresh owner
+        // that created into the window legitimately owns and we defer.
+        try {
+          descriptor = fs.openSync(lockPath, 'wx')
+        } catch (publishError) {
+          try { fs.unlinkSync(grave) } catch { /* inert dead record */ }
+          if (publishError && publishError.code === 'EEXIST') {
+            sleepSync(20)
+            continue
+          }
+          throw lockError(label, file, `cannot publish the replacement lock (${publishError.message})`, publishError)
+        }
+        try {
+          writeRecordFully(descriptor, makeRecord(token, label, key))
+        } finally {
+          fs.closeSync(descriptor)
+        }
+        try { fs.unlinkSync(grave) } catch { /* inert dead record */ }
+        try { fs.chmodSync(lockPath, 0o600) } catch { /* Windows has no POSIX bits */ }
+        held.set(key, { refs: 1, token })
+        return makeRelease(key, token)
+      } finally {
+        // Our marker guards only this attempt's window; always clear it.
+        try { fs.unlinkSync(marker) } catch { /* inert */ }
       }
-      try { fs.unlinkSync(ticketPath) } catch { /* inert leftover */ }
-      try { fs.chmodSync(lockPath, 0o600) } catch { /* Windows has no POSIX bits */ }
-      held.set(key, { refs: 1, token })
-      return makeRelease(key, token)
     }
 
-    const record = {
-      version: LOCK_VERSION,
-      pid: process.pid,
-      token,
-      label,
-      file: key,
-      createdAt: new Date().toISOString(),
+    // Exclusive create succeeded: the lock path was absent and is now an empty
+    // file exclusively ours. Defer to any live reclaimer mid-transition, and
+    // recover a live record orphaned by a crashed reclaim, before claiming it.
+    if (liveReclaimInProgress(lockPath)) {
+      fs.closeSync(descriptor)
+      try { fs.unlinkSync(lockPath) } catch { /* our empty fresh create */ }
+      sleepSync(20)
+      continue
+    }
+    // Drop our empty placeholder so an orphaned live record can be restored to
+    // the path; if one is recovered its owner keeps the file and we fail closed.
+    fs.closeSync(descriptor)
+    try { fs.unlinkSync(lockPath) } catch { /* our empty fresh create */ }
+    if (recoverCrashedReclaim(lockPath)) {
+      throw lockError(label, file, 'recovered a live owner displaced by a crashed reclaim; refusing to start concurrently')
+    }
+    // Path is clear: claim it exclusively again and publish our record.
+    try {
+      descriptor = fs.openSync(lockPath, 'wx')
+    } catch (recreateError) {
+      if (recreateError && recreateError.code === 'EEXIST') {
+        sleepSync(20)
+        continue
+      }
+      throw lockError(label, file, `cannot create the lock file (${recreateError.message})`, recreateError)
     }
     try {
-      writeRecordFully(descriptor, record)
+      writeRecordFully(descriptor, makeRecord(token, label, key))
     } finally {
       fs.closeSync(descriptor)
     }

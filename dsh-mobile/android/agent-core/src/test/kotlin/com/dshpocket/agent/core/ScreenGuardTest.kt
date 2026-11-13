@@ -94,4 +94,41 @@ class ScreenGuardTest {
         ScreenGuard.reset()
         assertTrue(ScreenGuard.isStale(fp))
     }
+
+    // ── P4-0.2 negative tests: the guard must REFUSE every unverified screen ──
+    // These pin the safety direction (fail closed): an action may only run when
+    // the live screen provably matches the published snapshot. Any uncertainty
+    // must yield isStale == true (refuse), never false (allow).
+
+    @Test
+    fun `negative - unpublished guard refuses even a matching empty screen`() {
+        val fp = ScreenGuard.fingerprint("com.example", 0, false, false, emptyList())
+        // Nothing published: even an identical fingerprint must be refused.
+        assertTrue(ScreenGuard.isStale(fp))
+    }
+
+    @Test
+    fun `negative - sensitivity flipping to sensitive is refused`() {
+        val base = ScreenGuard.fingerprint("com.example", 0, false, false, listOf(sig("n1", "OK")))
+        ScreenGuard.publish(base)
+        val sensitive = ScreenGuard.fingerprint("com.example", 0, false, true, listOf(sig("n1", "OK")))
+        assertTrue(ScreenGuard.isStale(sensitive))
+    }
+
+    @Test
+    fun `negative - lock state flipping to locked is refused`() {
+        val base = ScreenGuard.fingerprint("com.example", 0, false, false, listOf(sig("n1", "OK")))
+        ScreenGuard.publish(base)
+        val locked = ScreenGuard.fingerprint("com.example", 0, true, false, listOf(sig("n1", "OK")))
+        assertTrue(ScreenGuard.isStale(locked))
+    }
+
+    @Test
+    fun `negative - a screen with no elements is not blindly accepted`() {
+        val published = ScreenGuard.fingerprint("com.example", 0, false, false, listOf(sig("n1", "OK")))
+        ScreenGuard.publish(published)
+        val empty = ScreenGuard.fingerprint("com.example", 0, false, false, emptyList())
+        assertNotEquals(published, empty)
+        assertTrue(ScreenGuard.isStale(empty))
+    }
 }

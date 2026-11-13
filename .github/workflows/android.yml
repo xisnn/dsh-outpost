@@ -169,7 +169,7 @@ jobs:
         working-directory: dsh-mobile
         run: npm ci
 
-      - name: agent-core JVM unit tests (38 tests)
+      - name: agent-core JVM unit tests (57 tests)
         working-directory: dsh-mobile/android
         run: |
           chmod +x gradlew
