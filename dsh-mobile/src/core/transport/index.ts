@@ -128,6 +128,13 @@ const RPC_TIMEOUT_MS = 30_000;
 /** 探测类接口（ping / 兼容性检查）用更短的超时，避免拖住界面 */
 export const PROBE_TIMEOUT_MS = 8_000;
 
+/**
+ * P4-0.1（N1）：登录（token → cookie）握手自身的上限。
+ * 原生 cookie 调用另有 5s 有界超时；这里兜住「fetch 本身不返回」的情况，
+ * 保证配对按钮在任何故障下都能回到可操作状态。
+ */
+const LOGIN_TIMEOUT_MS = 20_000;
+
 /** 从 Set-Cookie 里提取 cookie 键值对（不含属性） */
 export function extractCookie(setCookieHeaders: string[] | null): string | undefined {
   if (!setCookieHeaders?.length) return undefined;
@@ -241,16 +248,28 @@ export class DshConnection {
     // 也就是**任何 token 都能通过**，认证被完全绕过。
     //
     // 清空只针对本服务地址，不影响用户连的其他 DSH 实例。
-    await this.clearCookieJar();
+    //
+    // P4-0.1（N1）：清理结果必须可信。清理「无法确认」或「确认有残留」时
+    // **中止登录** —— 带着可能残留的旧凭据继续，就等于允许旧 cookie 为
+    // 新 token 背书。清理调用本身有有界超时，不会把登录吊死。
+    const cleanup = await this.clearCookieJarDetailed();
+    if (cleanup.kind === 'partial' || cleanup.kind === 'unverified') {
+      throw new Error(
+        `登录前 cookie 清理无法确认（${cleanup.kind}），为防止旧凭据被复用已中止登录；请重试`,
+      );
+    }
 
     const url = `${this.baseUrl}/?token=${encodeURIComponent(token)}`;
     let res: Response | undefined;
     let fetchError: unknown;
+    const loginCtrl = new AbortController();
+    const loginTimer = setTimeout(() => loginCtrl.abort(), LOGIN_TIMEOUT_MS);
     try {
       res = await this.fetchImpl(url, {
         method: 'GET',
         credentials: 'include',
         headers: { Accept: 'text/html' },
+        signal: loginCtrl.signal,
       });
     } catch (e) {
       // 错误信息里带地址有助于排查，但必须脱敏 ——
@@ -262,6 +281,7 @@ export class DshConnection {
         `连接失败（fetch 阶段）：${msg}。地址=${redactUrl(this.baseUrl)}`,
       );
     } finally {
+      clearTimeout(loginTimer);
       void fetchError;
     }
 
@@ -302,35 +322,38 @@ export class DshConnection {
    * 这个判据失效 —— 错误的 token 也能通过认证。
    *
    * 只清本 baseUrl 下的 cookie，不影响用户连的其他 DSH 实例。
-   * 失败不阻断：读不到 CookieManager 时（纯 Node 环境）本来就没有
-   * 第二个存储需要清。
+   * P4-0.1（N1）：返回可信分类。`partial`/`unverified` 由 loginWithToken
+   * 视为登录中止条件；`unavailable`（平台没有第二个存储）才允许继续。
    */
-  private async clearCookieJar(): Promise<void> {
+  private async clearCookieJarDetailed(): Promise<
+    import('../cookieJar').CookieCleanupResult
+  > {
     try {
-      const { clearNativeCookieJar } = await import('../cookieJar');
-      await clearNativeCookieJar(this.baseUrl);
-    } catch {
-      // 清理失败也让登录继续 —— 但下面的判据会因此变得不严格。
-      // 这种情况在真机上不该出现（CookieManager 是 RN 的必需依赖），
-      // 真出现了说明宿主没注入 reader，那时 readCookieFromJar 也会返回空。
+      const { clearNativeCookieJarDetailed } = await import('../cookieJar');
+      return await clearNativeCookieJarDetailed(this.baseUrl);
+    } catch (e) {
+      // 连清理模块都加载/执行失败：结论只能是「无法确认」，绝不能当清干净。
+      const { describeError } = await import('../cookieJar');
+      return { kind: 'unverified', reason: describeError(e) };
     }
   }
 
   /** 从 RN 的原生 cookie 容器读回 dsh-auth cookie */
   private async readCookieFromJar(): Promise<string | undefined> {
-    // 优先用 @react-native-cookies/cookies（如果装了）
+    // P4-0.1（N1）：区分「读成功但为空」与「读失败」。
+    // 修前把超时/异常吞进空 catch，空 jar 落进状态码分支，原生故障被
+    // 伪装成服务端 HTTP 401。现在读失败会抛 CookieContainerError，
+    // 只有「读成功且确实没有 dsh-auth」才允许交给状态码判定。
+    let nativePresent = false;
+    let jarFault: string | undefined;
     try {
       const mod = await import('@react-native-cookies/cookies' as string);
       const cm = (mod as { default?: unknown }).default ?? mod;
       const get = (cm as { get?: (u: string) => Promise<Record<string, { value: string }>> }).get;
       if (get) {
-        // 加超时：原生 cookie 容器偶发不回调，不能让它把整个连接卡死
-        const all = await Promise.race([
-          get(this.baseUrl),
-          new Promise<Record<string, { value: string }>>((_, reject) =>
-            setTimeout(() => reject(new Error('CookieManager.get timeout')), 5000),
-          ),
-        ]);
+        nativePresent = true;
+        const { withNativeCookieTimeout } = await import('../cookieJar');
+        const all = await withNativeCookieTimeout(get(this.baseUrl), 'read');
         const parts = Object.entries(all ?? {})
           .filter(([name]) => name.startsWith('dsh-auth'))
           .map(([name, c]) => `${name}=${c.value}`);
@@ -339,6 +362,12 @@ export class DshConnection {
         }
       }
     } catch (e) {
+      if (nativePresent) {
+        const { describeError } = await import('../cookieJar');
+        jarFault = describeError(e);
+      }
+      // 模块本身不存在（纯 Node / 未重编 APK）：平台上没有第二个存储，
+      // 不算读失败，交给注入的 reader 或状态码判定。
     }
 
     // 兜底：让调用方从 native 层注入读取函数
@@ -347,6 +376,10 @@ export class DshConnection {
         return await this.cookieReader(this.baseUrl);
       } catch (e) {
       }
+    }
+    if (jarFault) {
+      const { CookieContainerError } = await import('../cookieJar');
+      throw new CookieContainerError(jarFault, 'read');
     }
     return undefined;
   }

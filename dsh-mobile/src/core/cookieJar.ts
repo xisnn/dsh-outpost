@@ -129,7 +129,7 @@ async function loadCookieManager(): Promise<CookieManagerLike | null> {
  * 万一它把 cookie 值拼进消息里，就会顺着界面/日志泄露出去。
  * 错误码和类型名是系统级分类，安全且足够定位问题。
  */
-function describeError(e: unknown): string {
+export function describeError(e: unknown): string {
   if (e && typeof e === 'object') {
     const code = (e as { code?: unknown }).code;
     if (typeof code === 'string' && code) return code;
@@ -137,6 +137,42 @@ function describeError(e: unknown): string {
     if (typeof name === 'string' && name) return name;
   }
   return 'unknown error';
+}
+
+/**
+ * P4-0.1（N1）：原生 cookie 调用的**有界超时**。
+ *
+ * 修前缺陷：清理/读取链路直接 await 原生 Promise，没有任何超时。
+ * 原生容器偶发不回调时，登录在发出第一个 HTTP 请求之前就永久挂起
+ * （真实 Emulator 上表现为「连接」按钮无限转圈）。
+ *
+ * 超时不是「清理成功」：它抛 CookieContainerError，由调用方归类为
+ * 「无法确认」，登录据此中止 —— 绝不带着可能残留的旧凭据继续。
+ */
+export const NATIVE_COOKIE_TIMEOUT_MS = 5_000;
+
+export class CookieContainerError extends Error {
+  readonly code: string;
+  constructor(code: string, label: string) {
+    super(`native cookie container ${label} failed: ${code}`);
+    this.name = 'CookieContainerError';
+    this.code = code;
+  }
+}
+
+export function withNativeCookieTimeout<T>(p: Promise<T>, label: string): Promise<T> {
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  return Promise.race([
+    p,
+    new Promise<T>((_, reject) => {
+      timer = setTimeout(
+        () => reject(new CookieContainerError('COOKIE_NATIVE_TIMEOUT', label)),
+        NATIVE_COOKIE_TIMEOUT_MS,
+      );
+    }),
+  ]).finally(() => {
+    if (timer !== undefined) clearTimeout(timer);
+  });
 }
 
 /** 从 CookieManager 的结果里挑出 DSH 的 cookie 名（不读值） */
@@ -180,7 +216,7 @@ async function listDshCookies(
 
   if (typeof cm.getAll === 'function') {
     try {
-      return { kind: 'ok', names: dshCookieNames(await cm.getAll(baseUrl)) };
+      return { kind: 'ok', names: dshCookieNames(await withNativeCookieTimeout(cm.getAll(baseUrl), 'getAll')) };
     } catch (e) {
       // Android 的 getAll 必然走到这里（GET_ALL_NOT_SUPPORTED）
       getAllError = describeError(e);
@@ -189,7 +225,7 @@ async function listDshCookies(
 
   if (baseUrl && typeof cm.get === 'function') {
     try {
-      return { kind: 'ok', names: dshCookieNames(await cm.get(baseUrl, true)) };
+      return { kind: 'ok', names: dshCookieNames(await withNativeCookieTimeout(cm.get(baseUrl, true), 'get')) };
     } catch (e) {
       return { kind: 'failed', error: describeError(e) };
     }
@@ -233,7 +269,7 @@ export async function clearNativeCookieJarDetailed(
   if (before.kind === 'ok' && baseUrl && typeof cm.clearByName === 'function') {
     for (const name of before.names) {
       try {
-        await cm.clearByName(baseUrl, name, true);
+        await withNativeCookieTimeout(cm.clearByName(baseUrl, name, true), 'clearByName');
       } catch (e) {
         // 记类别，不记 cookie 名/值
         failures.push(`clearByName rejected (${describeError(e)})`);
@@ -248,7 +284,7 @@ export async function clearNativeCookieJarDetailed(
   // 登录态 cookie 恰好是 HttpOnly 的（服务端 Set-Cookie 里带 HttpOnly）。
   if (typeof cm.clearAll === 'function') {
     try {
-      await cm.clearAll(true);
+      await withNativeCookieTimeout(cm.clearAll(true), 'clearAll');
     } catch (e) {
       failures.push(`clearAll rejected (${describeError(e)})`);
     }
