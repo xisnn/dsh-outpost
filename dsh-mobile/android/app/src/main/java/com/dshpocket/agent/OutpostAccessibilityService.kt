@@ -16,6 +16,7 @@ import android.view.accessibility.AccessibilityEvent
 import android.view.accessibility.AccessibilityManager
 import android.view.accessibility.AccessibilityNodeInfo
 import android.view.accessibility.AccessibilityWindowInfo
+import com.dshpocket.agent.core.ScreenGuard
 import java.util.concurrent.atomic.AtomicInteger
 
 data class PhoneElement(
@@ -76,6 +77,39 @@ class OutpostAccessibilityService : AccessibilityService() {
             "密码", "验证码", "支付", "付款", "转账", "银行卡", "余额", "安全码",
             "password", "passcode", "pin", "verification code", "payment", "bank card",
         )
+
+        /**
+         * P4-0.1 P0-3A: identity of a snapshot for screen-generation binding.
+         * Mirrors exactly what [screenJson] shows the model, so "the screen the
+         * model saw" and "the screen we compare against" are the same object.
+         */
+        fun fingerprintOf(s: PhoneSnapshot): String = ScreenGuard.fingerprint(
+            s.packageName,
+            s.displayId,
+            s.locked,
+            s.sensitive,
+            s.elements.map {
+                ScreenGuard.ElementSig(
+                    id = it.id,
+                    text = it.text,
+                    description = it.description,
+                    className = it.className,
+                    bounds = it.bounds.toShortString(),
+                    flags = "${it.clickable}${it.editable}${it.scrollable}${it.enabled}${it.isPassword}",
+                )
+            },
+        )
+    }
+
+    /**
+     * True when the live screen no longer matches the last snapshot published to
+     * the model. Actions then refuse with STALE_SCREEN instead of re-resolving
+     * positional ids against a tree the model never saw.
+     */
+    private fun isStaleScreen(displayId: Int): Boolean {
+        val s = snapshot(displayId)
+        if (s.error != null) return false
+        return ScreenGuard.isStale(fingerprintOf(s))
     }
 
     private val screenCounter = AtomicInteger(0)
@@ -166,6 +200,7 @@ class OutpostAccessibilityService : AccessibilityService() {
 
     fun tap(elementId: String, displayId: Int = Display.DEFAULT_DISPLAY): String {
         val root = rootFor(displayId) ?: return "ACCESSIBILITY_NO_ACTIVE_WINDOW"
+        if (isStaleScreen(displayId)) return "STALE_SCREEN"
         val node = findElement(root, elementId) ?: return "STALE_ELEMENT"
         if (!node.isEnabled) return "ELEMENT_DISABLED"
         val target = if (node.isClickable) node else clickableAncestor(node)
@@ -188,6 +223,7 @@ class OutpostAccessibilityService : AccessibilityService() {
     fun type(elementId: String?, text: String, displayId: Int = Display.DEFAULT_DISPLAY): String {
         if (text.length > MAX_TYPE_CHARS) return "TEXT_TOO_LONG"
         val root = rootFor(displayId) ?: return "ACCESSIBILITY_NO_ACTIVE_WINDOW"
+        if (isStaleScreen(displayId)) return "STALE_SCREEN"
         var node = (if (elementId.isNullOrBlank()) findFocusedEditable(root) else findElement(root, elementId))
             ?: return if (elementId.isNullOrBlank()) "NO_FOCUSED_EDITABLE" else "STALE_ELEMENT"
         if (!node.isEditable) {
@@ -208,6 +244,11 @@ class OutpostAccessibilityService : AccessibilityService() {
         // setText until an actual click expands/focuses the real input. Click,
         // wait for the new window, then set text on the focused editable node.
         val originalPackage = root.packageName?.toString()
+        // P4-0.1 P0-3A: same-package navigation is still a different screen. The
+        // window id changes on activity/window switches but not on in-place
+        // expansion (e.g. a SearchView), so it separates "the field moved to
+        // another window" from "the same field expanded".
+        val originalWindowId = root.windowId
         node.performAction(AccessibilityNodeInfo.ACTION_CLICK)
         var current = node
         repeat(10) {
@@ -222,6 +263,14 @@ class OutpostAccessibilityService : AccessibilityService() {
                 Log.w(
                     "DshPhoneA11y",
                     "type display=$displayId aborted: window changed $originalPackage -> $freshPackage",
+                )
+                return "SCREEN_CHANGED_DURING_TYPE"
+            }
+            if (freshRoot.windowId != originalWindowId) {
+                Log.w(
+                    "DshPhoneA11y",
+                    "type display=$displayId aborted: same package but window changed " +
+                        "$originalWindowId -> ${freshRoot.windowId}",
                 )
                 return "SCREEN_CHANGED_DURING_TYPE"
             }
@@ -367,6 +416,7 @@ class OutpostAccessibilityService : AccessibilityService() {
 
     fun scroll(direction: String, displayId: Int = Display.DEFAULT_DISPLAY): String {
         val root = rootFor(displayId) ?: return "ACCESSIBILITY_NO_ACTIVE_WINDOW"
+        if (isStaleScreen(displayId)) return "STALE_SCREEN"
         val node = findScrollable(root) ?: return "NO_SCROLLABLE"
         val action = when (direction.lowercase()) {
             "up", "backward" -> AccessibilityNodeInfo.ACTION_SCROLL_BACKWARD
@@ -379,6 +429,7 @@ class OutpostAccessibilityService : AccessibilityService() {
     }
 
     fun key(key: String, displayId: Int = Display.DEFAULT_DISPLAY): String {
+        if (isStaleScreen(displayId)) return "STALE_SCREEN"
         if (displayId != Display.DEFAULT_DISPLAY) {
             return PhoneBridge.backgroundKey(key)
         }

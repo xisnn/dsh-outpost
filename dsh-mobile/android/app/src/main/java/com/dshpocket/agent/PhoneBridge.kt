@@ -8,6 +8,7 @@ import android.os.Process
 import android.provider.Settings
 import android.util.Log
 import android.view.Display
+import com.dshpocket.agent.core.ScreenGuard
 import org.json.JSONArray
 import org.json.JSONObject
 
@@ -240,6 +241,9 @@ object PhoneBridge {
     }
 
     fun screenJson(snapshot: PhoneSnapshot): String {
+        // P4-0.1 P0-3A: this is the only place a snapshot becomes model-visible.
+        // Publishing here binds later actions to exactly what the model saw.
+        ScreenGuard.publish(OutpostAccessibilityService.fingerprintOf(snapshot))
         val root = JSONObject()
             .put("screenId", snapshot.screenId)
             .put("displayId", snapshot.displayId)

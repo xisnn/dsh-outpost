@@ -2,6 +2,7 @@ package com.dshpocket.agent
 
 import android.content.Context
 import com.dshpocket.agent.core.AgentTool
+import com.dshpocket.agent.core.PhoneOpenPolicy
 import com.dshpocket.agent.core.ToolCall
 import com.dshpocket.agent.core.ToolOutput
 import com.dshpocket.agent.core.ToolRisk
@@ -158,6 +159,24 @@ private class PhoneOpenTool(
         }
         val packageName = stringArgument(call, "package")
             ?: return ToolOutput(ToolStatus.ERROR, "INVALID_PACKAGE")
+        // P4-0.1 P0-3B: refuse BEFORE launching. The old flow started the target
+        // and only then noticed it was sensitive, i.e. the sensitive page was
+        // already on screen before the tool reported DENIED.
+        val preLaunch = PhoneOpenPolicy.preLaunchRefusal(
+            packageName,
+            sensitiveTarget = PhoneBridge.isSensitivePackage(packageName),
+            locked = before.error == null && before.locked,
+        )
+        if (preLaunch != null) {
+            if (preLaunch.startsWith("OPEN_SENSITIVE_PACKAGE")) {
+                val resumed = handoff.await("打开的是系统或安全设置，需要你接管手机")
+                return ToolOutput(
+                    ToolStatus.DENIED,
+                    "$preLaunch" + if (resumed) " (handoff resumed)" else " (handoff stopped)",
+                )
+            }
+            return ToolOutput(ToolStatus.ERROR, preLaunch)
+        }
         val result = PhoneBridge.openApp(context, packageName)
         if (result != "OK") return ToolOutput(ToolStatus.ERROR, result)
         if (PhoneBridge.isSensitivePackage(packageName)) {
