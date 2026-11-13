@@ -65,11 +65,24 @@ function isAlive(pid) {
   if (pid === process.pid) return true
   try {
     process.kill(pid, 0)
-    return true
   } catch (error) {
     // EPERM means the process exists but belongs to another user: still alive.
     return error && error.code === 'EPERM'
   }
+  // A SIGKILLed process stays a zombie until its parent reaps it, and
+  // kill(pid,0) still succeeds for a zombie. A zombie cannot hold the lock or
+  // run, so it must count as dead or crash recovery would refuse forever on
+  // Linux. Windows has no zombies; /proc is absent there and on other platforms.
+  if (process.platform === 'linux') {
+    try {
+      const stat = fs.readFileSync(`/proc/${pid}/stat`, 'utf8')
+      const state = stat.slice(stat.lastIndexOf(')') + 2).split(' ')[0]
+      if (state === 'Z' || state === 'X') return false
+    } catch {
+      // Unreadable /proc: fall through and treat as alive (fail closed).
+    }
+  }
+  return true
 }
 
 function sleepSync(ms) {
