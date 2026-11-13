@@ -255,12 +255,15 @@ function recoverCrashedReclaim(lockPath) {
       const taken = readRecord(grave)
       if (taken.ok && isAlive(taken.rec.pid)) {
         // Orphaned LIVE owner displaced by a crashed reclaim: put it back.
+        // Whether or not the restore lands, a live owner exists, so the caller
+        // must fail closed rather than displace it (manual recovery if needed).
+        restored = true
         try {
           fs.linkSync(grave, lockPath)
           try { fs.unlinkSync(grave) } catch { /* inert */ }
-          restored = true
         } catch {
-          // Lock path re-occupied by a legitimate owner; leave the grave.
+          // Lock path re-occupied by a concurrent owner; leave the grave for
+          // manual recovery and still refuse to start.
         }
       } else {
         try { fs.unlinkSync(grave) } catch { /* inert dead record */ }
