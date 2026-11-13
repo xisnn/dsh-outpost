@@ -46,6 +46,7 @@ export function HomeScreen({ active = true }: { active?: boolean }) {
     butlerBusy,
     butlerNeedWorkspace,
     pickButlerWorkspace,
+    setButlerMode,
     store,
   } = useApp();
   const [tab, setTab] = useState<HomeTab>(butlerMode ? 'butler' : 'workspaces');
@@ -94,7 +95,12 @@ export function HomeScreen({ active = true }: { active?: boolean }) {
         visible={butlerMode && location === 'desktop' && !butlerSessionId && butlerNeedWorkspace}
         workspaces={store.workspaces}
         onPick={pickButlerWorkspace}
-        onCancel={() => {}}
+        // P4-0.1（N2）：首启弹层 previously 传了 no-op onCancel 且不允许取消，
+        // 空工作区时用户被锁死在整个 UI 之外（BACK 也走同一个 no-op），
+        // 且 butlerMode 已持久化 → 重启后再次陷入。现在取消 = 关闭管家模式
+        // 回到普通首页：不清任何数据，落盘 '0' 后重启不会再弹。
+        allowCancel
+        onCancel={() => setButlerMode(false)}
       />
       <View style={styles.body}>
         {butlerMode ? (
