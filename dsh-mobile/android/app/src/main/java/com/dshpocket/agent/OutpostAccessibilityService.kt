@@ -108,8 +108,7 @@ class OutpostAccessibilityService : AccessibilityService() {
      */
     private fun isStaleScreen(displayId: Int): Boolean {
         val s = snapshot(displayId)
-        if (s.error != null) return false
-        return ScreenGuard.isStale(fingerprintOf(s))
+        return ScreenGuard.staleDecision(s.error != null, if (s.error != null) null else fingerprintOf(s))
     }
 
     private val screenCounter = AtomicInteger(0)

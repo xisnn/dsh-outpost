@@ -131,4 +131,40 @@ class ScreenGuardTest {
         assertNotEquals(published, empty)
         assertTrue(ScreenGuard.isStale(empty))
     }
+
+    // ── P4-0.2 supplemental: isStaleScreen fail-closed on snapshot failure ──
+    // The service decides via ScreenGuard.staleDecision. A snapshot failure means
+    // the screen cannot be verified, so the action MUST be refused (true).
+
+    @Test
+    fun `staleDecision refuses on snapshot error (fail-closed)`() {
+        val fp = ScreenGuard.fingerprint("com.example", 0, false, false, listOf(sig("n1", "OK")))
+        ScreenGuard.publish(fp)
+        assertTrue(ScreenGuard.staleDecision(true, fp))
+    }
+
+    @Test
+    fun `staleDecision refuses on snapshot error even when nothing published`() {
+        assertTrue(ScreenGuard.staleDecision(true, null))
+    }
+
+    @Test
+    fun `staleDecision allows a matching screen when there is no error`() {
+        val fp = ScreenGuard.fingerprint("com.example", 0, false, false, listOf(sig("n1", "OK")))
+        ScreenGuard.publish(fp)
+        assertFalse(ScreenGuard.staleDecision(false, fp))
+    }
+
+    @Test
+    fun `staleDecision refuses a changed screen when there is no error`() {
+        val before = ScreenGuard.fingerprint("com.example", 0, false, false, listOf(sig("n1", "OK")))
+        val after = ScreenGuard.fingerprint("com.example", 0, false, false, listOf(sig("n1", "Confirm")))
+        ScreenGuard.publish(before)
+        assertTrue(ScreenGuard.staleDecision(false, after))
+    }
+
+    @Test
+    fun `staleDecision refuses a null fingerprint when there is no error`() {
+        assertTrue(ScreenGuard.staleDecision(false, null))
+    }
 }

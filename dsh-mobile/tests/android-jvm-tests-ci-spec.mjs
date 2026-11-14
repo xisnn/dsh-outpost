@@ -3,17 +3,17 @@
  *
  * ## 守什么
  *
- * `dsh-mobile/android/agent-core/src/test/` 下有 **57 个 JUnit 测试**：
+ * `dsh-mobile/android/agent-core/src/test/` 下有 **62 个 JUnit 测试**：
  * 基线 38 个（AgentLoopTest 14 / CloudModelClientTest 13 / FileRunStoreTest 7 /
  * RunRecoveryTest 4），覆盖 Agent 循环、云端模型客户端、run 存储与运行恢复；
  * P4-0.1 P0-3 新增 15 个（ScreenGuardTest 10 / PhoneOpenPolicyTest 5），覆盖
- * 屏幕生成绑定与 phone_open 预发射拒绝；P4-0.2 再增 4 个 ScreenGuard 安全方向
- * 负向测试（ScreenGuardTest 10 -> 14）。
+ * 屏幕生成绑定与 phone_open 预发射拒绝；P4-0.2 增 4 个 ScreenGuard 安全方向
+ * 负向测试；补充修复再增 5 个 staleDecision fail-closed 测试（ScreenGuardTest 14 -> 19）。
  * 它们**从未被任何 CI 步骤调用过** —— `android.yml` 里只出现
  * `:app:assembleDebug` 与 `:app:assembleRelease`，两者都不执行 `test`。
  *
  * 本 spec 守两件事：
- *   1. **测试本身还在、还是 57 个**（防止被删或被静默缩减）
+ *   1. **测试本身还在、还是 62 个**（防止被删或被静默缩减）
  *   2. **CI 真的会执行它们**，且执行它们的 job：
  *        · 不带 `workflow_dispatch` 之类的 job 级 `if:`（否则几乎不会跑 ——
  *          现有的 `build-test` job 正是这样，只在手动触发时执行）
@@ -55,7 +55,7 @@ const read = (p) => readFileSync(path.join(repo, p), 'utf8');
 const androidDir = path.join(repo, 'dsh-mobile', 'android');
 const testRoot = path.join(androidDir, 'agent-core', 'src', 'test', 'kotlin', 'com', 'dshpocket', 'agent', 'core');
 
-/** 已知的六个测试类与它们应有的 @Test 数量（gradlew 实跑核实过 57/0） */
+/** 已知的六个测试类与它们应有的 @Test 数量（gradlew 实跑核实过 62/0） */
 const EXPECTED = {
   'AgentLoopTest.kt': 14,
   'CloudModelClientTest.kt': 13,
@@ -63,7 +63,7 @@ const EXPECTED = {
   'RunRecoveryTest.kt': 4,
   // P4-0.1 P0-3 设备控制安全：屏幕生成绑定 + phone_open 预发射拒绝。
   // P4-0.2 新增 4 个 isStaleScreen 安全方向负向测试（10 -> 14）。
-  'ScreenGuardTest.kt': 14,
+  'ScreenGuardTest.kt': 19,
   'PhoneOpenPolicyTest.kt': 5,
 };
 const EXPECTED_TOTAL = Object.values(EXPECTED).reduce((a, b) => a + b, 0);
@@ -128,7 +128,7 @@ const wf = read('.github/workflows/android.yml');
 const jobs = parseJobs(wf);
 
 console.log('');
-console.log('── 1. 基线：57 个 JVM 测试确实存在且可运行 ──');
+console.log('── 1. 基线：62 个 JVM 测试确实存在且可运行 ──');
 
 check(
   /include\s+':agent-core'/.test(read('dsh-mobile/android/settings.gradle')),
@@ -183,7 +183,7 @@ check(
   runnerJobs.length === 1,
   'android.yml 里恰好有一个 job 通过 gradlew 执行 :agent-core:test',
   runnerJobs.length === 0
-    ? `没有任何 job 执行它 —— 57 个测试永远不会运行。现有 job：${Object.keys(jobs).join(', ')}`
+    ? `没有任何 job 执行它 —— 62 个测试永远不会运行。现有 job：${Object.keys(jobs).join(', ')}`
     : `有 ${runnerJobs.length} 个：${runnerJobs.map((j) => j.name).join(', ')}`,
 );
 

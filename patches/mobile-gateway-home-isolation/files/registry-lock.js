@@ -241,37 +241,63 @@ function liveReclaimInProgress(lockPath) {
 
 // A crashed reclaimer may have taken a LIVE owner's record and died before
 // restoring it, leaving that record in a grave while its marker names a dead
-// pid and the lock path is absent. Restore such an orphaned live record so its
-// owner is not displaced by a fresh create; clean inert dead graves. Returns
-// true if an orphan was restored (caller must fail closed: that process owns).
+// pid and the lock path is absent. Recover such orphans and clean inert debris.
+//
+// Strict fail-closed contract (P4-0.2 supplemental): returns true (caller MUST
+// refuse to start) whenever a live owner cannot be proven absent. That includes
+// an orphaned live record, AND any marker/grave that is unreadable, malformed or
+// permission-denied - an unverifiable diagnostic is never treated as inert. The
+// orphan diagnostic (marker + grave) is preserved whenever recovery fails or
+// cannot be verified, so manual recovery always has the record to inspect; it is
+// removed only once proven inert or successfully restored to the lock path.
 function recoverCrashedReclaim(lockPath) {
-  let restored = false
+  let failClosed = false
   for (const marker of sidecars(lockPath, RECLAIMING_PREFIX)) {
     const m = readRecord(marker)
-    if (m.ok && isAlive(m.rec.pid)) continue // live reclaimer: not ours to touch
-    // Dead reclaimer. Its grave (if any) holds the record it took.
-    const grave = m.ok ? `${lockPath}${RECLAIM_PREFIX}${m.rec.token}` : null
-    if (grave) {
-      const taken = readRecord(grave)
-      if (taken.ok && isAlive(taken.rec.pid)) {
-        // Orphaned LIVE owner displaced by a crashed reclaim: put it back.
-        // Whether or not the restore lands, a live owner exists, so the caller
-        // must fail closed rather than displace it (manual recovery if needed).
-        restored = true
-        try {
-          fs.linkSync(grave, lockPath)
-          try { fs.unlinkSync(grave) } catch { /* inert */ }
-        } catch {
-          // Lock path re-occupied by a concurrent owner; leave the grave for
-          // manual recovery and still refuse to start.
-        }
-      } else {
-        try { fs.unlinkSync(grave) } catch { /* inert dead record */ }
-      }
+    if (!m.ok) {
+      // Unreadable/corrupt/permission-denied marker: we cannot locate or verify
+      // its grave, so we cannot prove the path clear of a live orphan. Fail
+      // closed and preserve the marker for manual recovery.
+      failClosed = true
+      continue
     }
+    if (isAlive(m.rec.pid)) continue // live reclaimer: not ours to touch
+    // Dead reclaimer. Inspect the grave holding the record it took.
+    const grave = `${lockPath}${RECLAIM_PREFIX}${m.rec.token}`
+    const taken = readRecord(grave)
+    if (!taken.ok) {
+      if (taken.code === 'missing') {
+        // No grave: the reclaimer died before taking anything. Inert marker.
+        try { fs.unlinkSync(marker) } catch { /* inert */ }
+        continue
+      }
+      // Grave unreadable/corrupt: cannot prove it inert. Fail closed, preserve
+      // both the grave and the marker that points to it.
+      failClosed = true
+      continue
+    }
+    if (isAlive(taken.rec.pid)) {
+      // Orphaned LIVE owner displaced by a crashed reclaim. A live owner exists,
+      // so refuse regardless of whether the restore lands.
+      failClosed = true
+      try {
+        fs.linkSync(grave, lockPath)
+        // Restore landed: the record is back at the lock path, so the grave and
+        // marker are no longer the only diagnostic. Clean them.
+        try { fs.unlinkSync(grave) } catch { /* inert */ }
+        try { fs.unlinkSync(marker) } catch { /* inert */ }
+      } catch {
+        // Restore failed (e.g. lock path re-occupied): preserve BOTH grave and
+        // marker as the orphan diagnostic for manual recovery. Never delete the
+        // only available record of the displaced live owner.
+      }
+      continue
+    }
+    // Grave holds a dead record: proven inert. Clean grave and marker.
+    try { fs.unlinkSync(grave) } catch { /* inert */ }
     try { fs.unlinkSync(marker) } catch { /* inert */ }
   }
-  return restored
+  return failClosed
 }
 
 /**
@@ -417,7 +443,7 @@ function acquireRegistryLock(file, label) {
     fs.closeSync(descriptor)
     try { fs.unlinkSync(lockPath) } catch { /* our empty fresh create */ }
     if (recoverCrashedReclaim(lockPath)) {
-      throw lockError(label, file, 'recovered a live owner displaced by a crashed reclaim; refusing to start concurrently')
+      throw lockError(label, file, `a crashed reclaim left a live or unverifiable orphan; refusing to start (manual recovery: inspect the ${RECLAIMING_PREFIX}* marker and ${RECLAIM_PREFIX}* grave beside ${lockPath})`)
     }
     // Path is clear: claim it exclusively again and publish our record.
     try {

@@ -70,6 +70,20 @@ object ScreenGuard {
         return p != currentFingerprint
     }
 
+    /**
+     * Screen-staleness decision used by the accessibility service before an action.
+     * [snapshotError] is true when the live snapshot could not be captured;
+     * [liveFingerprint] is the live screen fingerprint (null when unavailable).
+     *
+     * Fail-closed: a snapshot failure means the live screen cannot be verified
+     * against the published snapshot, so the action is refused (stale). Refusal
+     * only - this never grants anything.
+     */
+    fun staleDecision(snapshotError: Boolean, liveFingerprint: String?): Boolean {
+        if (snapshotError) return true
+        return isStale(liveFingerprint ?: return true)
+    }
+
     fun publishedFingerprint(): String? = published
 
     /** Test/service lifecycle hook: forget the published snapshot. */

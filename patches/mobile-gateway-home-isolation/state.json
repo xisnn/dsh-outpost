@@ -20,12 +20,12 @@
     },
     "lib/registry-lock.js": {
       "pristineHash": null,
-      "patchedHash": "169a87608bf79813c68b50e06c758d96e82742c5c757247cb37dacbb3c3565b3"
+      "patchedHash": "00ea4859cfa9cc3b2903ad8c8bf9bb32f45bab403dc12c31e422e20d24237cb9"
     }
   },
   "addedFiles": [
     "lib/home-paths.mjs",
     "lib/registry-lock.js"
   ],
-  "at": "2026-11-13T20:19:48.601Z"
+  "at": "2026-11-14T17:33:42.281Z"
 }

@@ -314,6 +314,86 @@ check(violations === 0, `stress race: ${rounds} rounds x ${racers} racers, no do
   check(ticketViolations === 0, `reclaim-ticket TOCTOU: ${ticketRounds} rounds x ${racers} racers, exactly one owner`, `violations=${ticketViolations}`);
 }
 
+// ── 10. orphan-restore strict fail-closed (P4-0.2 supplemental) ──
+// A crashed reclaimer's marker/grave must never let a new owner silently take
+// the file when a live owner cannot be proven absent. Unreadable/corrupt marker
+// or grave => refuse AND preserve the diagnostic. Inert debris => clean + allow.
+{
+  const { acquireRegistryLock } = require(modulePath);
+  const live = spawn(process.execPath, ['-e', 'setTimeout(()=>{},30000)'], { stdio: 'ignore' });
+  const graveRec = (pid, token) => JSON.stringify({
+    version: 1, pid, token, label: 'device registry', createdAt: new Date().toISOString(),
+  }, null, 2) + '\n';
+
+  // A: corrupt marker, grave holds a LIVE orphan -> refuse, preserve marker+grave.
+  {
+    const d = tempDir('orphan-corrupt-marker-');
+    const lockFile = path.join(d, 'devices.json');
+    const lp = lockFile + '.lock';
+    const tok = 'orphan-A';
+    fs.writeFileSync(lp + '.reclaiming.' + tok, '{ corrupt marker');
+    fs.writeFileSync(lp + '.reclaim.' + tok, graveRec(live.pid, 'orphan-A'));
+    let threw = false;
+    try { acquireRegistryLock(lockFile, 'device registry'); } catch { threw = true; }
+    check(threw, 'orphan: corrupt marker fails closed (live orphan unverifiable)');
+    check(fs.existsSync(lp + '.reclaiming.' + tok), 'orphan: corrupt marker preserved for manual recovery');
+    check(fs.existsSync(lp + '.reclaim.' + tok), 'orphan: live orphan grave preserved');
+  }
+  // B: dead marker, corrupt grave -> refuse (cannot prove inert), preserve grave.
+  {
+    const d = tempDir('orphan-corrupt-grave-');
+    const lockFile = path.join(d, 'devices.json');
+    const lp = lockFile + '.lock';
+    const tok = 'orphan-B';
+    fs.writeFileSync(lp + '.reclaiming.' + tok, graveRec(deadPid(), tok));
+    fs.writeFileSync(lp + '.reclaim.' + tok, '{ corrupt grave');
+    let threw = false;
+    try { acquireRegistryLock(lockFile, 'device registry'); } catch { threw = true; }
+    check(threw, 'orphan: corrupt grave fails closed (cannot prove inert)');
+    check(fs.existsSync(lp + '.reclaim.' + tok), 'orphan: corrupt grave preserved for manual recovery');
+  }
+  // C: dead marker, grave holds a LIVE orphan -> refuse (detected orphan).
+  {
+    const d = tempDir('orphan-live-');
+    const lockFile = path.join(d, 'devices.json');
+    const lp = lockFile + '.lock';
+    const tok = 'orphan-C';
+    fs.writeFileSync(lp + '.reclaiming.' + tok, graveRec(deadPid(), tok));
+    fs.writeFileSync(lp + '.reclaim.' + tok, graveRec(live.pid, 'orphan-C'));
+    let threw = false;
+    try { acquireRegistryLock(lockFile, 'device registry'); } catch { threw = true; }
+    check(threw, 'orphan: detected live orphan fails closed');
+  }
+  // D: dead marker, grave holds a DEAD record -> inert, clean and allow.
+  {
+    const d = tempDir('orphan-inert-dead-');
+    const lockFile = path.join(d, 'devices.json');
+    const lp = lockFile + '.lock';
+    const tok = 'orphan-D';
+    fs.writeFileSync(lp + '.reclaiming.' + tok, graveRec(deadPid(), tok));
+    fs.writeFileSync(lp + '.reclaim.' + tok, graveRec(deadPid(), 'orphan-D'));
+    let rel;
+    try { rel = acquireRegistryLock(lockFile, 'device registry'); ok('orphan: inert dead grave cleaned and acquisition allowed'); }
+    catch (e) { bad('orphan: inert dead grave cleaned and acquisition allowed', e.message); }
+    if (rel) rel();
+    check(!fs.existsSync(lp + '.reclaiming.' + tok) && !fs.existsSync(lp + '.reclaim.' + tok), 'orphan: inert marker/grave removed');
+  }
+  // E: dead marker, no grave (crashed before take) -> inert marker, clean + allow.
+  {
+    const d = tempDir('orphan-inert-nograve-');
+    const lockFile = path.join(d, 'devices.json');
+    const lp = lockFile + '.lock';
+    const tok = 'orphan-E';
+    fs.writeFileSync(lp + '.reclaiming.' + tok, graveRec(deadPid(), tok));
+    let rel;
+    try { rel = acquireRegistryLock(lockFile, 'device registry'); ok('orphan: marker without grave cleaned and acquisition allowed'); }
+    catch (e) { bad('orphan: marker without grave cleaned and acquisition allowed', e.message); }
+    if (rel) rel();
+    check(!fs.existsSync(lp + '.reclaiming.' + tok), 'orphan: inert marker removed');
+  }
+  live.kill();
+}
+
 fs.rmSync(root, { recursive: true, force: true });
 console.log(`\nmobile-gateway lock concurrency: ${passed} passed, ${failed} failed`);
 process.exit(failed > 0 ? 1 : 0);
