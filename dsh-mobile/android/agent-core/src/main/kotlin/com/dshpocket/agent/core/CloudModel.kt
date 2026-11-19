@@ -61,10 +61,20 @@ data class ModelConfig(
 class CloudModelClient(
     private val config: ModelConfig,
     private val transport: HttpTransport = UrlConnectionTransport(),
-) : StreamingModelClient {
+) : StreamingModelClient, Abortable {
+    @Volatile
+    private var aborted = false
+
+    /** P4-0.3 #25: stop in-flight model I/O; blocked transport work fails visibly. */
+    override fun abort() {
+        aborted = true
+        (transport as? Abortable)?.abort()
+    }
+
     override fun complete(request: ModelRequest): ModelReply = complete(request) { }
 
     override fun complete(request: ModelRequest, onText: (String) -> Unit): ModelReply {
+        if (aborted) return ModelReply.Failure("aborted", "run stopped before model request")
         if (config.apiKey.isBlank()) return ModelReply.Failure("missing-key", "cloud model API key is not configured")
         if (config.model.isBlank()) return ModelReply.Failure("missing-model", "cloud model name is not configured")
         if (!config.baseUrl.startsWith("https://") && !config.baseUrl.startsWith("http://")) {

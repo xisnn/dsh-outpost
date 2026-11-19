@@ -3,12 +3,15 @@
  *
  * ## 守什么
  *
- * `dsh-mobile/android/agent-core/src/test/` 下有 **62 个 JUnit 测试**：
+ * `dsh-mobile/android/agent-core/src/test/` 下有 **86 个 JUnit 测试**：
  * 基线 38 个（AgentLoopTest 14 / CloudModelClientTest 13 / FileRunStoreTest 7 /
  * RunRecoveryTest 4），覆盖 Agent 循环、云端模型客户端、run 存储与运行恢复；
  * P4-0.1 P0-3 新增 15 个（ScreenGuardTest 10 / PhoneOpenPolicyTest 5），覆盖
  * 屏幕生成绑定与 phone_open 预发射拒绝；P4-0.2 增 4 个 ScreenGuard 安全方向
- * 负向测试；补充修复再增 5 个 staleDecision fail-closed 测试（ScreenGuardTest 14 -> 19）。
+ * 负向测试；补充修复再增 5 个 staleDecision fail-closed 测试（ScreenGuardTest 14 -> 19）；
+ * P4-0.3 #15 增 7 个 SensitiveContentTest（敏感词词边界匹配，62 -> 69）；
+ * P4-0.3 #22/#23/#25 增 17 个（ScreenPausePolicyTest 6 / RunDeadlineTest 5 /
+ * ActionExecutorAbortTest 4 / TransportAbortTest 2，69 -> 86）。
  * 它们**从未被任何 CI 步骤调用过** —— `android.yml` 里只出现
  * `:app:assembleDebug` 与 `:app:assembleRelease`，两者都不执行 `test`。
  *
@@ -55,7 +58,7 @@ const read = (p) => readFileSync(path.join(repo, p), 'utf8');
 const androidDir = path.join(repo, 'dsh-mobile', 'android');
 const testRoot = path.join(androidDir, 'agent-core', 'src', 'test', 'kotlin', 'com', 'dshpocket', 'agent', 'core');
 
-/** 已知的六个测试类与它们应有的 @Test 数量（gradlew 实跑核实过 62/0） */
+/** 已知的十一个测试类与它们应有的 @Test 数量（gradlew 实跑核实过 86/0） */
 const EXPECTED = {
   'AgentLoopTest.kt': 14,
   'CloudModelClientTest.kt': 13,
@@ -65,6 +68,15 @@ const EXPECTED = {
   // P4-0.2 新增 4 个 isStaleScreen 安全方向负向测试（10 -> 14）。
   'ScreenGuardTest.kt': 19,
   'PhoneOpenPolicyTest.kt': 5,
+  // P4-0.3 #15 敏感词词边界匹配：误报负向 + fail-closed 方向不放宽正负向。
+  'SensitiveContentTest.kt': 7,
+  // P4-0.3 #22 息屏暂停/解锁恢复决策矩阵。
+  'ScreenPausePolicyTest.kt': 6,
+  // P4-0.3 #23 应用层 deadline，fail-closed。
+  'RunDeadlineTest.kt': 5,
+  // P4-0.3 #25 可中断 tool 执行与网络 abort。
+  'ActionExecutorAbortTest.kt': 4,
+  'TransportAbortTest.kt': 2,
 };
 const EXPECTED_TOTAL = Object.values(EXPECTED).reduce((a, b) => a + b, 0);
 
@@ -128,7 +140,7 @@ const wf = read('.github/workflows/android.yml');
 const jobs = parseJobs(wf);
 
 console.log('');
-console.log('── 1. 基线：62 个 JVM 测试确实存在且可运行 ──');
+console.log('── 1. 基线：86 个 JVM 测试确实存在且可运行 ──');
 
 check(
   /include\s+':agent-core'/.test(read('dsh-mobile/android/settings.gradle')),

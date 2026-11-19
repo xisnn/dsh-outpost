@@ -17,6 +17,7 @@ import android.view.accessibility.AccessibilityManager
 import android.view.accessibility.AccessibilityNodeInfo
 import android.view.accessibility.AccessibilityWindowInfo
 import com.dshpocket.agent.core.ScreenGuard
+import com.dshpocket.agent.core.SensitiveContent
 import java.util.concurrent.atomic.AtomicInteger
 
 data class PhoneElement(
@@ -73,10 +74,6 @@ class OutpostAccessibilityService : AccessibilityService() {
         private const val MAX_DEPTH = 40
         private const val MAX_TEXT = 160
         private const val MAX_TYPE_CHARS = 2000
-        private val SENSITIVE_KEYWORDS = listOf(
-            "密码", "验证码", "支付", "付款", "转账", "银行卡", "余额", "安全码",
-            "password", "passcode", "pin", "verification code", "payment", "bank card",
-        )
 
         /**
          * P4-0.1 P0-3A: identity of a snapshot for screen-generation binding.
@@ -534,11 +531,10 @@ class OutpostAccessibilityService : AccessibilityService() {
             return "system or security settings"
         }
         if (elements.any { it.isPassword }) return "password field"
-        val keyword = elements.firstOrNull {
-            val value = (it.text + " " + it.description).lowercase()
-            SENSITIVE_KEYWORDS.any { word -> value.contains(word) }
+        val hit = elements.any {
+            SensitiveContent.contentKeyword(it.text + " " + it.description) != null
         }
-        return keyword?.let { "sensitive screen content" }
+        return if (hit) "sensitive screen content" else null
     }
 
 }

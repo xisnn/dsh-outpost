@@ -33,16 +33,31 @@ class AgentService : Service() {
     private var lastNotificationText = "Agent 运行中"
     private val screenReceiver = object : BroadcastReceiver() {
         override fun onReceive(context: Context?, intent: Intent?) {
-            if (intent?.action == Intent.ACTION_SCREEN_OFF) {
-                AgentRuntime.get(this@AgentService).stop()
-                updateNotification("屏幕已锁定，手机任务停止")
+            val runtime = AgentRuntime.get(this@AgentService)
+            when (intent?.action) {
+                Intent.ACTION_SCREEN_OFF -> {
+                    // P4-0.3 #22: recoverable pause instead of stop; the run
+                    // resumes on USER_PRESENT (unlock), never on mere SCREEN_ON.
+                    runtime.pauseForScreenOff()
+                    updateNotification("屏幕已锁定，任务暂停，解锁后自动恢复")
+                }
+                Intent.ACTION_USER_PRESENT -> {
+                    val wasScreenOffPaused = runtime.snapshot().optBoolean("screenOffPaused", false)
+                    runtime.resumeFromScreenOff()
+                    if (wasScreenOffPaused) updateNotification("屏幕已解锁，任务恢复")
+                }
             }
         }
     }
     private val notificationTick = object : Runnable {
         override fun run() {
+            val rt = AgentRuntime.get(this@AgentService)
+            // P4-0.3 #23: app-layer deadline, independent of the OEM FGS cap.
+            if (rt.enforceDeadline()) {
+                updateNotification("达到单次运行上限（30 分钟），任务已停止")
+            }
             val snapshot = try {
-                AgentRuntime.get(this@AgentService).snapshot()
+                rt.snapshot()
             } catch (_: Exception) {
                 null
             }
@@ -77,7 +92,9 @@ class AgentService : Service() {
         val runtime = AgentRuntime.get(this)
         runtime.setOnFinished { stopSelf() }
         overlay = AgentOverlayController(this, runtime).also { it.start() }
-        val filter = IntentFilter(Intent.ACTION_SCREEN_OFF)
+        val filter = IntentFilter(Intent.ACTION_SCREEN_OFF).apply {
+            addAction(Intent.ACTION_USER_PRESENT)
+        }
         if (Build.VERSION.SDK_INT >= 33) {
             registerReceiver(screenReceiver, filter, Context.RECEIVER_NOT_EXPORTED)
         } else {
@@ -102,6 +119,16 @@ class AgentService : Service() {
         // service to enter the foreground. Starting a demo here would race the
         // bridge's startCloud and could silently replace the requested run.
         return START_NOT_STICKY
+    }
+
+    /**
+     * P4-0.3 #23: system FGS timeout (API 34+ dataSync cap). Graceful stop via
+     * the same path as user stop; the run store records the interruption.
+     */
+    override fun onTimeout(startId: Int, fgsType: Int) {
+        AgentRuntime.get(this).stop()
+        updateNotification("系统回收前台服务，任务已停止")
+        stopSelf()
     }
 
     override fun onDestroy() {

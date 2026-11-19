@@ -16,6 +16,23 @@ interface AgentTool {
     val spec: ToolSpec
     val risk: ToolRisk
     fun execute(call: ToolCall): ToolOutput
+
+    /**
+     * P4-0.3 #25: cooperative abort hook for long-running tools. Default is a
+     * no-op; the executor additionally interrupts the executing thread so
+     * sleep/wait boundaries (PhoneBridge wait loops, handoff awaits) break out.
+     * Tools with custom resources may override to release them.
+     */
+    fun abort() {}
+}
+
+/**
+ * P4-0.3 #25: capability for network/long operations to be aborted from another
+ * thread (run stop). Implementations must make blocked work fail promptly with
+ * a visible error; they must never fabricate success after an abort.
+ */
+interface Abortable {
+    fun abort()
 }
 
 class ToolRegistry(tools: List<AgentTool>) {
@@ -68,10 +85,36 @@ class ActionExecutor(
      */
     private val preExecute: ((AgentTool, ToolCall) -> ToolOutput?)? = null,
 ) {
+    @Volatile
+    private var aborted = false
+
+    @Volatile
+    private var executing: AgentTool? = null
+
+    @Volatile
+    private var executingThread: Thread? = null
+
+    /**
+     * P4-0.3 #25: abort the in-flight tool (and refuse any later execution on
+     * this executor). Returns true when a tool was actually executing. The
+     * interrupt is consumed in execute's finally so the dedicated worker thread
+     * never carries a stale interrupt flag into the next run.
+     */
+    fun abortCurrent(): Boolean {
+        aborted = true
+        val tool = executing ?: return false
+        tool.abort()
+        executingThread?.interrupt()
+        return true
+    }
+
     fun execute(runId: String, call: ToolCall, onExecuting: (() -> Unit)? = null): ToolResult {
         val tool = registry.find(call.name)
             ?: return ToolResult(call.id, call.name, ToolStatus.ERROR, "unknown tool: ${call.name}", digestArguments(call.arguments))
         val digest = digestArguments(call.arguments)
+        if (aborted) {
+            return ToolResult(call.id, call.name, ToolStatus.ERROR, "ABORTED: run stopped before execution", digest)
+        }
         val pre = preApproval?.invoke(tool, call)
         if (pre != null) return ToolResult(call.id, call.name, pre.status, pre.content, digest)
         if (tool.risk != ToolRisk.READ) {
@@ -98,11 +141,21 @@ class ActionExecutor(
             return ToolResult(call.id, call.name, veto.status, veto.content, digest)
         }
         onExecuting?.invoke()
+        executing = tool
+        executingThread = Thread.currentThread()
         return try {
             val output = tool.execute(call)
             ToolResult(call.id, call.name, output.status, output.content, digest)
+        } catch (_: InterruptedException) {
+            ToolResult(call.id, call.name, ToolStatus.ERROR, "ABORTED: tool interrupted", digest)
         } catch (error: Exception) {
             ToolResult(call.id, call.name, ToolStatus.ERROR, "tool error: ${error.message}", digest)
+        } finally {
+            executing = null
+            executingThread = null
+            // Consume the abort interrupt so the dedicated worker thread does
+            // not carry it into unrelated later work.
+            Thread.interrupted()
         }
     }
 }

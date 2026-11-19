@@ -4,6 +4,7 @@ import android.content.Context
 import android.os.Build
 import android.os.Handler
 import android.os.Looper
+import com.dshpocket.agent.core.Abortable
 import com.dshpocket.agent.core.ActionExecutor
 import com.dshpocket.agent.core.AgentLoop
 import com.dshpocket.agent.core.AgentMessage
@@ -17,11 +18,13 @@ import com.dshpocket.agent.core.ModelConfig
 import com.dshpocket.agent.core.ModelReply
 import com.dshpocket.agent.core.ModelRequest
 import com.dshpocket.agent.core.RunControl
+import com.dshpocket.agent.core.RunDeadline
 import com.dshpocket.agent.core.RunObserver
 import com.dshpocket.agent.core.RunPhase
 import com.dshpocket.agent.core.RunRecovery
 import com.dshpocket.agent.core.RunSnapshot
 import com.dshpocket.agent.core.RunSpec
+import com.dshpocket.agent.core.ScreenPausePolicy
 import com.dshpocket.agent.core.ToolCall
 import com.dshpocket.agent.core.ToolOutput
 import com.dshpocket.agent.core.ToolRegistry
@@ -84,6 +87,10 @@ class AgentRuntime private constructor(context: Context) {
     private var paused = false
     private var stopped = false
     private var backgroundLost = false
+    private var screenOffPaused = false
+    private var startedAtMs = 0L
+    private var currentExecutor: ActionExecutor? = null
+    private var currentModel: ModelClient? = null
     private var finalText: String? = null
     private var lastError: String? = null
     private var fallbackPhase: String = "idle"
@@ -222,6 +229,8 @@ class AgentRuntime private constructor(context: Context) {
         paused = false
         stopped = false
         backgroundLost = false
+        screenOffPaused = false
+        startedAtMs = System.currentTimeMillis()
         finalText = null
         lastError = null
         fallbackPhase = RunPhase.QUEUED.name.lowercase()
@@ -274,9 +283,7 @@ class AgentRuntime private constructor(context: Context) {
                     appendEvent("tool_finished", call.name, result.status.name, result.content.take(120))
                 }
             }
-            val runResult = AgentLoop(
-                model,
-                ActionExecutor(
+            val executor = ActionExecutor(
                     ToolRegistry(toolList),
                     gate,
                     preApproval = { tool, call ->
@@ -303,7 +310,12 @@ class AgentRuntime private constructor(context: Context) {
                             null
                         }
                     },
-                ),
+            )
+            currentExecutor = executor
+            currentModel = model
+            val runResult = AgentLoop(
+                model,
+                executor,
                 runs,
                 systemPrompt = AgentLoop.DEFAULT_SYSTEM_PROMPT + memory.promptBlock(),
                 control = RunControl { beforeStep() },
@@ -329,6 +341,8 @@ class AgentRuntime private constructor(context: Context) {
         } catch (error: Exception) {
             finishWithFailure(id, "agent-error: ${error.message}")
         } finally {
+            currentExecutor = null
+            currentModel = null
             if (backgroundBound) PhoneBridge.endRun()
             if (recordThread) {
                 val answer = result?.finalText
@@ -354,6 +368,8 @@ class AgentRuntime private constructor(context: Context) {
                     handoffResume = null
                     paused = false
                     backgroundLost = false
+                    screenOffPaused = false
+                    startedAtMs = System.currentTimeMillis()
                     finalText = null
                     lastError = null
                     fallbackPhase = RunPhase.QUEUED.name.lowercase()
@@ -502,6 +518,56 @@ class AgentRuntime private constructor(context: Context) {
         return snapshot()
     }
 
+    /** P4-0.3 #22: recoverable screen-off pause (never overrides a user pause). */
+    fun pauseForScreenOff(): JSONObject {
+        lock.lock()
+        try {
+            val action = ScreenPausePolicy.screenOff(
+                active = active,
+                userPaused = paused && !screenOffPaused,
+                screenOffPaused = screenOffPaused,
+            )
+            if (action == ScreenPausePolicy.Action.PAUSE) {
+                paused = true
+                screenOffPaused = true
+            }
+        } finally {
+            lock.unlock()
+        }
+        return snapshot()
+    }
+
+    /** P4-0.3 #22: resume only a screen-off pause, on USER_PRESENT (unlocked). */
+    fun resumeFromScreenOff(): JSONObject {
+        lock.lock()
+        try {
+            if (ScreenPausePolicy.userPresent(active, screenOffPaused) == ScreenPausePolicy.Action.RESUME) {
+                screenOffPaused = false
+                paused = false
+                controlChanged.signalAll()
+            }
+        } finally {
+            lock.unlock()
+        }
+        return snapshot()
+    }
+
+    /**
+     * P4-0.3 #23: app-layer deadline enforcement, called from the service tick.
+     * Returns true when the run was stopped by the deadline.
+     */
+    fun enforceDeadline(): Boolean {
+        lock.lock()
+        try {
+            if (!active) return false
+            if (RunDeadline.decision(startedAtMs, System.currentTimeMillis()) != RunDeadline.Decision.STOP) return false
+        } finally {
+            lock.unlock()
+        }
+        stop()
+        return true
+    }
+
     fun stop(): JSONObject {
         lock.lock()
         try {
@@ -510,9 +576,14 @@ class AgentRuntime private constructor(context: Context) {
             stopped = true
             paused = false
             backgroundLost = false
+            screenOffPaused = false
             fallbackPhase = RunPhase.STOPPING.name.lowercase()
             approvalChanged.signalAll()
             controlChanged.signalAll()
+            // P4-0.3 #25: interrupt in-flight tool / model I/O so stop does not
+            // wait for a long network read or wait loop to finish on its own.
+            currentExecutor?.abortCurrent()
+            (currentModel as? Abortable)?.abort()
         } finally {
             lock.unlock()
         }
@@ -561,6 +632,7 @@ class AgentRuntime private constructor(context: Context) {
             .put("phase", phase)
             .put("step", run?.step ?: 0)
             .put("paused", paused)
+            .put("screenOffPaused", screenOffPaused)
             .put("backgroundLost", backgroundLost)
             .put("text", finalText ?: JSONObject.NULL)
             .put("error", lastError ?: JSONObject.NULL)
@@ -627,7 +699,12 @@ class AgentRuntime private constructor(context: Context) {
             fallbackPhase = RunPhase.WAITING_USER.name.lowercase()
             approvalChanged.signalAll()
             while (decision == null && !stopped) {
-                approvalChanged.await()
+                try {
+                    approvalChanged.await()
+                } catch (_: InterruptedException) {
+                    // P4-0.3 #25: an abort interrupt means stop; never allow.
+                    stopped = true
+                }
             }
             val result = if (stopped) ApprovalDecision.REJECT else (decision ?: ApprovalDecision.REJECT)
             pending = null
@@ -644,12 +721,20 @@ class AgentRuntime private constructor(context: Context) {
         try {
             while (!stopped) {
                 if (paused) {
-                    controlChanged.await()
+                    try {
+                        controlChanged.await()
+                    } catch (_: InterruptedException) {
+                        stopped = true
+                    }
                     continue
                 }
                 if (PhoneBridge.runBackgroundLost()) {
                     backgroundLost = true
-                    controlChanged.await(250, TimeUnit.MILLISECONDS)
+                    try {
+                        controlChanged.await(250, TimeUnit.MILLISECONDS)
+                    } catch (_: InterruptedException) {
+                        stopped = true
+                    }
                     continue
                 }
                 backgroundLost = false
@@ -668,7 +753,13 @@ class AgentRuntime private constructor(context: Context) {
             handoffResume = null
             fallbackPhase = RunPhase.WAITING_USER.name.lowercase()
             approvalChanged.signalAll()
-            while (handoffResume == null && !stopped) controlChanged.await()
+            while (handoffResume == null && !stopped) {
+                try {
+                    controlChanged.await()
+                } catch (_: InterruptedException) {
+                    stopped = true
+                }
+            }
             val resumed = !stopped && handoffResume == true
             pendingHandoff = null
             handoffResume = null

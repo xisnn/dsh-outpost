@@ -36,10 +36,23 @@ interface HttpTransport {
 /**
  * No redirects are followed: a 3xx is returned to the adapter as a failure so an
  * Authorization header is never replayed to a different host.
+ *
+ * P4-0.3 #25: implements [Abortable]. Socket reads on HttpURLConnection ignore
+ * thread interrupts, so abort() disconnects the active connection; the blocked
+ * read/write then throws IOException and the adapter reports a visible
+ * transport failure (never a fabricated success).
  */
-class UrlConnectionTransport : HttpTransport {
+class UrlConnectionTransport : HttpTransport, Abortable {
+    @Volatile
+    private var active: HttpURLConnection? = null
+
+    override fun abort() {
+        active?.disconnect()
+    }
+
     override fun post(request: HttpRequest): HttpResponse {
         val connection = URL(request.url).openConnection() as HttpURLConnection
+        active = connection
         try {
             connection.requestMethod = "POST"
             connection.instanceFollowRedirects = false
@@ -60,12 +73,14 @@ class UrlConnectionTransport : HttpTransport {
             val body = stream?.bufferedReader(Charsets.UTF_8)?.use { it.readText() } ?: ""
             return HttpResponse(status, body, connection.contentType)
         } finally {
+            active = null
             connection.disconnect()
         }
     }
 
     override fun stream(request: HttpRequest, onEvent: (SseEvent) -> Unit): HttpResponse {
         val connection = URL(request.url).openConnection() as HttpURLConnection
+        active = connection
         try {
             connection.requestMethod = "POST"
             connection.instanceFollowRedirects = false
@@ -98,6 +113,7 @@ class UrlConnectionTransport : HttpTransport {
             accumulator.finish()
             return HttpResponse(status, raw.toString(), connection.contentType)
         } finally {
+            active = null
             connection.disconnect()
         }
     }
