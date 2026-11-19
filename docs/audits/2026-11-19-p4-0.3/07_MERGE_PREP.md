@@ -28,11 +28,14 @@
 ## 3. 功能未完成期间的分支策略（推荐）
 
 - **main 不动**（发布线 v0.18.3）；opt/p4-0.3 作集成线继续承载安全修复。
-- agent 新功能**从 opt tip 开新分支**（如 `feat/p6-agent-next`），不要从旧
-  checkpoint 另起长期分支——否则再造分叉。旧 `feat/p1-native-runtime`
-  （1aa2d82）已含于 opt，仅作历史锚点。
-- 工作区恢复（清理时删除了 dsBot-p1-native，分支与提交均已保全）：
-  `git -C E:/work/dsBot worktree add E:/work/dsBot-p6-dev -b feat/p6-agent-next opt/p4-0.3-coverage-screenoff`
+- 第二方活跃开发分支 = `opt/p1-phone-polish`。核验：它是 opt tip 的**严格祖先**
+  （0 ahead / 60 behind；含 1aa2d82 与 e835782，不含 8648a02/0d15601），merge-tree 干净。
+  **已 FF 到 opt tip（f18c7f3）**：只加已验证绿提交、无 rewrite；旧 tip 2325d34
+  经 reflog 可回退。agent 新功能直接在此分支继续，不再另起长期分支、不再分叉。
+- 风险：该分支**未推 origin**（单副本）。建议第二方确认后 push 备份。
+- 工作区：该分支当前未在任何 worktree 检出；需要时一条命令开：
+  `git -C E:/work/dsBot worktree add E:/work/dsBot-p1-polish opt/p1-phone-polish`
+  （清理删除的 dsBot-p1-native 之提交 1aa2d82 已含于本线，无丢失）。
 - 证据/设计文档继续放 `E:/DSH-Private/Outpost/v0.19`（并行性在证据层，不在代码层）。
 - 合入时机：**功能完成 + P1 验收 + 真机补证后 FF main**；或第二方书面豁免门槛
   （记录于交付文档）。不建议现在 FF main：会把未验收的 agent 代码放进发布线基线。
