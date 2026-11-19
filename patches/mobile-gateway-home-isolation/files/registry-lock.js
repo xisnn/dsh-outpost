@@ -373,6 +373,7 @@ function acquireRegistryLock(file, label) {
       fs.closeSync(markerFd)
 
       const grave = `${lockPath}${RECLAIM_PREFIX}${token}`
+      let keepMarker = false
       try {
         // Re-confirm dead immediately before the take; the post-take check is
         // the authoritative guard against a concurrent live publication.
@@ -397,6 +398,11 @@ function acquireRegistryLock(file, label) {
             fs.linkSync(grave, lockPath)
             try { fs.unlinkSync(grave) } catch { /* inert */ }
           } catch {
+            // P4-0.3 fix A: the restore failed because a fresh creator occupies
+            // the path. The taken live/foreign record stays in the grave; keep
+            // our LIVE marker so fresh creators defer until crash recovery
+            // resolves the orphan. Clearing it here displaced a live owner.
+            keepMarker = true
             throw lockError(label, file, `a concurrent reclaim changed the lock; refusing to start (manual recovery: inspect ${grave})`)
           }
           sleepSync(20)
@@ -424,8 +430,11 @@ function acquireRegistryLock(file, label) {
         held.set(key, { refs: 1, token })
         return makeRelease(key, token)
       } finally {
-        // Our marker guards only this attempt's window; always clear it.
-        try { fs.unlinkSync(marker) } catch { /* inert */ }
+        // Our marker guards this attempt's window; clear it unless a failed
+        // restore left a live/foreign record orphaned in the grave (fix A).
+        if (!keepMarker) {
+          try { fs.unlinkSync(marker) } catch { /* inert */ }
+        }
       }
     }
 
@@ -444,6 +453,15 @@ function acquireRegistryLock(file, label) {
     try { fs.unlinkSync(lockPath) } catch { /* our empty fresh create */ }
     if (recoverCrashedReclaim(lockPath)) {
       throw lockError(label, file, `a crashed reclaim left a live or unverifiable orphan; refusing to start (manual recovery: inspect the ${RECLAIMING_PREFIX}* marker and ${RECLAIM_PREFIX}* grave beside ${lockPath})`)
+    }
+    // P4-0.3 fix B: a grave holding a LIVE record with no live marker means a
+    // displaced live owner (abandoned restore). Never claim over it; fail closed
+    // and preserve the grave for manual recovery / crash-reclaim restore.
+    for (const grave of sidecars(lockPath, RECLAIM_PREFIX)) {
+      const g = readRecord(grave)
+      if (g.ok && isAlive(g.rec.pid)) {
+        throw lockError(label, file, `a grave holds a live displaced owner; refusing to start (manual recovery: inspect ${grave})`)
+      }
     }
     // Path is clear: claim it exclusively again and publish our record.
     try {
