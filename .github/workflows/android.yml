@@ -64,6 +64,16 @@ jobs:
           cache: npm
           cache-dependency-path: dsh-mobile/package-lock.json
 
+      # P4-0.3: the ubuntu-latest runner migration (2026-10) bumped the
+      # default JDK to 25 (class file major 69), which Gradle 8.14's Groovy
+      # cannot parse; the signing-gates gradle smoke inside npm test needs a
+      # supported JDK. Pin temurin 21, same as jvm-tests. The preinstalled
+      # Android SDK assumption is unchanged; no assertion is weakened.
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: 21
+
       - name: Install dependencies
         working-directory: dsh-mobile
         run: npm ci
