@@ -19,6 +19,7 @@ import {
 import AsyncStorage from '@react-native-async-storage/async-storage';
 
 import { ChatComposer } from '../components/ChatComposer';
+import { AgentScreenOffNotice } from '../components/AgentScreenOffNotice';
 import { Header } from '../components/Header';
 import { MotionPressable as Pressable } from '../components/MotionPressable';
 import { useNav } from '../nav/NavHost';
@@ -821,6 +822,8 @@ export function AgentButlerScreen({ active = true }: { active?: boolean }) {
           </Pressable>
         </View>
       ) : null}
+
+      <AgentScreenOffNotice />
 
       <View style={styles.composerWrap}>
         <ChatComposer
