@@ -17,6 +17,8 @@ import android.view.accessibility.AccessibilityManager
 import android.view.accessibility.AccessibilityNodeInfo
 import android.view.accessibility.AccessibilityWindowInfo
 import com.dshpocket.agent.core.ScreenGuard
+import com.dshpocket.agent.core.ApprovalNodeBinding
+import com.dshpocket.agent.core.TypeFallbackDecision
 import java.util.concurrent.atomic.AtomicInteger
 
 data class PhoneElement(
@@ -225,8 +227,25 @@ class OutpostAccessibilityService : AccessibilityService() {
         if (isStaleScreen(displayId)) return "STALE_SCREEN"
         var node = (if (elementId.isNullOrBlank()) findFocusedEditable(root) else findElement(root, elementId))
             ?: return if (elementId.isNullOrBlank()) "NO_FOCUSED_EDITABLE" else "STALE_ELEMENT"
-        if (!node.isEditable) {
-            node = findEditableInSubtree(node) ?: return "ELEMENT_NOT_EDITABLE"
+        // P6-next candidate 1: pure gate decides editable path vs guarded custom
+        // fallback vs refusal; password/disabled never enter the fallback.
+        val subtreeEditable = if (node.isEditable) null else findEditableInSubtree(node)
+        val gate = TypeFallbackDecision.gate(
+            nodeEditable = node.isEditable,
+            subtreeEditable = subtreeEditable != null,
+            clickable = node.isClickable,
+            password = node.isPassword,
+            enabled = node.isEnabled,
+        )
+        when (gate) {
+            TypeFallbackDecision.Gate.REFUSE_PASSWORD -> return "PASSWORD_FIELD_BLOCKED"
+            TypeFallbackDecision.Gate.REFUSE_DISABLED -> return "ELEMENT_DISABLED"
+            TypeFallbackDecision.Gate.REFUSE_NOT_EDITABLE -> return "ELEMENT_NOT_EDITABLE"
+            TypeFallbackDecision.Gate.TRY_CUSTOM_FALLBACK ->
+                return customInputFallback(root, node, elementId, text, displayId)
+            TypeFallbackDecision.Gate.USE_EDITABLE_PATH -> {
+                if (subtreeEditable != null) node = subtreeEditable
+            }
         }
         if (node.isPassword) return "PASSWORD_FIELD_BLOCKED"
         if (!node.isEnabled) return "ELEMENT_DISABLED"
@@ -396,6 +415,94 @@ class OutpostAccessibilityService : AccessibilityService() {
             }
         }
     }
+
+    /**
+     * P6-next candidate 1: guarded fallback for clickable non-editable custom
+     * input surfaces. Click to focus, abort on any package/window change before
+     * writing, then setText / clipboard paste / ASCII shell input, each verified
+     * by re-reading the field. Clipboard hygiene and password/disabled guards
+     * are unchanged; CONTAINS is UNVERIFIED and never retried.
+     */
+    private fun customInputFallback(
+        root: AccessibilityNodeInfo,
+        node: AccessibilityNodeInfo,
+        elementId: String?,
+        text: String,
+        displayId: Int,
+    ): String {
+        val originalPackage = root.packageName?.toString()
+        val originalWindowId = root.windowId
+        node.performAction(AccessibilityNodeInfo.ACTION_CLICK)
+        var current: AccessibilityNodeInfo? = null
+        var accepted = false
+        repeat(10) {
+            Thread.sleep(400)
+            val freshRoot = rootFor(displayId) ?: return@repeat
+            val packageUnchanged = originalPackage == null || freshRoot.packageName?.toString() == originalPackage
+            if (TypeFallbackDecision.abort(packageUnchanged && freshRoot.windowId == originalWindowId)) {
+                Log.w("DshPhoneA11y", "type display=$displayId custom fallback aborted: window changed")
+                return "SCREEN_CHANGED_DURING_TYPE"
+            }
+            val fresh = findFocusedEditable(freshRoot) ?: findEditableInSubtree(node) ?: node
+            if (fresh.isPassword) return "PASSWORD_FIELD_BLOCKED"
+            if (!fresh.isEnabled) return "ELEMENT_DISABLED"
+            current = fresh
+            accepted = setTextOnNode(fresh, text) || accepted
+            val m = matchText(fresh, text)
+            if (m == TextMatch.EXACT && accepted) {
+                Log.i("DshPhoneA11y", "type display=$displayId result=OK_CUSTOM")
+                return "OK"
+            }
+            if (m == TextMatch.CONTAINS) return unverified(displayId, elementId, "custom field holds extra text")
+        }
+        val target = current ?: node
+        if (pasteText(target, text)) {
+            Log.i("DshPhoneA11y", "type display=$displayId result=OK_CLIPBOARD_CUSTOM")
+            return "OK"
+        }
+        if (displayId != Display.DEFAULT_DISPLAY && text.all { it.code in 0x20..0x7E }) {
+            val shell = PhoneBridge.backgroundText(text)
+            if (shell == "OK" && waitForText(target, text)) {
+                Log.i("DshPhoneA11y", "type display=$displayId result=OK_SHELL_CUSTOM")
+                return "OK"
+            }
+        }
+        val outcome = TypeFallbackDecision.outcome(
+            when (matchText(target, text)) {
+                TextMatch.EXACT -> TypeFallbackDecision.Match.EXACT
+                TextMatch.CONTAINS -> TypeFallbackDecision.Match.CONTAINS
+                TextMatch.MISMATCH -> TypeFallbackDecision.Match.MISMATCH
+            },
+            accepted,
+        )
+        Log.i("DshPhoneA11y", "type display=$displayId custom fallback result=$outcome")
+        return when (outcome) {
+            TypeFallbackDecision.Outcome.OK -> "OK"
+            TypeFallbackDecision.Outcome.UNVERIFIED -> "SET_TEXT_UNVERIFIED"
+            TypeFallbackDecision.Outcome.FAILED -> "SET_TEXT_FAILED"
+        }
+    }
+
+    /**
+     * P6-next candidate 3: identity of the node an ordinal resolves to RIGHT NOW
+     * on a display, using exactly the fields the approval card rendered. Null
+     * when the screen/element cannot be read (caller must fail closed).
+     */
+    fun nodeIdentity(elementId: String, displayId: Int): String? = runCatching {
+        val s = snapshot(displayId)
+        val e = s.elements.firstOrNull { it.id == elementId } ?: return null
+        ApprovalNodeBinding.identity(
+            s.packageName,
+            ScreenGuard.ElementSig(
+                id = e.id,
+                text = e.text,
+                description = e.description,
+                className = e.className,
+                bounds = e.bounds.toShortString(),
+                flags = "${e.clickable}${e.editable}${e.scrollable}${e.enabled}${e.isPassword}",
+            ),
+        )
+    }.getOrNull()
 
     private fun findEditableInSubtree(node: AccessibilityNodeInfo): AccessibilityNodeInfo? {
         if (node.isEditable) return node

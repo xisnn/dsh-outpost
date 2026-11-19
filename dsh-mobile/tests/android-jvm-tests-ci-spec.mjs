@@ -55,7 +55,7 @@ const read = (p) => readFileSync(path.join(repo, p), 'utf8');
 const androidDir = path.join(repo, 'dsh-mobile', 'android');
 const testRoot = path.join(androidDir, 'agent-core', 'src', 'test', 'kotlin', 'com', 'dshpocket', 'agent', 'core');
 
-/** 已知的六个测试类与它们应有的 @Test 数量（gradlew 实跑核实过 62/0） */
+/** 已知的八个测试类与它们应有的 @Test 数量（gradlew 实跑核实过 83/0） */
 const EXPECTED = {
   'AgentLoopTest.kt': 14,
   'CloudModelClientTest.kt': 13,
@@ -65,6 +65,9 @@ const EXPECTED = {
   // P4-0.2 新增 4 个 isStaleScreen 安全方向负向测试（10 -> 14）。
   'ScreenGuardTest.kt': 19,
   'PhoneOpenPolicyTest.kt': 5,
+  // P6-next：审批节点身份绑定（9）+ 自定义输入 guarded fallback 契约（12）。
+  'ApprovalNodeBindingTest.kt': 9,
+  'TypeFallbackDecisionTest.kt': 12,
 };
 const EXPECTED_TOTAL = Object.values(EXPECTED).reduce((a, b) => a + b, 0);
 

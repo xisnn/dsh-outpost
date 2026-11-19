@@ -5,6 +5,7 @@ import android.os.Build
 import android.os.Handler
 import android.os.Looper
 import com.dshpocket.agent.core.ActionExecutor
+import com.dshpocket.agent.core.ApprovalNodeBinding
 import com.dshpocket.agent.core.AgentLoop
 import com.dshpocket.agent.core.AgentMessage
 import com.dshpocket.agent.core.ApprovalDecision
@@ -78,6 +79,9 @@ class AgentRuntime private constructor(context: Context) {
     private var runId: String? = null
     private var active = false
     private var pending: ApprovalRequest? = null
+    // P6-next candidate 3: node identity captured when the approval is rendered.
+    @Volatile private var approvalBoundElement = false
+    @Volatile private var approvalNodeIdentity: String? = null
     private var decision: ApprovalDecision? = null
     private var pendingHandoff: String? = null
     private var handoffResume: Boolean? = null
@@ -293,12 +297,27 @@ class AgentRuntime private constructor(context: Context) {
                             null
                         }
                     },
-                    preExecute = { tool, _ ->
+                    preExecute = { tool, call ->
                         // The approval may have been pending when the background
                         // display disappeared. Fail closed right before execution;
                         // the next beforeStep pauses the Run.
                         if (tool.risk == ToolRisk.PHONE && PhoneBridge.runBackgroundLost()) {
                             ToolOutput(ToolStatus.ERROR, "BACKGROUND_DISPLAY_LOST")
+                        } else if (tool.risk == ToolRisk.PHONE && approvalBoundElement) {
+                            // P6-next candidate 3: re-resolve the approved ordinal
+                            // and compare node identity. Refusal only; a stale or
+                            // unverifiable node requires a fresh snapshot+approval.
+                            val live = OutpostAccessibilityService.instance?.nodeIdentity(
+                                call.arguments["element"] as? String ?: "",
+                                PhoneBridge.currentDisplayId(),
+                            )
+                            when (ApprovalNodeBinding.decision(approvalNodeIdentity, live)) {
+                                ApprovalNodeBinding.Binding.ALLOW -> null
+                                ApprovalNodeBinding.Binding.STALE_NODE ->
+                                    ToolOutput(ToolStatus.ERROR, "STALE_NODE: approval bound to a different node; re-snapshot and re-approve")
+                                ApprovalNodeBinding.Binding.UNVERIFIABLE ->
+                                    ToolOutput(ToolStatus.ERROR, "APPROVAL_NODE_UNVERIFIABLE")
+                            }
                         } else {
                             null
                         }
@@ -624,6 +643,16 @@ class AgentRuntime private constructor(context: Context) {
         try {
             pending = request
             decision = null
+            // Bind the approval to the node the user sees NOW, not just to the
+            // argument digest: after a display retry the same ordinal can mean
+            // a different control. Missing identity => fail closed at execute.
+            val element = request.call.arguments["element"] as? String
+            approvalBoundElement = !element.isNullOrBlank() && request.tool.name.startsWith("phone_")
+            approvalNodeIdentity = if (approvalBoundElement) {
+                OutpostAccessibilityService.instance?.nodeIdentity(element!!, PhoneBridge.currentDisplayId())
+            } else {
+                null
+            }
             fallbackPhase = RunPhase.WAITING_USER.name.lowercase()
             approvalChanged.signalAll()
             while (decision == null && !stopped) {
@@ -632,6 +661,8 @@ class AgentRuntime private constructor(context: Context) {
             val result = if (stopped) ApprovalDecision.REJECT else (decision ?: ApprovalDecision.REJECT)
             pending = null
             decision = null
+            approvalBoundElement = false
+            approvalNodeIdentity = null
             fallbackPhase = if (stopped) RunPhase.STOPPING.name.lowercase() else RunPhase.RUNNING.name.lowercase()
             return result
         } finally {
