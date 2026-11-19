@@ -1,0 +1,18 @@
+<?xml version='1.0' encoding='UTF-8' ?>
+<testsuite name="com.dshpocket.agent.ScreenStaleFailClosedTest" tests="8" failures="0" errors="0" skipped="1" time="27.628" timestamp="2026-11-19T15:19:20" hostname="localhost">
+  <properties>
+    <property name="device" value="p3_e2e_api35(AVD) - 15" />
+    <property name="flavor" value="" />
+    <property name="project" value=":app" />
+  </properties>
+  <testcase name="changedScreenRefusesThenResnapshotRecovers" classname="com.dshpocket.agent.ScreenStaleFailClosedTest" time="15.188">
+    <skipped />
+  </testcase>
+  <testcase name="failClosedDecisionIsUsedByService" classname="com.dshpocket.agent.ScreenStaleFailClosedTest" time="0.023" />
+  <testcase name="androidKeystoreUsesAes256GcmWithoutUserAuthentication" classname="com.dshpocket.KeychainStorageValidationTest" time="0.155" />
+  <testcase name="largePayloadAndWriteReadPerformance" classname="com.dshpocket.KeychainStorageValidationTest" time="1.056" />
+  <testcase name="repeatedWritesAreStable" classname="com.dshpocket.KeychainStorageValidationTest" time="1.301" />
+  <testcase name="allowBackupIsDisabled" classname="com.dshpocket.KeychainStorageValidationTest" time="0.011" />
+  <testcase name="ciphertextIsStoredInInternalDataStoreAndRoundTrips" classname="com.dshpocket.KeychainStorageValidationTest" time="0.116" />
+  <testcase name="installerSecurityChecksPassOnDevice" classname="com.dshpocket.runtime.install.RuntimeInstallerChecksTest" time="6.905" />
+</testsuite>
