@@ -257,7 +257,12 @@ for (let round = 1; round <= rounds; round += 1) {
   staleLock(lockFile, `stale-${round}`);
   const kids = [];
   for (let i = 0; i < racers; i += 1) {
-    kids.push(spawn(process.execPath, [child, modulePath, 'race', lockFile, out, barrier, '400'], { stdio: 'ignore' }));
+    // P4-0.3: the hold must exceed a loser's bounded retry budget (MAX_ATTEMPTS=6;
+    // sleepSync spawns a process per sleep, Windows jitter stretches it past 400ms).
+    // A shorter hold let a loser acquire AFTER the winner released — sequential
+    // ownership miscounted as a violation (round 9: acquired=2 lost=0, disjoint).
+    // 5000ms makes any second ACQUIRED a genuine overlap. Assertion unchanged.
+    kids.push(spawn(process.execPath, [child, modulePath, 'race', lockFile, out, barrier, '5000'], { stdio: 'ignore' }));
   }
   // wait until every racer reports READY, then release them together
   const deadline = Date.now() + 20000;
@@ -296,7 +301,12 @@ check(violations === 0, `stress race: ${rounds} rounds x ${racers} racers, no do
     }, null, 2) + '\n');
     const kids = [];
     for (let i = 0; i < racers; i += 1) {
-      kids.push(spawn(process.execPath, [child, modulePath, 'race', lockFile, out, barrier, '400'], { stdio: 'ignore' }));
+      // P4-0.3: the hold must exceed a loser's bounded retry budget (MAX_ATTEMPTS=6;
+      // sleepSync spawns a process per sleep, Windows jitter stretches it past 400ms).
+      // A shorter hold let a loser acquire AFTER the winner released — sequential
+      // ownership miscounted as a violation (round 9: acquired=2 lost=0, disjoint).
+      // 5000ms makes any second ACQUIRED a genuine overlap. Assertion unchanged.
+      kids.push(spawn(process.execPath, [child, modulePath, 'race', lockFile, out, barrier, '5000'], { stdio: 'ignore' }));
     }
     const deadline = Date.now() + 20000;
     while ((readOut(out).match(/^READY /gm) || []).length < racers && Date.now() < deadline) sleep(30);
