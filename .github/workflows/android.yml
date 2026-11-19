@@ -64,6 +64,15 @@ jobs:
           cache: npm
           cache-dependency-path: dsh-mobile/package-lock.json
 
+      # signing-gates spec 会真实调用 gradlew dry-run。Ubuntu 26 runner 默认 JDK
+      # 过新（Groovy: Unsupported class file major version 69），配置阶段即挂，
+      # 门禁断言拿不到「缺签名材料」的可操作信息。钉到项目工具链 JDK 21，
+      # 与本地 JAVA_HOME 及其他 job 一致；不削弱任何断言。
+      - uses: actions/setup-java@v5
+        with:
+          distribution: temurin
+          java-version: 21
+
       - name: Install dependencies
         working-directory: dsh-mobile
         run: npm ci
