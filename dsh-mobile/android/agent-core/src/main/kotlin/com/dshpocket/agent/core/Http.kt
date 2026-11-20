@@ -21,6 +21,9 @@ data class HttpResponse(
 interface HttpTransport {
     fun post(request: HttpRequest): HttpResponse
 
+    /** P6-next #25: abort an in-flight request; default no-op for test adapters. */
+    fun cancelInFlight() {}
+
     /**
      * Streaming variant. Default transports that cannot stream still give the
      * same events after the complete body arrives; UrlConnectionTransport
@@ -38,8 +41,16 @@ interface HttpTransport {
  * Authorization header is never replayed to a different host.
  */
 class UrlConnectionTransport : HttpTransport {
+    // P6-next #25: connection currently in flight, for cooperative abort on stop.
+    @Volatile private var active: HttpURLConnection? = null
+
+    override fun cancelInFlight() {
+        runCatching { active?.disconnect() }
+    }
+
     override fun post(request: HttpRequest): HttpResponse {
         val connection = URL(request.url).openConnection() as HttpURLConnection
+        active = connection
         try {
             connection.requestMethod = "POST"
             connection.instanceFollowRedirects = false
@@ -60,12 +71,14 @@ class UrlConnectionTransport : HttpTransport {
             val body = stream?.bufferedReader(Charsets.UTF_8)?.use { it.readText() } ?: ""
             return HttpResponse(status, body, connection.contentType)
         } finally {
+            active = null
             connection.disconnect()
         }
     }
 
     override fun stream(request: HttpRequest, onEvent: (SseEvent) -> Unit): HttpResponse {
         val connection = URL(request.url).openConnection() as HttpURLConnection
+        active = connection
         try {
             connection.requestMethod = "POST"
             connection.instanceFollowRedirects = false
@@ -98,6 +111,7 @@ class UrlConnectionTransport : HttpTransport {
             accumulator.finish()
             return HttpResponse(status, raw.toString(), connection.contentType)
         } finally {
+            active = null
             connection.disconnect()
         }
     }

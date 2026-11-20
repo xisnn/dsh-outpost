@@ -87,6 +87,15 @@ class AgentService : Service() {
         handler.post(notificationTick)
     }
 
+    /**
+     * P6-next #23: API34+ dataSync FGS system timeout. Finish gracefully instead
+     * of being killed mid-tool; the run store keeps the interruption inspectable.
+     */
+    override fun onTimeout(startId: Int, fgsType: Int) {
+        updateNotification("系统超时，任务已优雅停止")
+        AgentRuntime.get(this).stop()
+    }
+
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
         if (intent?.action == ACTION_STOP) {
             val snapshot = AgentRuntime.get(this).snapshot()

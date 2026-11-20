@@ -322,6 +322,9 @@ private class PhoneKeyTool(private val handoff: HandoffGate) : AgentTool {
         val displayId = PhoneBridge.currentDisplayId()
         val result = OutpostAccessibilityService.instance?.key(key, displayId)
             ?: return ToolOutput(ToolStatus.ERROR, "ACCESSIBILITY_NOT_CONNECTED")
+        if (result == "OK_DISPLAY_EMPTY") {
+            return ToolOutput(ToolStatus.OK, "KEY $key: display empty after injection")
+        }
         if (result != "OK") return ToolOutput(ToolStatus.ERROR, result)
         Thread.sleep(500)
         return keyOutput("KEY $key", displayId)

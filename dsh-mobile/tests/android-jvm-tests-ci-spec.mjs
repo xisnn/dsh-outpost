@@ -55,7 +55,7 @@ const read = (p) => readFileSync(path.join(repo, p), 'utf8');
 const androidDir = path.join(repo, 'dsh-mobile', 'android');
 const testRoot = path.join(androidDir, 'agent-core', 'src', 'test', 'kotlin', 'com', 'dshpocket', 'agent', 'core');
 
-/** 已知的八个测试类与它们应有的 @Test 数量（gradlew 实跑核实过 83/0） */
+/** 已知的十三个测试类与它们应有的 @Test 数量（gradlew 实跑核实过 115/0） */
 const EXPECTED = {
   'AgentLoopTest.kt': 14,
   'CloudModelClientTest.kt': 13,
@@ -68,6 +68,12 @@ const EXPECTED = {
   // P6-next：审批节点身份绑定（9）+ 自定义输入 guarded fallback 契约（12）。
   'ApprovalNodeBindingTest.kt': 9,
   'TypeFallbackDecisionTest.kt': 12,
+  // P6-next 批2：敏感词词边界(8) + 审批TTL(7) + run deadline(6) + 取消边界(6) + 键注入三态(5)。
+  'SensitiveWordMatchTest.kt': 8,
+  'ApprovalTtlTest.kt': 7,
+  'RunDeadlineTest.kt': 6,
+  'InterruptPolicyTest.kt': 6,
+  'KeyOutcomeDecisionTest.kt': 5,
 };
 const EXPECTED_TOTAL = Object.values(EXPECTED).reduce((a, b) => a + b, 0);
 

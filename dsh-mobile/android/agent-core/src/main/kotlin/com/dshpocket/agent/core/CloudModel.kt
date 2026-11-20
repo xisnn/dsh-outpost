@@ -64,6 +64,11 @@ class CloudModelClient(
 ) : StreamingModelClient {
     override fun complete(request: ModelRequest): ModelReply = complete(request) { }
 
+    // P6-next #25: abort the in-flight HTTP call when the run is stopped.
+    override fun cancelInFlight() {
+        transport.cancelInFlight()
+    }
+
     override fun complete(request: ModelRequest, onText: (String) -> Unit): ModelReply {
         if (config.apiKey.isBlank()) return ModelReply.Failure("missing-key", "cloud model API key is not configured")
         if (config.model.isBlank()) return ModelReply.Failure("missing-model", "cloud model name is not configured")

@@ -73,8 +73,10 @@ object PhoneBridge {
      */
     fun isUnsupportedBackgroundKey(key: String?, displayId: Int): Boolean {
         val normalized = key?.lowercase() ?: return false
+        // P6-next candidate 2: back/home/recents are all display-targeted now;
+        // only keys outside the supported set remain unsupported on secondary.
         return displayId > 0 && displayId != Display.DEFAULT_DISPLAY &&
-            (normalized == "home" || normalized == "recents")
+            normalized !in setOf("back", "home", "recents")
     }
 
     fun currentDisplayId(): Int =

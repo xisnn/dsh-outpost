@@ -18,6 +18,8 @@ import android.view.accessibility.AccessibilityNodeInfo
 import android.view.accessibility.AccessibilityWindowInfo
 import com.dshpocket.agent.core.ScreenGuard
 import com.dshpocket.agent.core.ApprovalNodeBinding
+import com.dshpocket.agent.core.SensitiveWordMatch
+import com.dshpocket.agent.core.KeyOutcomeDecision
 import com.dshpocket.agent.core.TypeFallbackDecision
 import java.util.concurrent.atomic.AtomicInteger
 
@@ -112,6 +114,9 @@ class OutpostAccessibilityService : AccessibilityService() {
         val s = snapshot(displayId)
         return ScreenGuard.staleDecision(s.error != null, if (s.error != null) null else fingerprintOf(s))
     }
+
+    // P6-next #25: cooperative abort flag for long tool loops, set on stop.
+    @Volatile var cancelRequested: Boolean = false
 
     private val screenCounter = AtomicInteger(0)
 
@@ -223,6 +228,7 @@ class OutpostAccessibilityService : AccessibilityService() {
 
     fun type(elementId: String?, text: String, displayId: Int = Display.DEFAULT_DISPLAY): String {
         if (text.length > MAX_TYPE_CHARS) return "TEXT_TOO_LONG"
+        if (cancelRequested) return "CANCELLED"
         val root = rootFor(displayId) ?: return "ACCESSIBILITY_NO_ACTIVE_WINDOW"
         if (isStaleScreen(displayId)) return "STALE_SCREEN"
         var node = (if (elementId.isNullOrBlank()) findFocusedEditable(root) else findElement(root, elementId))
@@ -270,6 +276,7 @@ class OutpostAccessibilityService : AccessibilityService() {
         node.performAction(AccessibilityNodeInfo.ACTION_CLICK)
         var current = node
         repeat(10) {
+            if (cancelRequested) return "CANCELLED"
             Thread.sleep(400)
             val freshRoot = rootFor(displayId) ?: return@repeat
             // The click may have navigated away. Everything below is positional or
@@ -388,6 +395,7 @@ class OutpostAccessibilityService : AccessibilityService() {
 
     private fun waitForText(node: AccessibilityNodeInfo, text: String): Boolean {
         repeat(6) {
+            if (cancelRequested) return false
             if (textMatches(node, text)) return true
             Thread.sleep(120)
         }
@@ -436,6 +444,7 @@ class OutpostAccessibilityService : AccessibilityService() {
         var current: AccessibilityNodeInfo? = null
         var accepted = false
         repeat(10) {
+            if (cancelRequested) return "CANCELLED"
             Thread.sleep(400)
             val freshRoot = rootFor(displayId) ?: return@repeat
             val packageUnchanged = originalPackage == null || freshRoot.packageName?.toString() == originalPackage
@@ -536,16 +545,33 @@ class OutpostAccessibilityService : AccessibilityService() {
 
     fun key(key: String, displayId: Int = Display.DEFAULT_DISPLAY): String {
         if (isStaleScreen(displayId)) return "STALE_SCREEN"
+        if (cancelRequested) return "CANCELLED"
+        val normalized = key.lowercase()
+        if (normalized !in setOf("back", "home", "recents")) return "INVALID_KEY"
+        // P6-next candidate 2: home/recents are display-targeted on the virtual
+        // display (Shizuku `input -d <id> keyevent 3/187`); never the main screen.
+        val injected: Boolean
         if (displayId != Display.DEFAULT_DISPLAY) {
-            return PhoneBridge.backgroundKey(key)
+            val background = PhoneBridge.backgroundKey(normalized)
+            if (background != "OK") return background
+            injected = true
+        } else {
+            val action = when (normalized) {
+                "back" -> GLOBAL_ACTION_BACK
+                "home" -> GLOBAL_ACTION_HOME
+                else -> GLOBAL_ACTION_RECENTS
+            }
+            injected = performGlobalAction(action)
         }
-        val action = when (key.lowercase()) {
-            "back" -> GLOBAL_ACTION_BACK
-            "home" -> GLOBAL_ACTION_HOME
-            "recents" -> GLOBAL_ACTION_RECENTS
-            else -> return "INVALID_KEY"
+        if (!injected) return "KEY_FAILED"
+        // Closing the last app leaves an empty display: legitimate, not an error.
+        Thread.sleep(300)
+        val windowPresent = rootFor(displayId) != null
+        return when (KeyOutcomeDecision.decision(injected, windowPresent)) {
+            KeyOutcomeDecision.Outcome.OK -> "OK"
+            KeyOutcomeDecision.Outcome.OK_DISPLAY_EMPTY -> "OK_DISPLAY_EMPTY"
+            KeyOutcomeDecision.Outcome.ERROR -> "KEY_FAILED"
         }
-        return if (performGlobalAction(action)) "OK" else "KEY_FAILED"
     }
 
     /**
@@ -643,7 +669,7 @@ class OutpostAccessibilityService : AccessibilityService() {
         if (elements.any { it.isPassword }) return "password field"
         val keyword = elements.firstOrNull {
             val value = (it.text + " " + it.description).lowercase()
-            SENSITIVE_KEYWORDS.any { word -> value.contains(word) }
+            SensitiveWordMatch.anySensitive(value, SENSITIVE_KEYWORDS)
         }
         return keyword?.let { "sensitive screen content" }
     }

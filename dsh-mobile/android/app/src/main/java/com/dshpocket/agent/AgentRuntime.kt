@@ -6,6 +6,9 @@ import android.os.Handler
 import android.os.Looper
 import com.dshpocket.agent.core.ActionExecutor
 import com.dshpocket.agent.core.ApprovalNodeBinding
+import com.dshpocket.agent.core.ApprovalTtl
+import com.dshpocket.agent.core.InterruptPolicy
+import com.dshpocket.agent.core.RunDeadline
 import com.dshpocket.agent.core.AgentLoop
 import com.dshpocket.agent.core.AgentMessage
 import com.dshpocket.agent.core.ApprovalDecision
@@ -82,6 +85,10 @@ class AgentRuntime private constructor(context: Context) {
     // P6-next candidate 3: node identity captured when the approval is rendered.
     @Volatile private var approvalBoundElement = false
     @Volatile private var approvalNodeIdentity: String? = null
+    // P6-next #17/#23: approval issue time and run start for TTL/deadline gates.
+    @Volatile private var approvalIssuedAt: Long? = null
+    @Volatile private var runStartedAt: Long? = null
+    @Volatile private var activeModel: ModelClient? = null
     private var decision: ApprovalDecision? = null
     private var pendingHandoff: String? = null
     private var handoffResume: Boolean? = null
@@ -240,6 +247,9 @@ class AgentRuntime private constructor(context: Context) {
         recordThread: Boolean = false,
         backgroundExpected: Boolean = expectedBackground(),
     ) {
+        runStartedAt = System.currentTimeMillis()
+        activeModel = model
+        OutpostAccessibilityService.instance?.cancelRequested = false
         val prior = if (recordThread) thread.priorMessages() else emptyList()
         if (recordThread) thread.append("user", goal)
         var result: com.dshpocket.agent.core.RunResult? = null
@@ -418,6 +428,15 @@ class AgentRuntime private constructor(context: Context) {
             val request = pending
                 ?: return error("NO_PENDING_APPROVAL")
             if (request.call.id != callId || request.digest != digest) return error("STALE_APPROVAL")
+            // P6-next #17: an expired or unverifiable approval is never applicable
+            // (butler local-approvals parity: now >= expiresAt => rejected).
+            if (allow) {
+                when (ApprovalTtl.decision(approvalIssuedAt, System.currentTimeMillis())) {
+                    ApprovalTtl.Ttl.EXPIRED -> return error("APPROVAL_EXPIRED")
+                    ApprovalTtl.Ttl.UNVERIFIABLE -> return error("APPROVAL_TTL_UNVERIFIABLE")
+                    ApprovalTtl.Ttl.VALID -> {}
+                }
+            }
             // First decision wins. The inline card and the native overlay can
             // both answer; a reject followed by a stale allow must not flip
             // the decision before awaitApproval consumes it.
@@ -527,6 +546,15 @@ class AgentRuntime private constructor(context: Context) {
             if (!active) return error("NO_ACTIVE_RUN")
             queue.clear()
             stopped = true
+            // P6-next #25: timely cancellation. Conservative in-flight window =
+            // the active run; abort the model call and signal tool loops.
+            val cancelAction = InterruptPolicy.decision(true, active, active)
+            if (cancelAction == InterruptPolicy.Action.ABORT_IN_FLIGHT ||
+                cancelAction == InterruptPolicy.Action.ABORT_AT_NEXT_CHECK
+            ) {
+                activeModel?.cancelInFlight()
+                OutpostAccessibilityService.instance?.cancelRequested = true
+            }
             paused = false
             backgroundLost = false
             fallbackPhase = RunPhase.STOPPING.name.lowercase()
@@ -601,6 +629,7 @@ class AgentRuntime private constructor(context: Context) {
                 .put("callId", request.call.id)
                 .put("toolName", request.call.name)
                 .put("digest", request.digest)
+                .put("expiresAt", (approvalIssuedAt ?: 0L) + ApprovalTtl.DEFAULT_TTL_MS)
                 .put("reason", request.reason)
                 .put("arguments", JSONObject(request.call.arguments))
                 .put("risk", request.risk.name.lowercase())
@@ -646,6 +675,7 @@ class AgentRuntime private constructor(context: Context) {
             // Bind the approval to the node the user sees NOW, not just to the
             // argument digest: after a display retry the same ordinal can mean
             // a different control. Missing identity => fail closed at execute.
+            approvalIssuedAt = System.currentTimeMillis()
             val element = request.call.arguments["element"] as? String
             approvalBoundElement = !element.isNullOrBlank() && request.tool.name.startsWith("phone_")
             approvalNodeIdentity = if (approvalBoundElement) {
@@ -663,6 +693,7 @@ class AgentRuntime private constructor(context: Context) {
             decision = null
             approvalBoundElement = false
             approvalNodeIdentity = null
+            approvalIssuedAt = null
             fallbackPhase = if (stopped) RunPhase.STOPPING.name.lowercase() else RunPhase.RUNNING.name.lowercase()
             return result
         } finally {
@@ -682,6 +713,11 @@ class AgentRuntime private constructor(context: Context) {
                     backgroundLost = true
                     controlChanged.await(250, TimeUnit.MILLISECONDS)
                     continue
+                }
+                // P6-next #23: app-layer deadline; graceful stop, fail closed.
+                if (RunDeadline.decision(runStartedAt, System.currentTimeMillis()) != RunDeadline.Deadline.WITHIN) {
+                    stop()
+                    return false
                 }
                 backgroundLost = false
                 return true

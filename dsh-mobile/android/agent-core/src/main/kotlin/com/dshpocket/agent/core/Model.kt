@@ -18,6 +18,9 @@ sealed interface ModelReply {
  */
 interface ModelClient {
     fun complete(request: ModelRequest): ModelReply
+
+    /** P6-next #25: abort an in-flight request on stop; default no-op. */
+    fun cancelInFlight() {}
 }
 
 /** Optional capability: providers that can stream text deltas while producing the final reply. */
