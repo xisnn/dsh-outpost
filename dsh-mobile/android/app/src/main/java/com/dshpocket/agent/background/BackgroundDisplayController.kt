@@ -77,6 +77,14 @@ class BackgroundDisplayController private constructor(
     private val frameThread = HandlerThread("dsh-background-frames").apply { start() }
     private val frameHandler = Handler(frameThread.looper)
     private val mainHandler = Handler(android.os.Looper.getMainLooper())
+    // P6-next real-device fix: Shizuku binder IPC (bindUserService / createDisplay)
+    // must NEVER run on the main looper. A synchronous bind on the main thread
+    // deadlocks app startup under instrumentation on OEM (vivo): the main thread
+    // blocks uninterruptibly inside the binder call while RN init contends for the
+    // same Shizuku lock, and the mainHandler bind-timeout can never fire. Dispatch
+    // the blocking IPC here so the main thread stays free and the timeout works.
+    private val bindThread = HandlerThread("dsh-background-bind").apply { start() }
+    private val bindHandler = Handler(bindThread.looper)
     private var retryAttempts = 0
     private var retryRunnable: Runnable? = null
     private var permissionWatchRunnable: Runnable? = null
@@ -164,8 +172,10 @@ class BackgroundDisplayController private constructor(
             }
             val remote = IBackgroundDisplayService.Stub.asInterface(binder)
             synchronized(lock) { service = remote; stopping = false }
-            runCatching { createDisplay(remote) }
-                .onFailure { fail("后台屏创建失败", it) }
+            bindHandler.post {
+                runCatching { createDisplay(remote) }
+                    .onFailure { fail("后台屏创建失败", it) }
+            }
         }
 
         override fun onServiceDisconnected(name: ComponentName) {
@@ -545,7 +555,9 @@ class BackgroundDisplayController private constructor(
         val current = synchronized(lock) { service }
         if (current != null) {
             if (synchronized(lock) { displayId } <= 0) {
-                runCatching { createDisplay(current) }.onFailure { fail("后台屏创建失败", it) }
+                bindHandler.post {
+                    runCatching { createDisplay(current) }.onFailure { fail("后台屏创建失败", it) }
+                }
             }
             return
         }
@@ -554,8 +566,10 @@ class BackgroundDisplayController private constructor(
         }
         if (alreadyBinding) return
         startBindTimeout()
-        runCatching { Shizuku.bindUserService(serviceArgs, connection) }
-            .onFailure { fail("绑定 Shizuku UserService 失败", it) }
+        bindHandler.post {
+            runCatching { Shizuku.bindUserService(serviceArgs, connection) }
+                .onFailure { fail("绑定 Shizuku UserService 失败", it) }
+        }
     }
 
     private fun startBindTimeout() {

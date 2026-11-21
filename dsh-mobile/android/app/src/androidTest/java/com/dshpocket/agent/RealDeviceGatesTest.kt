@@ -1,11 +1,13 @@
 package com.dshpocket.agent
 
+import android.content.Intent
 import android.view.accessibility.AccessibilityNodeInfo
 import androidx.test.ext.junit.runners.AndroidJUnit4
 import androidx.test.platform.app.InstrumentationRegistry
 import com.dshpocket.agent.background.BackgroundDisplayController
 import com.dshpocket.agent.core.ApprovalNodeBinding
 import com.dshpocket.agent.core.ScreenGuard
+import com.facebook.react.ReactApplication
 import com.facebook.react.bridge.ReactApplicationContext
 import org.junit.After
 import org.junit.Assert.assertEquals
@@ -55,11 +57,24 @@ class RealDeviceGatesTest {
     }
 
     private fun secondaryDisplay(): Pair<BackgroundDisplayController, Int>? {
-        // Service-level acceptance: no RN host launch needed (the controller
-        // emits no JS events). Launching MainActivity from instrumentation on
-        // this vivo build hangs the process (D-state), so bypass the RN UI.
+        // P6-next bind fix: Shizuku binder IPC now runs off the main looper, so
+        // launching MainActivity under instrumentation no longer deadlocks
+        // (D-state). Use the REAL app ReactHost context (faithful acceptance);
+        // ReactApplicationContext is abstract in this RN and cannot be new'd.
+        step("launch-app")
+        val intent = context.packageManager.getLaunchIntentForPackage(context.packageName)
+            ?.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+        if (intent != null) context.startActivity(intent)
+        var react: ReactApplicationContext? = null
+        val appDeadline = System.currentTimeMillis() + 30_000
+        while (System.currentTimeMillis() < appDeadline) {
+            react = (context.applicationContext as? ReactApplication)
+                ?.reactHost?.currentReactContext as? ReactApplicationContext
+            if (react != null) break
+            Thread.sleep(300)
+        }
+        if (react == null) { step("react-null"); return null }
         step("controller-start")
-        val react = ReactApplicationContext(context)
         val controller = BackgroundDisplayController.get(react)
         controller.startAndWait(15_000, true)
         step("controller-started")
