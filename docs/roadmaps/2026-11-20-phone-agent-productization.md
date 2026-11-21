@@ -63,6 +63,11 @@
 
 目标：手机 agent 成为可独立发布的产品，不再背 dsh 移动客户端的包袱。
 
+> **状态（2026-11-21）：A2.1+A2.2 已验通**（见 09_A2_DECOUPLING.md）。Agent* 屏幕本就 useApp()-free、
+> native 直连云模型；新增 RureaApp agent-first 外壳 + index.rurea.js + DSH_RUREA_ENTRY flag，
+> emulator 装机 boot 直达 agent 主界面、无 dsh 配对/网关。dsh 客户端留一个入口（AgentSettings showDshEntry）。
+> A2.3 默认切换 + 品牌/包名/凭据迁移 + A3 测试链拆分待后续（敏感，另批）。
+
 | 阶段 | 内容 | 验收标准 |
 |---|---|---|
 | **A1 产品边界** | 定产品名/包名/图标；界定「agent 核心」vs「dsh 客户端遗留」功能清单；决定 fork 独立 app 还是原 app 重构为 agent 主surface | 一页边界文档 + 功能去留表，用户批准 |

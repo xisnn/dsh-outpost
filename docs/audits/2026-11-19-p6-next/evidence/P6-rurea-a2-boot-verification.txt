@@ -1,0 +1,6 @@
+Rurea A2.2 agent-first boot verification (API35 emulator, com.dshoutpost.p1.rurea, DSH_RUREA_ENTRY=index.rurea.js)
+Boot lands DIRECTLY on AgentButlerScreen (phone agent surface), NO dsh PairScreen / pairing / gateway connection.
+UI texts: 本机管家 / 手机 Agent / 后台屏 / 记忆 / 模型 / 数据发送说明 / 请确认你信任所配置的服务商及其数据政策 / 我已了解并同意 / 先配置模型再开始聊天
+Focus: com.dshoutpost.p1.rurea/com.dshpocket.MainActivity
+Conclusion: agent runs independent of the dsh App.tsx shell (no DshConnection/Store/credential machinery at startup). Legacy dsh client kept behind one entry (AgentSettings showDshEntry -> DshClient -> legacy App).
+Note: bundle still contains dsh code because RureaApp imports DshApp for the single legacy entry; full bundle-size removal is deeper (A2.3+). Runtime decoupling (the A2 goal) achieved.

@@ -46,6 +46,11 @@ agent 本体（native/桥/屏幕/导航/主题）已可独立。
 - A2.3 默认切换 + 包名/凭据迁移属敏感，需另批 + stop-the-world 升级规程。
 - 不削弱任何安全断言；agent 审批/敏感守卫原样保留。
 
-## 本轮实施
-A2.1 基础：RureaApp.tsx + index.rurea.js + DSH_RUREA_ENTRY flag + AgentSettingsScreen showDshEntry。
-typecheck 验证。A2.2 装机验证下一步。
+## 本轮实施与验证
+A2.1 基础：RureaApp.tsx + index.rurea.js + DSH_RUREA_ENTRY flag + AgentSettingsScreen showDshEntry。typecheck 绿。
+**A2.2 装机验通**（API35 emulator，com.dshoutpost.p1.rurea，DSH_RUREA_ENTRY=index.rurea.js）：
+boot 直达 AgentButlerScreen（本机管家 / 手机 Agent / 后台屏 / 记忆 / 模型 + 数据发送说明），
+**无 dsh 配对页 / 扫码 / 网关连接**——agent 独立于 dsh 外壳启动得证。
+证据 evidence/P6-rurea-a2-boot-verification.txt；emulator 验后卸载关机。
+注：bundle 仍含 dsh 代码（RureaApp 为单一遗留入口 import DshApp）；彻底移除 bundle 体积属 A2.3+。
+**运行时解耦（A2 核心目标）已达成**。A2.3 默认切换 + 品牌/包名/凭据迁移敏感，另批。
