@@ -1,0 +1,8 @@
+Rurea A2.3 branding + default-switch verification (APK-level, deterministic)
+Default entry index.js now registers RureaApp (agent-first); build green, typecheck green.
+aapt dump badging:
+application-label:'Rurea'
+application: label='Rurea' icon='res/BW.xml'
+launchable-activity: name='com.dshpocket.SplashActivity'  label='Rurea' icon=''
+Runtime agent-first boot of the identical RureaApp component was verified in A2.2 (P6-rurea-a2-boot-verification.txt). A2.3 emulator instance was unstable (FallbackHome/provisioning, PackageManager errors) so no fresh runtime screenshot; APK-level label/icon + A2.2 boot together confirm A2.3.
+Package name kept com.dshpocket (Keystore credential + upgrade continuity); brand via display name + icon.
