@@ -66,7 +66,9 @@
 > **状态（2026-11-21）：A2.1+A2.2 已验通**（见 09_A2_DECOUPLING.md）。Agent* 屏幕本就 useApp()-free、
 > native 直连云模型；新增 RureaApp agent-first 外壳 + index.rurea.js + DSH_RUREA_ENTRY flag，
 > emulator 装机 boot 直达 agent 主界面、无 dsh 配对/网关。dsh 客户端留一个入口（AgentSettings showDshEntry）。
-> A2.3 默认切换 + 品牌/包名/凭据迁移 + A3 测试链拆分待后续（敏感，另批）。
+> A2.3 默认切换 + 品牌化已验通（见 10_A2_3_BRANDING.md；包名保持 com.dshpocket 保凭据/升级连续性）。
+> A3 测试链拆分已完成（见 11_A3_TEST_CHAIN_SPLIT.md：agentChain 2 + dshChain 104，CI 双链各自触发，不重不漏）。
+> 剩 A4 独立发布线 + 包名迁移决策（敏感，另批）。
 
 | 阶段 | 内容 | 验收标准 |
 |---|---|---|

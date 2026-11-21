@@ -77,9 +77,17 @@ jobs:
         working-directory: dsh-mobile
         run: npm ci
 
-      - name: Unit tests (static checks + pure functions)
+      - name: Rurea agent chain (agent-core CI wiring + agent UI)
         working-directory: dsh-mobile
-        run: npm test
+        run: npm run test:agentChain
+
+      - name: dsh client chain (legacy client regression)
+        working-directory: dsh-mobile
+        run: npm run test:dshChain
+
+      - name: Typecheck
+        working-directory: dsh-mobile
+        run: npm run typecheck
 
       # Pure Host tests use fakes; DSH supplies the bundle's runtime services and imports.
       - name: Host butler unit tests
