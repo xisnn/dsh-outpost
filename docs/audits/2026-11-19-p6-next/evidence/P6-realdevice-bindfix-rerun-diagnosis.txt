@@ -1,0 +1,6 @@
+P6 bind-fix rerun diagnosis (vivo V1981A API31, bind fix 5a51e70 applied)
+Prereqs all met: Shizuku authorized checked=true, server pid alive, manager closed, a11y BOUND=[收藏,DSH Outpost], app force-stopped.
+am instrument RealDeviceGatesTest: only step=launch-app emitted, then app process D-state, launcher focus, never reached controller-start. Bind fix (bindUserService/createDisplay off-main) did NOT unblock startup.
+Refined root cause: startup JS calls backgroundStatus/backgroundArm -> controller.status()/armAutoStart()/init run synchronous Shizuku binder IPC (Shizuku.getBinder/checkSelfPermission/addBinderReceivedListenerSticky) on the calling thread; under instrument with a live server these block uninterruptibly (D-state). The bind fix moved only bindUserService/createDisplay, not these queries.
+Full fix requires lazy/off-main dispatch of ALL Shizuku IPC + cached state for synchronous readers (status/checkPermission/init) - a broader sensitive device-control refactor needing explicit approval and careful testing, not a blind patch (vivo blocks logcat).
+Gesture-gate LOGIC is device-agnostic; recommend verifying on API35 emulator (P6-13 core paths ran there) to avoid the vivo instrument binder quirk, OR approve the broader lazy-Shizuku refactor.

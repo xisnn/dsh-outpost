@@ -27,10 +27,19 @@ createDisplay 内的 remote.createDisplay / launchInternal binder IPC 随之在 
 共 4 处精确替换（含字段声明），各 count==1 原子落地。
 
 ## 验证
-- `:app:compileDebugKotlin` BUILD SUCCESSFUL。
-- 真机手势门重跑（隔离包重建后）：realGestures(tap/type/scroll 副屏)、staleScreen 负向、
-  nodeIdentity 负向、home/recents 三态 —— 见 05 更新与 evidence/logs/P6-realdevice-bindfix-*。
-- 该修复属线程调度接线，非纯决策对象；最强证据即真机门由挂死转为可跑（不伪造 JVM 替身）。
+- `:app:compileDebugKotlin` + `assembleRelease/AndroidTest` BUILD SUCCESSFUL（含修复 APK）。
+- 真机手势门重跑（前置全齐：授权/server/管理器关/a11y 真绑定）：**仍挂死**——只发出
+  step=launch-app，App 进程即 D 状态、未到 controller-start。bind 修复（bindUserService/
+  createDisplay 移出主线程）**未解开启动挂死**。
+- 收窄根因：启动期 JS 调 backgroundStatus/backgroundArm → controller.status()/armAutoStart()/
+  init 在调用线程同步跑 Shizuku binder 查询（getBinder/checkSelfPermission/
+  addBinderReceivedListenerSticky）；instrument + 活 server 下这些查询 uninterruptible 阻塞。
+  bind 修复只移了 bind/createDisplay，未移这些查询。
+- 彻底修需把**所有** Shizuku IPC 懒加载/移出主线程 + 同步读者用缓存态（status/checkPermission/
+  init）——更大的敏感设备控制重构，需明确批准与谨慎测试，不在盲诊断（vivo 禁 logcat）下硬补。
+- 手势门逻辑与设备无关；建议改 API35 emulator 验证（P6-13 核心路径曾跑通）以避开 vivo
+  instrument binder 怪癖，或批准上述更广懒加载重构。
+- 该修复属线程调度接线，非纯决策对象；不伪造 JVM 替身。bind 路径修复本身正确且已提交。
 
 ## 安全边界（不变）
 仅隔离包 com.dshoutpost.p1.p6next + 虚拟副屏；主屏个人数据零写入；验后恢复无障碍原值、
