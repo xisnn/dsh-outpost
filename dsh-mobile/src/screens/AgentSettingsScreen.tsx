@@ -56,7 +56,7 @@ const SHORT_LABEL: Record<AgentProtocol, string> = {
   GEMINI: 'Gemini',
 };
 
-export function AgentSettingsScreen() {
+export function AgentSettingsScreen({ showDshEntry = false }: { showDshEntry?: boolean }) {
   const tv = useTheme();
   const nav = useNav();
   const styles = useMemo(() => makeStyles(tv), [tv]);
@@ -371,6 +371,28 @@ export function AgentSettingsScreen() {
             </Pressable>
           </View>
         </View>
+
+        {showDshEntry ? (
+          <>
+            <SectionLabel text="其它" />
+            <View style={styles.card}>
+              <Text style={styles.label}>dsh 客户端（旧版）</Text>
+              <Text style={styles.hint}>
+                Rurea 以手机 Agent 为主。需要原来的 dsh 电脑客户端（工作区 / 会话 / 聊天）时从这里进入。
+              </Text>
+              <View style={styles.phoneActions}>
+                <Pressable
+                  onPress={() => nav.push('DshClient')}
+                  accessibilityRole="button"
+                  accessibilityLabel="打开 dsh 客户端"
+                  style={styles.secondaryBtn}
+                >
+                  <Text style={styles.secondaryText}>打开 dsh 客户端</Text>
+                </Pressable>
+              </View>
+            </View>
+          </>
+        ) : null}
 
         <Text style={styles.footnote}>
           当前状态：{configured ? '已配置，可运行云端任务' : '未配置完整，云端任务不可用'}。

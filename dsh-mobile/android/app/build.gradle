@@ -60,6 +60,11 @@ react {
             bundleConfig = file(project.property('DSH_TEST_METRO_CONFIG'))
         }
     }
+    // Rurea agent-first production entry (A2 decoupling). Independent of the
+    // isolated-test mechanism above; the default dsh build (index.js) is unchanged.
+    if (project.hasProperty('DSH_RUREA_ENTRY')) {
+        entryFile = file(project.property('DSH_RUREA_ENTRY'))
+    }
     /* Autolinking */
     autolinkLibrariesWithApp()
 }
