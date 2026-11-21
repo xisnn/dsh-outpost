@@ -4,6 +4,7 @@ import android.content.Intent
 import android.view.accessibility.AccessibilityNodeInfo
 import androidx.test.ext.junit.runners.AndroidJUnit4
 import androidx.test.platform.app.InstrumentationRegistry
+import androidx.test.uiautomator.UiDevice
 import com.dshpocket.agent.background.BackgroundDisplayController
 import com.dshpocket.agent.core.ApprovalNodeBinding
 import com.dshpocket.agent.core.ScreenGuard
@@ -95,6 +96,33 @@ class RealDeviceGatesTest {
 
     private fun service(): OutpostAccessibilityService? = OutpostAccessibilityService.instance
 
+    /**
+     * Under `am instrument` the system may not (re)bind the a11y service to the
+     * instrumented process (emulator rebind quirk). Force a fresh bind by
+     * toggling the enabled setting off/on via shell (UiDevice runs as shell uid),
+     * preserving any other enabled services, then poll for the service instance.
+     */
+    private fun awaitService(timeoutMs: Long = 20_000): OutpostAccessibilityService? {
+        OutpostAccessibilityService.instance?.let { return it }
+        val dev = UiDevice.getInstance(instrumentation)
+        val ours = "com.dshoutpost.p1.p6next/com.dshpocket.agent.OutpostAccessibilityService"
+        runCatching {
+            val cur = dev.executeShellCommand("settings get secure enabled_accessibility_services").trim()
+            val base = if (cur.isEmpty() || cur == "null") "" else cur
+            val merged = if (base.split(":").contains(ours)) base else (if (base.isEmpty()) ours else "$base:$ours")
+            dev.executeShellCommand("settings put secure enabled_accessibility_services ''")
+            Thread.sleep(800)
+            dev.executeShellCommand("settings put secure enabled_accessibility_services $merged")
+            dev.executeShellCommand("settings put secure accessibility_enabled 1")
+        }
+        val deadline = System.currentTimeMillis() + timeoutMs
+        while (System.currentTimeMillis() < deadline) {
+            OutpostAccessibilityService.instance?.let { return it }
+            Thread.sleep(300)
+        }
+        return null
+    }
+
     private fun awaitElements(displayId: Int, timeoutMs: Long = 15_000): PhoneSnapshot? {
         val deadline = System.currentTimeMillis() + timeoutMs
         while (System.currentTimeMillis() < deadline) {
@@ -117,7 +145,7 @@ class RealDeviceGatesTest {
     @Test
     fun realGesturesTapTypeScrollOnSecondaryDisplay() {
         val (controller, displayId) = secondaryDisplay() ?: run { assumeTrue(false); return }
-        val svc = service() ?: run { step("service-null"); assumeTrue(false); return }
+        val svc = awaitService() ?: run { step("service-null"); assumeTrue(false); return }
         step("launch-contacts")
         controller.launch("com.android.contacts")
         val s = awaitElements(displayId) ?: run { step("snapshot-timeout"); assumeTrue(false); return }
@@ -142,7 +170,7 @@ class RealDeviceGatesTest {
     @Test
     fun staleScreenRefusesAfterNavigationOnSecondaryDisplay() {
         val (controller, displayId) = secondaryDisplay() ?: run { assumeTrue(false); return }
-        val svc = service() ?: run { assumeTrue(false); return }
+        val svc = awaitService() ?: run { assumeTrue(false); return }
         controller.launch("com.android.contacts")
         val s = awaitElements(displayId) ?: run { assumeTrue(false); return }
         publish(s)
@@ -154,7 +182,7 @@ class RealDeviceGatesTest {
     @Test
     fun nodeIdentityBindingRefusesAcrossScreenChange() {
         val (controller, displayId) = secondaryDisplay() ?: run { assumeTrue(false); return }
-        val svc = service() ?: run { assumeTrue(false); return }
+        val svc = awaitService() ?: run { assumeTrue(false); return }
         controller.launch("com.android.contacts")
         val s = awaitElements(displayId) ?: run { assumeTrue(false); return }
         val target = s.elements.firstOrNull { it.clickable }
@@ -170,7 +198,7 @@ class RealDeviceGatesTest {
     @Test
     fun homeRecentsAreDisplayTargetedThreeState() {
         val (controller, displayId) = secondaryDisplay() ?: run { assumeTrue(false); return }
-        val svc = service() ?: run { assumeTrue(false); return }
+        val svc = awaitService() ?: run { assumeTrue(false); return }
         controller.launch("com.android.contacts")
         assumeTrue("contacts up on secondary", awaitElements(displayId) != null)
         val home = svc.key("home", displayId)

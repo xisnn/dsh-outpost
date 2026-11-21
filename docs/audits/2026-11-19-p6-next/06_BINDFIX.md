@@ -41,6 +41,24 @@ createDisplay 内的 remote.createDisplay / launchInternal binder IPC 随之在 
   instrument binder 怪癖，或批准上述更广懒加载重构。
 - 该修复属线程调度接线，非纯决策对象；不伪造 JVM 替身。bind 路径修复本身正确且已提交。
 
+## B 路径：API 35 emulator 验证（用户批准）
+- **bind 修复在 emulator 上验证生效**：step 信标 launch-app→controller-start→controller-started→
+  status；status JSON `connected=true, permissionGranted=true, displayId=2/3/4/5, state=running`。
+  Shizuku 虚拟副屏真建出跑起，**无 D 状态死锁**（与 vivo 相反）。批准的 bind 路径修复得证。
+- **手势服务执行仍 BLOCKED**：emulator 无障碍服务不绑定到 instrument 进程。realGestures
+  step=service-null；awaitService 经 UiDevice.executeShellCommand toggle 确已执行（logcat 可见
+  settings put），但 instrument 运行期间 AccessibilityManagerService 从未为 OutpostAccessibilityService
+  起进程/绑定。对照手动 monkey+toggle：`Start proc … for service OutpostAccessibilityService` →
+  BOUND=[DSH Outpost]。即无障碍绑正常进程、不绑 instrument 进程（P6-13 记载限制，logcat 实证）。
+- 故 tap/type/scroll/STALE_SCREEN/STALE_NODE/home-recents 的服务依赖断言在 instrument 下 skip；
+  OK(4 tests) 含 Assume skip，非验收。
+- 测试基建改进（非敏感，仅 androidTest）：加 androidx.test.uiautomator:2.3.0；awaitService 自助
+  toggle 重绑 + 轮询；step 信标定位挂死阶段。不伪造任何门。
+- 要验手势**执行**（非仅逻辑）：需正常启动隔离包（无障碍可绑）经 RN phone_* 工具 + 桩模型 Run
+  驱动（P6-13 式），或隔离包内测试专用自检广播——更重 setup，待决策。
+- 证据：evidence/logs/P6-emulator-{boot,gates,gates-run2,testbuild}.log；
+  evidence/P6-emulator-verification-diagnosis.txt。emulator 验后已卸载三包、关无障碍、关机。
+
 ## 安全边界（不变）
 仅隔离包 com.dshoutpost.p1.p6next + 虚拟副屏；主屏个人数据零写入；验后恢复无障碍原值、
 卸载隔离包与 Shizuku。
