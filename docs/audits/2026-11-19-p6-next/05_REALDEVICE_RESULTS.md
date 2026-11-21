@@ -15,9 +15,16 @@
 - run2（补 Shizuku 授权后）：Shizuku 管理页占前台 + 隔离 App 进程 D 状态，用例挂死。
 - run3：instrument 会话静默死亡；vivo 限制 logcat（仅 9 行）、dropbox 无崩溃记录，盲诊断不可行。
 - run4（单用例有界尝试）：>355s 无产出，挂死，kill。
+- run5（前置全齐：Shizuku 授权 checked=true、server 活、管理器关、a11y 真绑定
+  Bound=[收藏, DSH Outpost]）：am instrument 下 App 进程仍 D 状态、副屏未建（dumpsys display
+  仅 displayId=0）、前台桌面；但 force-stop 后 **monkey 直起 App 进程 S 状态健康、MainActivity
+  正常聚焦**。对照 run1（Shizuku 未授权时 instrument 能跑、Keychain 5/5 过）。
+- 收窄根因：**vivo 上 Shizuku 已授权的隔离包在 am instrument 启动路径下挂死**（疑似 Shizuku
+  UserService bind 与 instrumentation 启动的 binder 死锁），monkey 路径正常。属设备控制敏感
+  模块的环境级阻塞；修复（Shizuku 懒绑定/绑定超时）需第二方批准。
 - 结论：realGestures(tap/type/scroll 副屏)、staleScreen 真机负向、nodeIdentity 真机负向、
-  home/recents 三态 **未在真机闭环**，记 BLOCKED-on-vivo。验证层仍为 agent-core 83/83 JVM
-  契约 + CI 全绿 + 本地全量链 123/123；emulator 此前覆盖 ScreenStale 部分路径。
+  home/recents 三态 **未在真机闭环**，记 BLOCKED-on-vivo-instrumentation。验证层仍为
+  agent-core 83/83 JVM 契约 + CI 全绿 + 本地全量链 123/123 + run1 真机真成绩。
 - 重试建议（下轮）：改用 API 35 emulator 跑 RealDeviceGatesTest（P6-13 核心路径曾在
   emulator 跑通）；或真机侧先经设置 UI 确认无障碍绑定 + 开 vivo「USB 调试（安全设置）」
   恢复 logcat + 保持管理器关闭；服务侧手势等待加有界超时属敏感改动，需另批。
@@ -33,5 +40,5 @@
 - 主屏个人数据全程零写入；手势负向仅虚构 UI/非敏感列表靶。
 
 ## 5. 证据
-evidence/logs/P6-realdevice-{build,androidtest,instrument,probe,probe-logcat,gates-run2,gates-run3,gates-run4}.log；
-evidence/P6-realdevice-prior-a11y-settings.txt。
+evidence/logs/P6-realdevice-{build,androidtest,instrument,probe,probe-logcat,gates-run2,gates-run3,gates-run4,gates-run5}.log；
+evidence/P6-realdevice-prior-a11y-settings.txt；evidence/P6-realdevice-gates-blocker-diagnosis.txt。

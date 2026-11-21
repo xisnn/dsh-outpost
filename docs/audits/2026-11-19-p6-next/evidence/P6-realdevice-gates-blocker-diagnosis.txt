@@ -1,0 +1,6 @@
+P6 real-device gesture-gate blocker diagnosis (vivo V1981A API31)
+run5 prerequisites ALL met: Shizuku authorized (checked=true), server pid alive, manager closed (launcher focus), a11y BOUND (dumpsys accessibility Bound labels=[收藏, DSH Outpost]).
+am instrument path: app process D-state (uninterruptible), mCurrentFocus=launcher (never resumed), dumpsys display shows ONLY displayId=0 (virtual display never created) -> hang at startup before display creation.
+monkey path (force-stop then monkey LAUNCHER): app process S-state healthy, mCurrentFocus=com.dshoutpost.p1.p6next/com.dshpocket.MainActivity resumed.
+Contrast run1: Shizuku UNauthorized -> am instrument ran app fine (Keychain 5/5, installer 1/1 passed).
+Narrowed root cause: Shizuku-authorized isolated app hangs under am instrument startup on vivo (suspected Shizuku UserService bind vs instrumentation binder deadlock); monkey launch healthy. Sensitive device-control module; fix (lazy/timeout Shizuku bind) needs second-party approval. Gesture gates BLOCKED-on-vivo-instrumentation; verified layer = agent-core 83/83 JVM + CI green + run1 real-device passes.
