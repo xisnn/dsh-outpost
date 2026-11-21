@@ -11,26 +11,28 @@ import http from 'node:http';
 const PORT = Number(process.argv[2] || 8787);
 const reports = [];
 
-// Scripted gate sequence; element ids are resolved reactively from screen JSON.
-// step = number of tool results already in the conversation.
+// Count-driven script (matches the agent loop's message flow): open contacts
+// (vivo package; emulator falls back below) -> screen -> scroll -> screen ->
+// type -> screen -> tap -> key -> done. Element ids resolved from live screens.
 function nextAction(messages) {
   const toolResults = messages.filter((m) => m.role === 'tool');
   const step = toolResults.length;
   const lastScreen = () => {
     for (let i = toolResults.length - 1; i >= 0; i--) {
-      const json = extractJson(toolResults[i].content);
-      if (json && Array.isArray(json.elements)) return json;
+      const j = extractJson(toolResults[i].content);
+      if (j && Array.isArray(j.elements)) return j;
     }
     return null;
   };
-  const pick = (pred) => {
-    const s = lastScreen();
-    const el = s?.elements?.find(pred);
-    return el?.id ?? null;
-  };
+  const pick = (pred) => lastScreen()?.elements?.find(pred)?.id ?? null;
+  // If the primary contacts package timed out (emulator alias), retry the other.
+  const lastContent = toolResults[toolResults.length - 1]?.content || '';
+  if (step === 1 && lastContent.startsWith('OPEN_TIMEOUT')) {
+    return call('phone_open', { package: 'com.google.android.contacts' });
+  }
   switch (step) {
     case 0:
-      return call('phone_open', { package: 'com.google.android.contacts' });
+      return call('phone_open', { package: 'com.android.contacts' });
     case 1:
       return call('phone_screen', {});
     case 2:
@@ -41,7 +43,7 @@ function nextAction(messages) {
       const id = pick((e) => e.editable);
       return id
         ? call('phone_type', { element: id, text: 'Hello 测试 123' })
-        : call('phone_screen', {}); // no editable yet: re-read
+        : call('phone_screen', {});
     }
     case 5:
       return call('phone_screen', {});

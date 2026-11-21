@@ -1,0 +1,91 @@
+{
+  "goal": "Rurea acceptance: open contacts, read screen, type, tap, scroll, home",
+  "displayId": 6,
+  "accessibilityConnected": true,
+  "phase": "completed",
+  "error": null,
+  "text": "ACCEPTANCE_DONE",
+  "displayIdLive": null,
+  "events": [
+    {
+      "tool": "phone_open",
+      "status": null,
+      "detail": "stub-1"
+    },
+    {
+      "tool": "phone_open",
+      "status": "OK",
+      "detail": "OPENED com.android.contacts\n{\"screenId\":2,\"displayId\":6,\"package\":\"com.android.contacts\",\"sensitive\":false,\"reason\":null"
+    },
+    {
+      "tool": "phone_screen",
+      "status": null,
+      "detail": "stub-2"
+    },
+    {
+      "tool": "phone_screen",
+      "status": "OK",
+      "detail": "{\"screenId\":3,\"displayId\":6,\"package\":\"com.android.contacts\",\"sensitive\":false,\"reason\":null,\"locked\":false,\"truncated\":"
+    },
+    {
+      "tool": "phone_scroll",
+      "status": null,
+      "detail": "stub-3"
+    },
+    {
+      "tool": "phone_scroll",
+      "status": "OK",
+      "detail": "SCROLLED down\n{\"screenId\":6,\"displayId\":6,\"package\":\"com.android.contacts\",\"sensitive\":false,\"reason\":null,\"locked\":fals"
+    },
+    {
+      "tool": "phone_screen",
+      "status": null,
+      "detail": "stub-4"
+    },
+    {
+      "tool": "phone_screen",
+      "status": "OK",
+      "detail": "{\"screenId\":7,\"displayId\":6,\"package\":\"com.android.contacts\",\"sensitive\":false,\"reason\":null,\"locked\":false,\"truncated\":"
+    },
+    {
+      "tool": "phone_type",
+      "status": null,
+      "detail": "stub-5"
+    },
+    {
+      "tool": "phone_type",
+      "status": "OK",
+      "detail": "TYPED n5\n{\"screenId\":11,\"displayId\":6,\"package\":\"com.android.contacts\",\"sensitive\":false,\"reason\":null,\"locked\":false,\"t"
+    },
+    {
+      "tool": "phone_screen",
+      "status": null,
+      "detail": "stub-6"
+    },
+    {
+      "tool": "phone_screen",
+      "status": "OK",
+      "detail": "{\"screenId\":12,\"displayId\":6,\"package\":\"com.android.contacts\",\"sensitive\":false,\"reason\":null,\"locked\":false,\"truncated\""
+    },
+    {
+      "tool": "phone_tap",
+      "status": null,
+      "detail": "stub-7"
+    },
+    {
+      "tool": "phone_tap",
+      "status": "OK",
+      "detail": "TAPPED n1 (OK)\n{\"screenId\":16,\"displayId\":6,\"package\":\"com.android.contacts\",\"sensitive\":false,\"reason\":null,\"locked\":fa"
+    },
+    {
+      "tool": "phone_key",
+      "status": null,
+      "detail": "stub-8"
+    },
+    {
+      "tool": "phone_key",
+      "status": "OK",
+      "detail": "KEY home\n{\"screenId\":19,\"displayId\":6,\"package\":\"com.android.contacts\",\"sensitive\":false,\"reason\":null,\"locked\":false,\"t"
+    }
+  ]
+}

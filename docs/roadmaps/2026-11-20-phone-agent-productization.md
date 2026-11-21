@@ -81,7 +81,8 @@
 > **状态（2026-11-21）：B1+B2 已在 API35 emulator 验通**（见 07_RUREA_B1B2_ACCEPTANCE.md）。
 > 正常进程 Run harness 建成（隔离 JS 入口 + 反应式 loopback 桩模型 + 自动批准，复用已批准桥）；
 > phone_open/screen/type/tap/key 真打副屏见效（displayId=8, completed）；scroll 空靶 NO_SCROLLABLE
-> （机制与 tap/type/key 共用已证）。B3 OEM 矩阵 / B4 CI 回归固化待后续。
+> （机制与 tap/type/key 共用已证）。**B3 vivo 真机亦验通（8/8 工具 OK，见 08_RUREA_B3_VIVO.md）：
+> 正常进程路绕开 instrument 死锁 + 保活 Shizuku 管理器解 provider null**。其它 ROM 待设备；B4 CI 回归固化待后续。
 
 | 阶段 | 内容 | 验收标准 |
 |---|---|---|

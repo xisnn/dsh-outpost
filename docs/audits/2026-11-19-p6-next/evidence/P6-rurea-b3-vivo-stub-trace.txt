@@ -1,0 +1,11 @@
+[stub] Rurea acceptance stub model on http://127.0.0.1:8787/v1
+[stub] step -> call phone_open
+[stub] step -> call phone_screen
+[stub] step -> call phone_scroll
+[stub] step -> call phone_screen
+[stub] step -> call phone_type
+[stub] step -> call phone_screen
+[stub] step -> call phone_tap
+[stub] step -> call phone_key
+[stub] step -> text ACCEPTANCE_DONE
+[stub] report received: {"goal":"Rurea acceptance: open contacts, read screen, type, tap, scroll, home","displayId":6,"accessibilityConnected":true,"phase":"completed","error":null,"text":"ACCEPTANCE_DONE","displayIdLive":null,"events":[{"tool":"phone_open","status":null,"detail":"stub-1"},{"tool":"phone_open","status":"OK","detail":"OPENED com.android.contacts\n{\"screenId\":2,\"displayId\":6,\"package\":\"com.android.c
