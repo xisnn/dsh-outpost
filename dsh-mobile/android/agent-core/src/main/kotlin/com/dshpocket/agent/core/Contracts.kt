@@ -21,6 +21,15 @@ data class RunSpec(
     val priorMessages: List<AgentMessage> = emptyList(),
 )
 
+data class RunEventRecord(
+    val seq: Int,
+    val type: String,
+    val toolName: String? = null,
+    val status: String? = null,
+    val detail: String = "",
+    val at: Long = System.currentTimeMillis(),
+)
+
 data class RunSnapshot(
     val id: String,
     val phase: RunPhase,
@@ -36,6 +45,9 @@ data class RunSnapshot(
     /** STARTED, OK, DENIED or ERROR. STARTED means the process died mid-tool. */
     val lastToolStatus: String? = null,
     val resultText: String? = null,
+    val createdAt: Long = updatedAt,
+    val events: List<RunEventRecord> = emptyList(),
+    val reconciledAt: Long? = null,
 )
 
 data class RunResult(

@@ -26,6 +26,7 @@ import { AgentButlerScreen } from '../screens/AgentButlerScreen';
 import { AgentDemoScreen } from '../screens/AgentDemoScreen';
 import { AgentSettingsScreen } from '../screens/AgentSettingsScreen';
 import { AgentMemoryScreen } from '../screens/AgentMemoryScreen';
+import { AgentHistoryScreen } from '../screens/AgentHistoryScreen';
 import { BackgroundDisplayScreen } from '../screens/BackgroundDisplayScreen';
 import DshApp from '../App';
 
@@ -42,6 +43,8 @@ function renderScreen(screen: Screen, active: boolean) {
       return <AgentSettingsScreen showDshEntry />;
     case 'AgentMemory':
       return <AgentMemoryScreen active={active} />;
+    case 'AgentHistory':
+      return <AgentHistoryScreen active={active} />;
     case 'BackgroundDisplay':
       return <BackgroundDisplayScreen />;
     case 'AgentDemo':

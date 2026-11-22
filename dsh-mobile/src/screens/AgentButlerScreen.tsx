@@ -15,6 +15,7 @@ import {
   ScrollView,
   StyleSheet,
   Text,
+  TextInput,
   View,
 } from 'react-native';
 import AsyncStorage from '@react-native-async-storage/async-storage';
@@ -32,11 +33,23 @@ import {
   agentClient,
   APPROVAL_BACKGROUND_LOST_TEXT,
   isApprovalAllowBlocked,
+  type AgentMemoryKind,
   type AgentModelSettings,
+  type AgentSessionsState,
+  type AgentSessionSummary,
+  type AgentStorageStatus,
   type BackgroundDisplayStatus,
   type AgentSnapshot,
   type AgentThreadMessage,
 } from '../core/agent';
+import {
+  buildMemoryDraftFromMessage,
+  formatShortTime,
+  formatStorageNotice,
+  MEMORY_KIND_LABELS,
+  MEMORY_KINDS,
+  truncateSessionTitle,
+} from '../core/agentPersistence';
 import {
   formatApprovalCountdown,
   isApprovalAllowDisabled,
@@ -82,6 +95,20 @@ export function AgentButlerScreen({ active = true }: { active?: boolean }) {
   const [snapshot, setSnapshot] = useState<AgentSnapshot | null>(null);
   const [settings, setSettings] = useState<AgentModelSettings | null>(null);
   const [thread, setThread] = useState<AgentThreadMessage[]>([]);
+  const [sessionsState, setSessionsState] = useState<AgentSessionsState | null>(null);
+  const [sessionsOpen, setSessionsOpen] = useState(false);
+  const [renamingSessionId, setRenamingSessionId] = useState<string | null>(null);
+  const [renameTitle, setRenameTitle] = useState('');
+  const [sessionBusy, setSessionBusy] = useState(false);
+  const [storageStatus, setStorageStatus] = useState<AgentStorageStatus | null>(null);
+  const [memoryDraft, setMemoryDraft] = useState<{
+    key: string;
+    value: string;
+    kind: AgentMemoryKind;
+    pinned: boolean;
+  } | null>(null);
+  const [memorySaving, setMemorySaving] = useState(false);
+  const [memoryToast, setMemoryToast] = useState<string | null>(null);
   const [draft, setDraft] = useState('');
   const [busy, setBusy] = useState(false);
   const [consent, setConsent] = useState<boolean | null>(null);
@@ -144,6 +171,22 @@ export function AgentButlerScreen({ active = true }: { active?: boolean }) {
     }
   }, []);
 
+  const refreshSessions = useCallback(async () => {
+    try {
+      setSessionsState(await agentClient.sessions());
+    } catch {
+      // Session list stays optional when native bridge is unavailable.
+    }
+  }, []);
+
+  const refreshStorage = useCallback(async () => {
+    try {
+      setStorageStatus(await agentClient.storageStatus());
+    } catch {
+      // Optional storage migration status.
+    }
+  }, []);
+
   const refreshBackground = useCallback(async () => {
     try {
       setBackground(await agentClient.backgroundStatus());
@@ -194,6 +237,7 @@ export function AgentButlerScreen({ active = true }: { active?: boolean }) {
       if (isTerminalAgentPhase(event.phase)) {
         void refresh();
         void refreshThread();
+        void refreshSessions();
       }
     });
     const appStateSub = AppState.addEventListener('change', (nextState) => {
@@ -201,11 +245,14 @@ export function AgentButlerScreen({ active = true }: { active?: boolean }) {
         void refresh();
         void refreshSettings();
         void refreshBackground();
+        void refreshSessions();
       }
     });
     void refresh();
     void refreshSettings();
     void refreshThread();
+    void refreshSessions();
+    void refreshStorage();
     void refreshBackground();
     void ensureAutoStart();
     schedule();
@@ -220,15 +267,16 @@ export function AgentButlerScreen({ active = true }: { active?: boolean }) {
       clearInterval(backgroundTimer);
       autoStartRef.current = false;
     };
-  }, [active, refresh, refreshSettings, refreshThread, refreshBackground, ensureAutoStart]);
+  }, [active, refresh, refreshSettings, refreshThread, refreshSessions, refreshStorage, refreshBackground, ensureAutoStart]);
 
   useEffect(() => {
     if (!active) return;
     const phase = snapshot?.phase ?? 'idle';
     if (phase === 'completed' || phase === 'failed' || phase === 'interrupted') {
       void refreshThread();
+      void refreshSessions();
     }
-  }, [active, snapshot?.phase, refreshThread]);
+  }, [active, snapshot?.phase, refreshThread, refreshSessions]);
 
   const agreeConsent = useCallback(() => {
     setConsent(true);
@@ -238,6 +286,10 @@ export function AgentButlerScreen({ active = true }: { active?: boolean }) {
   const submitGoal = useCallback((rawGoal: string, clearMatchingDraft: boolean) => {
     const text = rawGoal.trim();
     if (!text || busy) return;
+    if (storageStatus?.downgradeBlocked) {
+      reportError('action', new Error('STORAGE_DOWNGRADE_BLOCKED'));
+      return;
+    }
     if (!consent) {
       reportError('action', new Error('请先阅读并同意数据发送说明'));
       return;
@@ -258,6 +310,7 @@ export function AgentButlerScreen({ active = true }: { active?: boolean }) {
           setDraft((current) => (current === text ? '' : current));
         }
         await refreshThread();
+        await refreshSessions();
       } catch (failure) {
         // Keep the draft on failure (for example BACKGROUND_NOT_READY) so the
         // user can re-authorize and send it again.
@@ -266,7 +319,7 @@ export function AgentButlerScreen({ active = true }: { active?: boolean }) {
         setBusy(false);
       }
     })();
-  }, [busy, clearError, consent, nav, refreshThread, reportError, settings?.hasKey, settings?.model]);
+  }, [busy, clearError, consent, nav, refreshSessions, refreshThread, reportError, settings?.hasKey, settings?.model, storageStatus?.downgradeBlocked]);
 
   const send = useCallback(() => {
     submitGoal(draft, true);
@@ -332,7 +385,7 @@ export function AgentButlerScreen({ active = true }: { active?: boolean }) {
   }, [clearError, reportError]);
 
   const clearThread = useCallback(() => {
-    Alert.alert('清空本机对话？', '任务历史记录会保留，但后续任务不再携带之前的对话上下文。', [
+    Alert.alert('清空当前对话？', '当前会话消息与后续模型上下文会清空，任务历史与其它会话会保留。', [
       { text: '取消', style: 'cancel' },
       {
         text: '清空',
@@ -343,6 +396,7 @@ export function AgentButlerScreen({ active = true }: { active?: boolean }) {
             try {
               setSnapshot(await agentClient.clearThread());
               await refreshThread();
+              await refreshSessions();
             } catch (failure) {
               reportError('action', failure);
             }
@@ -350,7 +404,117 @@ export function AgentButlerScreen({ active = true }: { active?: boolean }) {
         },
       },
     ]);
-  }, [clearError, refreshThread, reportError]);
+  }, [clearError, refreshSessions, refreshThread, reportError]);
+
+  const createNewSession = useCallback(async () => {
+    if (sessionBusy) return;
+    setSessionBusy(true);
+    clearError();
+    try {
+      setSessionsState(await agentClient.createSession());
+      setSessionsOpen(false);
+      setRenamingSessionId(null);
+      await refreshThread();
+    } catch (failure) {
+      reportError('action', failure);
+    } finally {
+      setSessionBusy(false);
+    }
+  }, [clearError, refreshThread, reportError, sessionBusy]);
+
+  const selectSession = useCallback(async (sessionId: string) => {
+    if (sessionBusy) return;
+    setSessionBusy(true);
+    clearError();
+    try {
+      setSessionsState(await agentClient.switchSession(sessionId));
+      setSessionsOpen(false);
+      setRenamingSessionId(null);
+      await refreshThread();
+    } catch (failure) {
+      reportError('action', failure);
+    } finally {
+      setSessionBusy(false);
+    }
+  }, [clearError, refreshThread, reportError, sessionBusy]);
+
+  const commitRenameSession = useCallback(async () => {
+    if (!renamingSessionId || sessionBusy) return;
+    const clean = renameTitle.trim();
+    if (!clean) {
+      reportError('action', new Error('会话名称不能为空'));
+      return;
+    }
+    setSessionBusy(true);
+    clearError();
+    try {
+      setSessionsState(await agentClient.renameSession(renamingSessionId, clean));
+      setRenamingSessionId(null);
+      setRenameTitle('');
+    } catch (failure) {
+      reportError('action', failure);
+    } finally {
+      setSessionBusy(false);
+    }
+  }, [clearError, renameTitle, renamingSessionId, reportError, sessionBusy]);
+
+  const confirmDeleteSession = useCallback((session: AgentSessionSummary) => {
+    Alert.alert('删除这段对话？', `「${session.title}」的上下文将被移除，任务执行历史会保留。`, [
+      { text: '取消', style: 'cancel' },
+      {
+        text: '删除',
+        style: 'destructive',
+        onPress: () => {
+          void (async () => {
+            setSessionBusy(true);
+            clearError();
+            try {
+              setSessionsState(await agentClient.deleteSession(session.id));
+              if (renamingSessionId === session.id) setRenamingSessionId(null);
+              await refreshThread();
+            } catch (failure) {
+              reportError('action', failure);
+            } finally {
+              setSessionBusy(false);
+            }
+          })();
+        },
+      },
+    ]);
+  }, [clearError, refreshThread, renamingSessionId, reportError]);
+
+  const openSaveToMemory = useCallback((message: AgentThreadMessage) => {
+    setMemoryToast(null);
+    setMemoryDraft({ ...buildMemoryDraftFromMessage(message), pinned: false });
+  }, []);
+
+  const submitMemoryDraft = useCallback(async () => {
+    if (!memoryDraft || memorySaving) return;
+    const cleanKey = memoryDraft.key.trim();
+    const cleanValue = memoryDraft.value.trim();
+    if (!cleanKey || !cleanValue) {
+      reportError('action', new Error('记忆名称和内容都不能为空'));
+      return;
+    }
+    setMemorySaving(true);
+    clearError();
+    try {
+      await agentClient.saveMemoryEntry(
+        null,
+        cleanKey,
+        cleanValue,
+        memoryDraft.kind,
+        memoryDraft.pinned,
+        true,
+      );
+      setMemoryDraft(null);
+      setMemoryToast(`已保存到管家记忆：${cleanKey}`);
+    } catch (failure) {
+      reportError('action', failure);
+    } finally {
+      setMemorySaving(false);
+    }
+  }, [clearError, memoryDraft, memorySaving, reportError]);
 
   useEffect(() => {
     if (!active || !background?.connected) {
@@ -438,6 +602,15 @@ export function AgentButlerScreen({ active = true }: { active?: boolean }) {
 
   const phase = snapshot?.phase ?? 'idle';
   const running = isActiveAgentPhase(phase);
+  const downgradeBlocked = Boolean(storageStatus?.downgradeBlocked);
+  const storageNotice = useMemo(() => formatStorageNotice(storageStatus), [storageStatus]);
+  const sessions = sessionsState?.sessions ?? [];
+  const activeSession = useMemo(
+    () =>
+      sessions.find((s) => s.id === sessionsState?.activeSessionId) ?? sessions[0] ?? null,
+    [sessions, sessionsState?.activeSessionId],
+  );
+  const sessionControlsLocked = running || busy || sessionBusy || downgradeBlocked;
   const pending = snapshot?.pendingApproval ?? null;
   const allowBlocked = isApprovalAllowBlocked(pending);
   const approvalExpired = isApprovalExpired(pending, approvalNow);
@@ -660,6 +833,14 @@ export function AgentButlerScreen({ active = true }: { active?: boolean }) {
               {background?.connected ? <View style={styles.bgHeaderDot} /> : null}
             </Pressable>
             <Pressable
+              onPress={() => nav.push('AgentHistory')}
+              accessibilityRole="button"
+              accessibilityLabel="打开任务历史"
+              hitSlop={8}
+            >
+              <Text style={styles.headerAction}>历史</Text>
+            </Pressable>
+            <Pressable
               onPress={() => nav.push('AgentMemory')}
               accessibilityRole="button"
               accessibilityLabel="打开管家记忆"
@@ -678,6 +859,104 @@ export function AgentButlerScreen({ active = true }: { active?: boolean }) {
           </View>
         }
       />
+
+      <View style={styles.sessionBar}>
+        <Pressable
+          onPress={() => setSessionsOpen((prev) => !prev)}
+          accessibilityRole="button"
+          accessibilityLabel={sessionsOpen ? '收起会话列表' : '切换会话'}
+          style={styles.sessionToggle}
+        >
+          <Text style={styles.sessionTitle} numberOfLines={1}>
+            {truncateSessionTitle(activeSession?.title ?? '默认对话')}
+          </Text>
+          <Text style={styles.sessionMeta}>
+            {sessions.length > 0 ? `会话 ${sessions.length}` : ''} · {thread.length} 条 {sessionsOpen ? '▴' : '▾'}
+          </Text>
+        </Pressable>
+        <Pressable
+          onPress={() => void createNewSession()}
+          disabled={sessionControlsLocked}
+          accessibilityRole="button"
+          accessibilityLabel="新建对话"
+          style={[styles.newSessionBtn, sessionControlsLocked ? styles.muted : null]}
+        >
+          <Text style={styles.newSessionText}>+ 新会话</Text>
+        </Pressable>
+      </View>
+
+      {sessionsOpen ? (
+        <View style={styles.sessionDrawer}>
+          {sessions.map((session) => {
+            const isActive = session.id === (sessionsState?.activeSessionId ?? 'default');
+            const isRenaming = renamingSessionId === session.id;
+            return (
+              <View key={session.id} style={[styles.sessionRow, isActive ? styles.sessionRowActive : null]}>
+                {isRenaming ? (
+                  <View style={styles.renameRow}>
+                    <TextInput
+                      style={styles.renameInput}
+                      value={renameTitle}
+                      onChangeText={setRenameTitle}
+                      placeholder="输入会话名称"
+                      placeholderTextColor={tv.colors.textFaint}
+                      maxLength={40}
+                      accessibilityLabel="会话新名称"
+                    />
+                    <Pressable onPress={() => void commitRenameSession()} style={styles.smallActionInline}>
+                      <Text style={styles.smallActionText}>保存</Text>
+                    </Pressable>
+                    <Pressable onPress={() => setRenamingSessionId(null)} style={styles.smallActionInline}>
+                      <Text style={styles.sessionMeta}>取消</Text>
+                    </Pressable>
+                  </View>
+                ) : (
+                  <View style={styles.sessionItemRow}>
+                    <Pressable
+                      onPress={() => {
+                        if (!isActive && !sessionControlsLocked) void selectSession(session.id);
+                      }}
+                      disabled={sessionControlsLocked}
+                      accessibilityRole="button"
+                      accessibilityLabel={`切换到会话 ${session.title}`}
+                      style={styles.sessionItemMain}
+                    >
+                      <Text style={[styles.sessionItemTitle, isActive ? styles.sessionItemTitleActive : null]} numberOfLines={1}>
+                        {isActive ? '● ' : ''}{session.title}
+                      </Text>
+                      <Text style={styles.sessionMeta} numberOfLines={1}>
+                        {session.messageCount} 条 · {formatShortTime(session.updatedAt) || '新建'}
+                        {session.preview ? ` · ${session.preview}` : ''}
+                      </Text>
+                    </Pressable>
+                    <Pressable
+                      onPress={() => {
+                        setRenamingSessionId(session.id);
+                        setRenameTitle(session.title);
+                      }}
+                      disabled={sessionBusy || downgradeBlocked}
+                      accessibilityRole="button"
+                      accessibilityLabel={`重命名会话 ${session.title}`}
+                      style={styles.smallActionInline}
+                    >
+                      <Text style={styles.smallActionText}>重命名</Text>
+                    </Pressable>
+                    <Pressable
+                      onPress={() => confirmDeleteSession(session)}
+                      disabled={sessionControlsLocked}
+                      accessibilityRole="button"
+                      accessibilityLabel={`删除会话 ${session.title}`}
+                      style={[styles.smallActionInline, sessionControlsLocked ? styles.muted : null]}
+                    >
+                      <Text style={styles.deleteSessionText}>删除</Text>
+                    </Pressable>
+                  </View>
+                )}
+              </View>
+            );
+          })}
+        </View>
+      ) : null}
 
       <ScrollView
         ref={scroll}
@@ -698,6 +977,13 @@ export function AgentButlerScreen({ active = true }: { active?: boolean }) {
           if (nearBottomRef.current) scroll.current?.scrollToEnd({ animated: false });
         }}
       >
+        {storageNotice ? (
+          <View style={[styles.systemCard, storageNotice.tone === 'danger' ? styles.errorCard : styles.attentionCard]}>
+            <Text style={styles.systemTitle}>{storageNotice.title}</Text>
+            <Text style={styles.systemText}>{storageNotice.body}</Text>
+          </View>
+        ) : null}
+
         {recovery ? (
           <View style={[styles.systemCard, styles.attentionCard]}>
             <Text style={styles.systemTitle}>上次任务中断</Text>
@@ -748,11 +1034,108 @@ export function AgentButlerScreen({ active = true }: { active?: boolean }) {
               <View style={styles.userBubble}>
                 <Text style={styles.userText} selectable>{message.text}</Text>
               </View>
+              {!downgradeBlocked ? (
+                <Pressable
+                  onPress={() => openSaveToMemory(message)}
+                  accessibilityRole="button"
+                  accessibilityLabel="将我的消息存为记忆"
+                  hitSlop={6}
+                  style={styles.bubbleSaveBtn}
+                >
+                  <Text style={styles.bubbleSaveText}>存为记忆</Text>
+                </Pressable>
+              ) : null}
             </View>
           ) : (
-            <AssistantBubble key={`${message.at}-${index}`} text={message.text} styles={styles} />
+            <AssistantBubble
+              key={`${message.at}-${index}`}
+              text={message.text}
+              styles={styles}
+              onSaveToMemory={downgradeBlocked ? undefined : () => openSaveToMemory(message)}
+            />
           )
         ))}
+
+        {memoryToast ? (
+          <View style={styles.systemCard}>
+            <View style={styles.memoryToastRow}>
+              <Text style={styles.systemHint}>{memoryToast}</Text>
+              <Pressable onPress={() => nav.push('AgentMemory')} hitSlop={6}>
+                <Text style={styles.smallActionText}>去查看</Text>
+              </Pressable>
+            </View>
+          </View>
+        ) : null}
+
+        {memoryDraft ? (
+          <View style={[styles.systemCard, styles.setupCard]}>
+            <Text style={styles.systemTitle}>显式存为本机记忆</Text>
+            <Text style={styles.systemHint}>只在你确认保存后写入本机记忆；不会自动提取对话。</Text>
+            <View style={styles.draftKindRow}>
+              {MEMORY_KINDS.map((option) => {
+                const selected = memoryDraft.kind === option;
+                return (
+                  <Pressable
+                    key={option}
+                    onPress={() => setMemoryDraft((prev) => (prev ? { ...prev, kind: option } : null))}
+                    style={[styles.draftChip, selected ? styles.draftChipActive : null]}
+                  >
+                    <Text style={[styles.draftChipText, selected ? styles.draftChipTextActive : null]}>
+                      {MEMORY_KIND_LABELS[option]}
+                    </Text>
+                  </Pressable>
+                );
+              })}
+              <Pressable
+                onPress={() => setMemoryDraft((prev) => (prev ? { ...prev, pinned: !prev.pinned } : null))}
+                style={[styles.draftChip, memoryDraft.pinned ? styles.draftChipActive : null]}
+              >
+                <Text style={[styles.draftChipText, memoryDraft.pinned ? styles.draftChipTextActive : null]}>
+                  {memoryDraft.pinned ? '★ 置顶' : '☆ 置顶'}
+                </Text>
+              </Pressable>
+            </View>
+            <TextInput
+              style={styles.draftInput}
+              value={memoryDraft.key}
+              onChangeText={(nextKey) => setMemoryDraft((prev) => (prev ? { ...prev, key: nextKey } : null))}
+              placeholder="记忆名称"
+              placeholderTextColor={tv.colors.textFaint}
+              maxLength={80}
+              accessibilityLabel="快捷存记忆名称"
+            />
+            <TextInput
+              style={[styles.draftInput, styles.draftValueInput]}
+              value={memoryDraft.value}
+              onChangeText={(nextValue) => setMemoryDraft((prev) => (prev ? { ...prev, value: nextValue } : null))}
+              placeholder="记忆内容"
+              placeholderTextColor={tv.colors.textFaint}
+              maxLength={2000}
+              multiline
+              accessibilityLabel="快捷存记忆内容"
+            />
+            <View style={styles.actions}>
+              <Pressable
+                onPress={() => void submitMemoryDraft()}
+                disabled={memorySaving}
+                accessibilityRole="button"
+                accessibilityLabel="确认保存到记忆"
+                style={[styles.primaryBtn, memorySaving ? styles.muted : null]}
+              >
+                <Text style={styles.primaryText}>{memorySaving ? '保存中…' : '保存到记忆'}</Text>
+              </Pressable>
+              <Pressable
+                onPress={() => setMemoryDraft(null)}
+                disabled={memorySaving}
+                accessibilityRole="button"
+                accessibilityLabel="取消存为记忆"
+                style={styles.secondaryBtn}
+              >
+                <Text style={styles.secondaryText}>取消</Text>
+              </Pressable>
+            </View>
+          </View>
+        ) : null}
 
         {consent === false ? (
           <View style={styles.assistantRow}>
@@ -1160,13 +1543,32 @@ export function AgentButlerScreen({ active = true }: { active?: boolean }) {
   );
 }
 
-function AssistantBubble({ text, styles }: { text: string; styles: ReturnType<typeof makeStyles> }) {
+function AssistantBubble({
+  text,
+  styles,
+  onSaveToMemory,
+}: {
+  text: string;
+  styles: ReturnType<typeof makeStyles>;
+  onSaveToMemory?: () => void;
+}) {
   return (
     <View style={styles.assistantRow}>
       <View style={styles.assistantBubble}>
         <Text style={styles.assistantLabel}>管家</Text>
         <Text style={styles.assistantText} selectable>{text}</Text>
       </View>
+      {onSaveToMemory ? (
+        <Pressable
+          onPress={onSaveToMemory}
+          accessibilityRole="button"
+          accessibilityLabel="将管家回复存为记忆"
+          hitSlop={6}
+          style={styles.bubbleSaveBtn}
+        >
+          <Text style={styles.bubbleSaveText}>存为记忆</Text>
+        </Pressable>
+      ) : null}
     </View>
   );
 }
@@ -1177,8 +1579,93 @@ function makeStyles(tv: ReturnType<typeof useTheme>) {
     root: { flex: 1, backgroundColor: C.bg },
     scroll: { flex: 1 },
     messages: { paddingTop: tv.space.sm, paddingBottom: tv.space.lg },
-    headerActions: { flexDirection: 'row', alignItems: 'center', gap: 14 },
-    headerAction: { color: C.accent, fontSize: tv.type.sm, fontWeight: '600' },
+    headerActions: { flexDirection: 'row', alignItems: 'center', gap: 10 },
+    headerAction: { color: C.accent, fontSize: tv.type.xs, fontWeight: '600' },
+    sessionBar: {
+      flexDirection: 'row',
+      alignItems: 'center',
+      justifyContent: 'space-between',
+      paddingHorizontal: tv.layout.screenPadding,
+      paddingVertical: 7,
+      borderBottomWidth: StyleSheet.hairlineWidth,
+      borderBottomColor: C.border,
+      backgroundColor: C.bgRaised,
+      gap: 8,
+    },
+    sessionToggle: { flex: 1, flexDirection: 'row', alignItems: 'center', gap: 6 },
+    sessionTitle: { color: C.text, fontSize: tv.type.xs, fontWeight: '600', maxWidth: '58%' },
+    sessionMeta: { color: C.textTertiary, fontSize: tv.type.micro },
+    newSessionBtn: {
+      paddingHorizontal: 9,
+      paddingVertical: 4,
+      borderRadius: tv.radius.pill,
+      borderWidth: StyleSheet.hairlineWidth,
+      borderColor: C.accent,
+      backgroundColor: C.accentWash,
+    },
+    newSessionText: { color: C.accent, fontSize: tv.type.micro, fontWeight: '600' },
+    sessionDrawer: {
+      paddingHorizontal: tv.layout.screenPadding,
+      paddingVertical: tv.space.sm,
+      backgroundColor: C.bgRaised,
+      borderBottomWidth: StyleSheet.hairlineWidth,
+      borderBottomColor: C.border,
+      gap: 6,
+    },
+    sessionRow: {
+      paddingHorizontal: 10,
+      paddingVertical: 8,
+      borderRadius: tv.radius.sm,
+      backgroundColor: C.bg,
+      borderWidth: StyleSheet.hairlineWidth,
+      borderColor: C.border,
+    },
+    sessionRowActive: { borderColor: C.accent, backgroundColor: C.accentWash },
+    sessionItemRow: { flexDirection: 'row', alignItems: 'center', gap: 8 },
+    sessionItemMain: { flex: 1 },
+    sessionItemTitle: { color: C.text, fontSize: tv.type.xs, fontWeight: '600' },
+    sessionItemTitleActive: { color: C.accent },
+    smallActionInline: { paddingHorizontal: 6, paddingVertical: 4 },
+    deleteSessionText: { color: C.danger, fontSize: tv.type.micro },
+    renameRow: { flexDirection: 'row', alignItems: 'center', gap: 6 },
+    renameInput: {
+      flex: 1,
+      backgroundColor: C.bgRaised,
+      borderWidth: StyleSheet.hairlineWidth,
+      borderColor: C.borderStrong,
+      borderRadius: tv.radius.xs,
+      color: C.text,
+      fontSize: tv.type.xs,
+      paddingHorizontal: 8,
+      paddingVertical: 5,
+    },
+    bubbleSaveBtn: { marginTop: 4, paddingHorizontal: 6, paddingVertical: 2 },
+    bubbleSaveText: { color: C.textTertiary, fontSize: tv.type.micro },
+    memoryToastRow: { flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between', gap: 8 },
+    draftKindRow: { flexDirection: 'row', flexWrap: 'wrap', gap: 6, marginTop: tv.space.sm },
+    draftChip: {
+      paddingHorizontal: 9,
+      paddingVertical: 4,
+      borderRadius: tv.radius.pill,
+      borderWidth: StyleSheet.hairlineWidth,
+      borderColor: C.borderStrong,
+      backgroundColor: C.bg,
+    },
+    draftChipActive: { borderColor: C.accent, backgroundColor: C.accentWash },
+    draftChipText: { color: C.textSecondary, fontSize: tv.type.micro },
+    draftChipTextActive: { color: C.accent, fontWeight: '600' },
+    draftInput: {
+      backgroundColor: C.bg,
+      borderWidth: StyleSheet.hairlineWidth,
+      borderColor: C.borderStrong,
+      borderRadius: tv.radius.sm,
+      color: C.text,
+      fontSize: tv.type.xs,
+      paddingHorizontal: tv.space.sm,
+      paddingVertical: 8,
+      marginTop: tv.space.sm,
+    },
+    draftValueInput: { minHeight: 68, textAlignVertical: 'top' },
     userRow: { paddingHorizontal: tv.layout.screenPadding, marginTop: tv.space.md, alignItems: 'flex-end' },
     userBubble: {
       maxWidth: '84%',

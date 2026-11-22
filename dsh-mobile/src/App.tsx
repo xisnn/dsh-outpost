@@ -76,6 +76,7 @@ import { ButlerMemoryScreen } from './screens/ButlerMemoryScreen';
 import { AgentDemoScreen } from './screens/AgentDemoScreen';
 import { AgentSettingsScreen } from './screens/AgentSettingsScreen';
 import { AgentMemoryScreen } from './screens/AgentMemoryScreen';
+import { AgentHistoryScreen } from './screens/AgentHistoryScreen';
 import { BackgroundDisplayScreen } from './screens/BackgroundDisplayScreen';
 
 // 旧版本明文凭据键（@dsh/cookie / @dsh/lastCookie / @dsh/gatewayToken /
@@ -1634,6 +1635,8 @@ function renderScreen(screen: Screen, active: boolean) {
       return <AgentSettingsScreen />;
     case 'AgentMemory':
       return <AgentMemoryScreen active={active} />;
+    case 'AgentHistory':
+      return <AgentHistoryScreen active={active} />;
     case 'BackgroundDisplay':
       return <BackgroundDisplayScreen />;
     case 'Subagent':

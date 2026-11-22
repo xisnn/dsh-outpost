@@ -101,19 +101,67 @@ export interface AgentHistoryItem {
   runId: string;
   goal: string | null;
   phase: AgentPhase;
+  step?: number;
   reason: string | null;
   resultText: string | null;
   requiresReconciliation: boolean;
+  reconciledAt?: number | null;
   lastToolName: string | null;
+  lastToolStatus?: string | null;
+  createdAt?: number;
   updatedAt: number;
+  events?: AgentRunEvent[];
 }
+
+export type AgentMemoryKind = 'preference' | 'project' | 'fact';
 
 export interface AgentMemoryEntry {
   id: string;
   key: string;
   value: string;
+  kind?: AgentMemoryKind;
+  pinned?: boolean;
+  enabled?: boolean;
+  revision?: number;
   createdAt: number;
   updatedAt: number;
+}
+
+export interface AgentMemoryBudget {
+  maxChars: number;
+  usedChars: number;
+  totalEntries: number;
+  enabledEntries: number;
+  includedIds: string[];
+  truncatedIds: string[];
+  disabledIds: string[];
+}
+
+export interface AgentSessionSummary {
+  id: string;
+  title: string;
+  messageCount: number;
+  preview: string;
+  createdAt: number;
+  updatedAt: number;
+}
+
+export interface AgentSessionsState {
+  activeSessionId: string;
+  sessions: AgentSessionSummary[];
+}
+
+export interface AgentStorageStatus {
+  schemaVersion: number;
+  fromVersion: number;
+  toVersion: number;
+  status: 'up_to_date' | 'migrated' | 'downgrade_blocked' | 'failed' | string;
+  downgradeBlocked: boolean;
+  migratedAt?: number;
+  backupPath?: string | null;
+  quarantinedFiles: string[];
+  warnings: string[];
+  error?: string | null;
 }
 
 export interface PhoneCapabilities {
@@ -170,11 +218,27 @@ interface NativeAgent {
   stop(): Promise<string>;
   resumeHandoff(): Promise<string>;
   dismissRecovery(): Promise<string>;
+  acknowledgeRun(runId: string): Promise<string>;
   history(): Promise<string>;
+  storageStatus(): Promise<string>;
   thread(): Promise<string>;
+  sessions(): Promise<string>;
+  createSession(title: string | null): Promise<string>;
+  switchSession(sessionId: string): Promise<string>;
+  renameSession(sessionId: string, title: string): Promise<string>;
+  deleteSession(sessionId: string): Promise<string>;
   clearThread(): Promise<string>;
   getMemory(): Promise<string>;
+  getMemoryBudget(): Promise<string>;
   saveMemory(id: string | null, key: string, value: string): Promise<string>;
+  saveMemoryEntry(
+    id: string | null,
+    key: string,
+    value: string,
+    kind: AgentMemoryKind,
+    pinned: boolean,
+    enabled: boolean,
+  ): Promise<string>;
   deleteMemory(id: string): Promise<boolean>;
   getPhoneCapabilities(): Promise<string>;
   openAccessibilitySettings(): Promise<boolean>;
@@ -233,12 +297,35 @@ export const agentClient = {
   stop: async () => parse(await native().stop()),
   resumeHandoff: async () => parse(await native().resumeHandoff()),
   dismissRecovery: async () => parse(await native().dismissRecovery()),
+  acknowledgeRun: async (runId: string) => parse(await native().acknowledgeRun(runId)),
   history: async () => JSON.parse(await native().history()) as AgentHistoryItem[],
+  storageStatus: async () => JSON.parse(await native().storageStatus()) as AgentStorageStatus,
   thread: async () => JSON.parse(await native().thread()) as AgentThreadMessage[],
+  sessions: async () => JSON.parse(await native().sessions()) as AgentSessionsState,
+  createSession: async (title?: string | null) =>
+    JSON.parse(await native().createSession(title ?? null)) as AgentSessionsState,
+  switchSession: async (sessionId: string) =>
+    JSON.parse(await native().switchSession(sessionId)) as AgentSessionsState,
+  renameSession: async (sessionId: string, title: string) =>
+    JSON.parse(await native().renameSession(sessionId, title)) as AgentSessionsState,
+  deleteSession: async (sessionId: string) =>
+    JSON.parse(await native().deleteSession(sessionId)) as AgentSessionsState,
   clearThread: async () => parse(await native().clearThread()),
   getMemory: async () => JSON.parse(await native().getMemory()) as AgentMemoryEntry[],
+  getMemoryBudget: async () => JSON.parse(await native().getMemoryBudget()) as AgentMemoryBudget,
   saveMemory: async (id: string | null, key: string, value: string) =>
     JSON.parse(await native().saveMemory(id, key, value)) as AgentMemoryEntry,
+  saveMemoryEntry: async (
+    id: string | null,
+    key: string,
+    value: string,
+    kind: AgentMemoryKind,
+    pinned: boolean,
+    enabled: boolean,
+  ) =>
+    JSON.parse(
+      await native().saveMemoryEntry(id, key, value, kind, pinned, enabled),
+    ) as AgentMemoryEntry,
   deleteMemory: async (id: string) => native().deleteMemory(id),
   getPhoneCapabilities: async () =>
     JSON.parse(await native().getPhoneCapabilities()) as PhoneCapabilities,

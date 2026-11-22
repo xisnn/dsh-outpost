@@ -168,4 +168,102 @@ class FileRunStoreTest {
         // A cap on history must never discard runs that are still in flight.
         assertEquals(overflow + 1, FileRunStore(root).list().size)
     }
+
+    @Test
+    fun `recordEvent persists bounded tool timeline and redacts secrets`() {
+        val root = runs()
+        val store = FileRunStore(root)
+        store.begin(RunSpec("run-events", "inspect screen"))
+        for (i in 1..25) {
+            store.recordEvent(
+                "run-events",
+                RunEventRecord(
+                    seq = i,
+                    type = "tool_finished",
+                    toolName = "workspace_write",
+                    status = "OK",
+                    detail = "step-$i Bearer sk-live-secret1234567890",
+                    at = 1_000L + i,
+                ),
+            )
+        }
+
+        val reloaded = FileRunStore(root).snapshot("run-events")
+        assertNotNull(reloaded)
+        assertEquals(FileRunStore.MAX_EVENTS, reloaded!!.events.size)
+        assertEquals(6, reloaded.events.first().seq)
+        assertEquals(25, reloaded.events.last().seq)
+        assertTrue(reloaded.events.none { it.detail.contains("sk-live-secret1234567890") })
+        assertTrue(reloaded.events.all { it.detail.contains("[REDACTED]") })
+    }
+
+    @Test
+    fun `acknowledgeReconciliation clears flag, records timestamp, and allows pruning`() {
+        val root = runs()
+        val store = FileRunStore(root)
+        writeRaw(
+            root,
+            "run-crash-old",
+            phase = RunPhase.INTERRUPTED,
+            updatedAt = 1L,
+            requiresReconciliation = true,
+        )
+        for (index in 2..FileRunStore.MAX_RUN_FILES + 1) {
+            writeRaw(root, "run-%03d".format(index), updatedAt = index.toLong())
+        }
+
+        // Before acknowledgement it survives pruning even though updatedAt=1 is oldest.
+        store.begin(RunSpec("run-trigger-1", "one"))
+        assertNotNull(FileRunStore(root).snapshot("run-crash-old"))
+
+        val acked = store.acknowledgeReconciliation("run-crash-old", at = 9_999L)
+        assertTrue(acked)
+        val afterAck = FileRunStore(root).snapshot("run-crash-old")
+        assertEquals(false, afterAck?.requiresReconciliation)
+        assertEquals(9_999L, afterAck?.reconciledAt)
+
+        // Once reconciled, subsequent begin() prunes it cleanly under MAX_RUN_FILES.
+        store.transition("run-trigger-1", RunPhase.COMPLETED)
+        store.begin(RunSpec("run-trigger-2", "two"))
+        assertNull(FileRunStore(root).snapshot("run-crash-old"))
+    }
+
+    @Test
+    fun `acknowledgeReconciliation quarantines unreadable run file instead of losing evidence`() {
+        val root = runs()
+        val store = FileRunStore(root)
+        val badPath = root.resolve("run-corrupt.properties")
+        Files.writeString(badPath, "phase=TELEPORTED\n")
+
+        assertTrue(store.acknowledgeReconciliation("run-corrupt", at = 12_345L))
+        assertEquals(false, Files.exists(badPath))
+        assertTrue(Files.exists(root.resolve("run-corrupt.properties.corrupt.12345")))
+    }
+
+    @Test
+    fun `reads legacy v1 properties missing schemaVersion createdAt and eventsJson`() {
+        val root = runs()
+        writeRaw(root, "run-v1", phase = RunPhase.COMPLETED, updatedAt = 4_200L)
+
+        val snap = FileRunStore(root).snapshot("run-v1")
+        assertNotNull(snap)
+        assertEquals(4_200L, snap!!.createdAt)
+        assertEquals(4_200L, snap.updatedAt)
+        assertTrue(snap.events.isEmpty())
+        assertNull(snap.reconciledAt)
+    }
+
+    @Test
+    fun `begin preserves createdAt across later transitions`() {
+        val root = runs()
+        val store = FileRunStore(root)
+        store.begin(RunSpec("run-times", "time check"))
+        val initial = store.snapshot("run-times")!!
+        Thread.sleep(5L)
+        store.transition("run-times", RunPhase.COMPLETED, "done")
+        val finished = FileRunStore(root).snapshot("run-times")!!
+
+        assertEquals(initial.createdAt, finished.createdAt)
+        assertTrue(finished.updatedAt >= initial.createdAt)
+    }
 }

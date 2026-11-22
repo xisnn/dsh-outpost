@@ -641,6 +641,24 @@ export function classifyAgentFailure(input: AgentFailureInput): AgentRecoveryPla
   }
 
   // 12. Runtime & fallback errors
+  if (/STORAGE_DOWNGRADE_BLOCKED/i.test(combined)) {
+    return finalize({
+      category: 'runtime',
+      tone: 'danger',
+      title: '本机存储版本高于当前应用',
+      hint: '磁盘上的任务历史、对话或记忆来自更新版本。为防止数据损坏，已进入只读保护状态；请更新应用后再写入。',
+      actions: [{ id: 'refresh_snapshot', label: '刷新状态', emphasis: 'primary' }],
+    });
+  }
+  if (/RUN_ACTIVE/i.test(combined)) {
+    return finalize({
+      category: 'runtime',
+      tone: 'warning',
+      title: '任务仍在执行中',
+      hint: '为避免多会话上下文串线，请等待当前任务完成或先点击停止后，再切换、清空或删除对话。',
+      actions: [{ id: 'refresh_snapshot', label: '刷新状态', emphasis: 'primary' }],
+    });
+  }
   if (/QUEUE_FULL/i.test(combined)) {
     return finalize({
       category: 'runtime',

@@ -45,4 +45,18 @@ object RunRecovery {
         }
         return recovered.maxByOrNull { it.updatedAt }
     }
+
+    /**
+     * Returns the newest terminal run whose crash/corrupt state still owes the
+     * user an acknowledgement across restarts ([requiresReconciliation] == true
+     * and [RunSnapshot.reconciledAt] == null).
+     */
+    fun pendingReconciliation(store: RunStore): RunSnapshot? =
+        store.list()
+            .filter {
+                it.phase in FileRunStore.TERMINAL_PHASES &&
+                    it.requiresReconciliation &&
+                    it.reconciledAt == null
+            }
+            .maxByOrNull { it.updatedAt }
 }

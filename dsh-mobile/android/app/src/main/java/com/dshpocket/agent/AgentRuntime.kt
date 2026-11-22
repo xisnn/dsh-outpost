@@ -23,11 +23,13 @@ import com.dshpocket.agent.core.ModelReply
 import com.dshpocket.agent.core.ModelRequest
 import com.dshpocket.agent.core.RunControl
 import com.dshpocket.agent.core.RunDeadline
+import com.dshpocket.agent.core.RunEventRecord
 import com.dshpocket.agent.core.RunObserver
 import com.dshpocket.agent.core.RunPhase
 import com.dshpocket.agent.core.RunRecovery
 import com.dshpocket.agent.core.RunSnapshot
 import com.dshpocket.agent.core.RunSpec
+import com.dshpocket.agent.core.StorageMigrator
 import com.dshpocket.agent.core.StreamingModelClient
 import com.dshpocket.agent.core.ToolCall
 import com.dshpocket.agent.core.ToolOutput
@@ -70,12 +72,19 @@ class AgentRuntime private constructor(context: Context) {
     }
 
     private val app = context.applicationContext
+    // Stop-the-world schema check & v1 -> v2 migration BEFORE stores or recovery run.
+    private val migrationReport: StorageMigrator.MigrationReport =
+        StorageMigrator.migrateIfNeeded(app.filesDir.toPath())
     private val workspace = Workspace(File(app.filesDir, "agent-workspace").toPath())
-    private val runs = FileRunStore(File(app.filesDir, "agent-runs").toPath())
+    private val runs = FileRunStore(File(app.filesDir, StorageMigrator.RUNS_DIR).toPath())
     private val memory = AgentMemoryStore(app)
     private val thread = AgentThreadStore(app)
     private val queue = ArrayDeque<QueuedTask>()
-    private var recovery: RunSnapshot? = RunRecovery.recover(runs)
+    private var recovery: RunSnapshot? = if (migrationReport.status == StorageMigrator.MigrationStatus.DOWNGRADE_BLOCKED) {
+        null
+    } else {
+        RunRecovery.recover(runs) ?: RunRecovery.pendingReconciliation(runs)
+    }
     private val worker = Executors.newSingleThreadExecutor()
     private val main = Handler(Looper.getMainLooper())
     private val lock = ReentrantLock()
@@ -238,7 +247,11 @@ class AgentRuntime private constructor(context: Context) {
             PhoneBridge.hasBackgroundDisplay() ||
             PhoneBridge.runUsesBackground()
 
+    fun isStorageDowngradeBlocked(): Boolean =
+        migrationReport.status == StorageMigrator.MigrationStatus.DOWNGRADE_BLOCKED
+
     fun startDemo(): JSONObject {
+        if (isStorageDowngradeBlocked()) return error("STORAGE_DOWNGRADE_BLOCKED")
         val demoGoal = "P6 demo: read input and write output"
         val backgroundExpected = expectedBackground()
         val id = beginRun(demoGoal) ?: return snapshot()
@@ -270,6 +283,7 @@ class AgentRuntime private constructor(context: Context) {
      * provider. The API key stays in the native Keystore-backed store.
      */
     fun startCloud(goal: String): JSONObject {
+        if (isStorageDowngradeBlocked()) return error("STORAGE_DOWNGRADE_BLOCKED")
         if (goal.isBlank()) return error("EMPTY_GOAL")
         val config = AgentSettingsStore(app).modelConfig() ?: return error("MODEL_NOT_CONFIGURED")
         // Read the preference and the active display outside the lock; the
@@ -357,8 +371,9 @@ class AgentRuntime private constructor(context: Context) {
         runStartedAt = System.currentTimeMillis()
         activeModel = trackedModel
         OutpostAccessibilityService.instance?.cancelRequested = false
+        val targetSessionId = if (recordThread) thread.activeSessionId() else null
         val prior = if (recordThread) thread.priorMessages() else emptyList()
-        if (recordThread) thread.append("user", goal)
+        if (recordThread) thread.appendToSession(targetSessionId, "user", goal)
         var result: com.dshpocket.agent.core.RunResult? = null
         var interruptedByStop = false
         var interruptedPartial: String? = null
@@ -413,12 +428,12 @@ class AgentRuntime private constructor(context: Context) {
 
                 override fun onToolStarted(call: com.dshpocket.agent.core.ToolCall) {
                     toolLoopRunning = true
-                    appendEvent("tool_started", call.name, null, call.id)
+                    appendEvent(id, "tool_started", call.name, null, call.id)
                 }
 
                 override fun onToolFinished(call: com.dshpocket.agent.core.ToolCall, result: ToolResult) {
                     toolLoopRunning = false
-                    appendEvent("tool_finished", call.name, result.status.name, result.content.take(120))
+                    appendEvent(id, "tool_finished", call.name, result.status.name, result.content.take(120))
                 }
             }
             val runResult = AgentLoop(
@@ -549,7 +564,7 @@ class AgentRuntime private constructor(context: Context) {
                         result?.let { "任务未完成：${it.error ?: it.phase.name.lowercase()}" }
                             ?: "任务失败：${lastError ?: "未知错误"}"
                     }
-                thread.append("assistant", answer)
+                thread.appendToSession(targetSessionId, "assistant", answer)
             }
             var next: QueuedTask? = null
             lock.lock()
@@ -656,29 +671,137 @@ class AgentRuntime private constructor(context: Context) {
         return snapshot()
     }
 
-    private fun appendEvent(type: String, toolName: String?, status: String?, detail: String) {
+    private fun appendEvent(targetRunId: String?, type: String, toolName: String?, status: String?, detail: String) {
+        val record: RunEventRecord
         lock.lock()
         try {
-            if (!active) return
+            if (!active || (targetRunId != null && targetRunId != runId)) return
             eventSequence += 1
+            val seq = eventSequence
+            val now = System.currentTimeMillis()
+            record = RunEventRecord(
+                seq = seq,
+                type = type,
+                toolName = toolName,
+                status = status,
+                detail = detail,
+                at = now,
+            )
             liveEvents += JSONObject()
-                .put("seq", eventSequence)
+                .put("seq", seq)
                 .put("type", type)
                 .put("toolName", toolName ?: JSONObject.NULL)
                 .put("status", status ?: JSONObject.NULL)
                 .put("detail", detail)
-                .put("at", System.currentTimeMillis())
+                .put("at", now)
             while (liveEvents.size > 40) liveEvents.removeAt(0)
+        } finally {
+            lock.unlock()
+        }
+        if (targetRunId != null && !isStorageDowngradeBlocked()) {
+            runCatching { runs.recordEvent(targetRunId, record) }
+        }
+    }
+
+    fun storageStatus(): JSONObject {
+        val allQuarantined = LinkedHashSet<String>().apply {
+            addAll(migrationReport.quarantinedFiles)
+            addAll(memory.quarantinedFiles())
+            addAll(thread.quarantinedFiles())
+        }
+        val warnings = LinkedHashSet<String>().apply {
+            addAll(migrationReport.warnings)
+            if (memory.quarantinedFiles().isNotEmpty()) {
+                add("检测到损坏的记忆文件，已隔离保留副本并恢复可用列表。")
+            }
+            if (thread.quarantinedFiles().isNotEmpty()) {
+                add("检测到损坏的对话记录文件，已隔离保留副本。")
+            }
+        }
+        return JSONObject()
+            .put("schemaVersion", StorageMigrator.CURRENT_SCHEMA_VERSION)
+            .put("fromVersion", migrationReport.fromVersion)
+            .put("toVersion", migrationReport.toVersion)
+            .put("status", migrationReport.status.name.lowercase())
+            .put("downgradeBlocked", isStorageDowngradeBlocked())
+            .put("migratedAt", migrationReport.migratedAt)
+            .put("backupPath", migrationReport.backupPath ?: JSONObject.NULL)
+            .put("quarantinedFiles", JSONArray(allQuarantined.toList()))
+            .put("warnings", JSONArray(warnings.toList()))
+            .put("error", migrationReport.error ?: JSONObject.NULL)
+    }
+
+    fun thread(): JSONArray = thread.json()
+
+    fun sessions(): JSONObject = thread.sessionsStateJson()
+
+    private fun ensureSessionMutable(allowDuringRun: Boolean = false) {
+        if (isStorageDowngradeBlocked()) throw IllegalStateException("STORAGE_DOWNGRADE_BLOCKED")
+        if (allowDuringRun) return
+        lock.lock()
+        try {
+            if (active || queue.isNotEmpty()) throw IllegalStateException("RUN_ACTIVE")
         } finally {
             lock.unlock()
         }
     }
 
-    fun thread(): JSONArray = thread.json()
+    fun createSession(title: String? = null): JSONObject {
+        ensureSessionMutable()
+        return thread.createSession(title)
+    }
+
+    fun switchSession(sessionId: String): JSONObject {
+        ensureSessionMutable()
+        return thread.switchSession(sessionId)
+    }
+
+    fun renameSession(sessionId: String, title: String): JSONObject {
+        ensureSessionMutable(allowDuringRun = true)
+        return thread.renameSession(sessionId, title)
+    }
+
+    fun deleteSession(sessionId: String): JSONObject {
+        ensureSessionMutable()
+        return thread.deleteSession(sessionId)
+    }
 
     fun clearThread(): JSONObject {
+        if (isStorageDowngradeBlocked()) return error("STORAGE_DOWNGRADE_BLOCKED")
+        lock.lock()
+        try {
+            if (active || queue.isNotEmpty()) return error("RUN_ACTIVE")
+        } finally {
+            lock.unlock()
+        }
         thread.clear()
         return snapshot()
+    }
+
+    fun getMemory(): JSONArray = memory.list()
+
+    fun getMemoryBudget(): JSONObject = memory.promptBudget()
+
+    fun saveMemory(id: String?, key: String, value: String): JSONObject {
+        if (isStorageDowngradeBlocked()) throw IllegalStateException("STORAGE_DOWNGRADE_BLOCKED")
+        return memory.save(id, key, value)
+    }
+
+    fun saveMemoryEntry(
+        id: String?,
+        key: String,
+        value: String,
+        kind: String,
+        pinned: Boolean,
+        enabled: Boolean,
+    ): JSONObject {
+        if (isStorageDowngradeBlocked()) throw IllegalStateException("STORAGE_DOWNGRADE_BLOCKED")
+        return memory.save(id, key, value, kind, pinned, enabled)
+    }
+
+    fun deleteMemory(id: String): Boolean {
+        if (isStorageDowngradeBlocked()) throw IllegalStateException("STORAGE_DOWNGRADE_BLOCKED")
+        return memory.delete(id)
     }
 
     fun history(): JSONArray {
@@ -689,27 +812,89 @@ class AgentRuntime private constructor(context: Context) {
         }
         return JSONArray().apply {
             for (run in rows) {
+                val eventsArray = JSONArray().apply {
+                    for (evt in run.events) {
+                        put(
+                            JSONObject()
+                                .put("seq", evt.seq)
+                                .put("type", evt.type)
+                                .put("toolName", evt.toolName ?: JSONObject.NULL)
+                                .put("status", evt.status ?: JSONObject.NULL)
+                                .put("detail", evt.detail)
+                                .put("at", evt.at),
+                        )
+                    }
+                }
                 put(
                     JSONObject()
                         .put("runId", run.id)
                         .put("goal", run.goal ?: JSONObject.NULL)
                         .put("phase", run.phase.name.lowercase())
+                        .put("step", run.step)
                         .put("reason", run.reason ?: JSONObject.NULL)
                         .put("resultText", run.resultText ?: JSONObject.NULL)
                         .put("requiresReconciliation", run.requiresReconciliation)
+                        .put("reconciledAt", run.reconciledAt ?: JSONObject.NULL)
                         .put("lastToolName", run.lastToolName ?: JSONObject.NULL)
-                        .put("updatedAt", run.updatedAt),
+                        .put("lastToolStatus", run.lastToolStatus ?: JSONObject.NULL)
+                        .put("createdAt", run.createdAt)
+                        .put("updatedAt", run.updatedAt)
+                        .put("events", eventsArray),
                 )
             }
         }
     }
 
     fun dismissRecovery(): JSONObject {
+        val current: RunSnapshot?
         lock.lock()
         try {
+            current = recovery
             recovery = null
         } finally {
             lock.unlock()
+        }
+        if (current != null && current.requiresReconciliation && !isStorageDowngradeBlocked()) {
+            runCatching { runs.acknowledgeReconciliation(current.id) }
+        }
+        if (!isStorageDowngradeBlocked()) {
+            val nextPending = runCatching { RunRecovery.pendingReconciliation(runs) }.getOrNull()
+                ?.takeIf { it.id != current?.id }
+            if (nextPending != null) {
+                lock.lock()
+                try {
+                    if (recovery == null) recovery = nextPending
+                } finally {
+                    lock.unlock()
+                }
+            }
+        }
+        return snapshot()
+    }
+
+    fun acknowledgeRun(runId: String): JSONObject {
+        if (isStorageDowngradeBlocked()) return error("STORAGE_DOWNGRADE_BLOCKED")
+        if (runId.isBlank()) return error("INVALID_RUN_ID")
+        runCatching { runs.acknowledgeReconciliation(runId) }
+        var dismissedId: String? = null
+        lock.lock()
+        try {
+            if (recovery?.id == runId) {
+                dismissedId = recovery?.id
+                recovery = null
+            }
+        } finally {
+            lock.unlock()
+        }
+        val nextPending = runCatching { RunRecovery.pendingReconciliation(runs) }.getOrNull()
+            ?.takeIf { it.id != dismissedId && it.id != runId }
+        if (nextPending != null) {
+            lock.lock()
+            try {
+                if (recovery == null) recovery = nextPending
+            } finally {
+                lock.unlock()
+            }
         }
         return snapshot()
     }
@@ -877,8 +1062,10 @@ class AgentRuntime private constructor(context: Context) {
         var expired = false
         var update: StreamUpdate? = null
         val result: ApprovalDecision
+        val activeId: String?
         lock.lock()
         try {
+            activeId = runId
             pending = request
             decision = null
             // Bind the approval to the node the user sees NOW, not just to the
@@ -927,7 +1114,7 @@ class AgentRuntime private constructor(context: Context) {
             lock.unlock()
         }
         if (expired) {
-            appendEvent("approval_expired", request.call.name, "DENIED", "approval expired after TTL")
+            appendEvent(activeId, "approval_expired", request.call.name, "DENIED", "approval expired after TTL")
         }
         emitStream(update)
         return result

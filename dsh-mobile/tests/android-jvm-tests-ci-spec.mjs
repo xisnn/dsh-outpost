@@ -55,7 +55,7 @@ const read = (p) => readFileSync(path.join(repo, p), 'utf8');
 const androidDir = path.join(repo, 'dsh-mobile', 'android');
 const testRoot = path.join(androidDir, 'agent-core', 'src', 'test', 'kotlin', 'com', 'dshpocket', 'agent', 'core');
 
-/** 已知的十四个测试类与它们应有的 @Test 数量（gradlew 实跑核实过 142/0） */
+/** 已知的十五个测试类与它们应有的 @Test 数量（gradlew 实跑核实过 158/0） */
 const EXPECTED = {
   // C2 安全门：ActionSafetyPolicy 12 条（支付硬禁/三层动作策略/ActionExecutor 闭环）；
   // AgentLoopTest +2（在途取消写 INTERRUPTED / hard-deny 不问批）；
@@ -65,8 +65,10 @@ const EXPECTED = {
   // CloudModelClientTest 新增 5 条 Responses/Anthropic/Gemini 流式增量与失败闭环契约（13 -> 18）。
   'AgentLoopTest.kt': 18,
   'CloudModelClientTest.kt': 18,
-  'FileRunStoreTest.kt': 7,
-  'RunRecoveryTest.kt': 4,
+  // C3 记忆与持久化深度：StorageMigratorTest 8 条 + FileRunStoreTest 12 条 + RunRecoveryTest 7 条。
+  'FileRunStoreTest.kt': 12,
+  'RunRecoveryTest.kt': 7,
+  'StorageMigratorTest.kt': 8,
   // P4-0.1 P0-3 设备控制安全：屏幕生成绑定 + phone_open 预发射拒绝。
   // P4-0.2 新增 4 个 isStaleScreen 安全方向负向测试（10 -> 14）。
   'ScreenGuardTest.kt': 19,

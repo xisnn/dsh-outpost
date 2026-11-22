@@ -63,6 +63,10 @@ class AgentModule(private val react: ReactApplicationContext) : ReactContextBase
     @ReactMethod
     fun startDemo(promise: Promise) {
         if (!supported()) { promise.reject("AGENT_UNSUPPORTED", "AGENT_UNSUPPORTED"); return }
+        if (AgentRuntime.get(react).isStorageDowngradeBlocked()) {
+            promise.reject("STORAGE_DOWNGRADE_BLOCKED", "STORAGE_DOWNGRADE_BLOCKED")
+            return
+        }
         try {
             val intent = Intent(react, AgentService::class.java).setAction(AgentService.ACTION_RUN)
             if (Build.VERSION.SDK_INT >= 26) react.startForegroundService(intent) else react.startService(intent)
@@ -76,6 +80,10 @@ class AgentModule(private val react: ReactApplicationContext) : ReactContextBase
     fun startCloud(goal: String, promise: Promise) {
         if (!supported()) { promise.reject("AGENT_UNSUPPORTED", "AGENT_UNSUPPORTED"); return }
         if (goal.isBlank()) { promise.reject("EMPTY_GOAL", "EMPTY_GOAL"); return }
+        if (AgentRuntime.get(react).isStorageDowngradeBlocked()) {
+            promise.reject("STORAGE_DOWNGRADE_BLOCKED", "STORAGE_DOWNGRADE_BLOCKED")
+            return
+        }
         try {
             // Validate before entering the foreground: a missing/broken key
             // must not leave an idle foreground service behind.
@@ -146,10 +154,86 @@ class AgentModule(private val react: ReactApplicationContext) : ReactContextBase
     }
 
     @ReactMethod
+    fun storageStatus(promise: Promise) {
+        if (!supported()) {
+            promise.resolve(
+                JSONObject()
+                    .put("schemaVersion", 2)
+                    .put("fromVersion", 2)
+                    .put("toVersion", 2)
+                    .put("status", "up_to_date")
+                    .put("downgradeBlocked", false)
+                    .put("quarantinedFiles", org.json.JSONArray())
+                    .put("warnings", org.json.JSONArray())
+                    .toString(),
+            )
+            return
+        }
+        try {
+            promise.resolve(AgentRuntime.get(react).storageStatus().toString())
+        } catch (error: Exception) {
+            fail(promise, error)
+        }
+    }
+
+    @ReactMethod
     fun thread(promise: Promise) {
         if (!supported()) { promise.resolve("[]"); return }
         try {
             promise.resolve(AgentRuntime.get(react).thread().toString())
+        } catch (error: Exception) {
+            fail(promise, error)
+        }
+    }
+
+    @ReactMethod
+    fun sessions(promise: Promise) {
+        if (!supported()) {
+            promise.resolve("{\"activeSessionId\":\"default\",\"sessions\":[]}")
+            return
+        }
+        try {
+            promise.resolve(AgentRuntime.get(react).sessions().toString())
+        } catch (error: Exception) {
+            fail(promise, error)
+        }
+    }
+
+    @ReactMethod
+    fun createSession(title: String?, promise: Promise) {
+        if (!supported()) { promise.reject("AGENT_UNSUPPORTED", "AGENT_UNSUPPORTED"); return }
+        try {
+            promise.resolve(AgentRuntime.get(react).createSession(title).toString())
+        } catch (error: Exception) {
+            fail(promise, error)
+        }
+    }
+
+    @ReactMethod
+    fun switchSession(sessionId: String, promise: Promise) {
+        if (!supported()) { promise.reject("AGENT_UNSUPPORTED", "AGENT_UNSUPPORTED"); return }
+        try {
+            promise.resolve(AgentRuntime.get(react).switchSession(sessionId).toString())
+        } catch (error: Exception) {
+            fail(promise, error)
+        }
+    }
+
+    @ReactMethod
+    fun renameSession(sessionId: String, title: String, promise: Promise) {
+        if (!supported()) { promise.reject("AGENT_UNSUPPORTED", "AGENT_UNSUPPORTED"); return }
+        try {
+            promise.resolve(AgentRuntime.get(react).renameSession(sessionId, title).toString())
+        } catch (error: Exception) {
+            fail(promise, error)
+        }
+    }
+
+    @ReactMethod
+    fun deleteSession(sessionId: String, promise: Promise) {
+        if (!supported()) { promise.reject("AGENT_UNSUPPORTED", "AGENT_UNSUPPORTED"); return }
+        try {
+            promise.resolve(AgentRuntime.get(react).deleteSession(sessionId).toString())
         } catch (error: Exception) {
             fail(promise, error)
         }
@@ -176,9 +260,28 @@ class AgentModule(private val react: ReactApplicationContext) : ReactContextBase
     }
 
     @ReactMethod
+    fun acknowledgeRun(runId: String, promise: Promise) {
+        if (!supported()) { promise.reject("AGENT_UNSUPPORTED", "AGENT_UNSUPPORTED"); return }
+        try {
+            promise.resolve(AgentRuntime.get(react).acknowledgeRun(runId).toString())
+        } catch (error: Exception) {
+            fail(promise, error)
+        }
+    }
+
+    @ReactMethod
     fun getMemory(promise: Promise) {
         try {
-            promise.resolve(AgentMemoryStore(react).list().toString())
+            promise.resolve(AgentRuntime.get(react).getMemory().toString())
+        } catch (error: Exception) {
+            fail(promise, error)
+        }
+    }
+
+    @ReactMethod
+    fun getMemoryBudget(promise: Promise) {
+        try {
+            promise.resolve(AgentRuntime.get(react).getMemoryBudget().toString())
         } catch (error: Exception) {
             fail(promise, error)
         }
@@ -187,7 +290,24 @@ class AgentModule(private val react: ReactApplicationContext) : ReactContextBase
     @ReactMethod
     fun saveMemory(id: String?, key: String, value: String, promise: Promise) {
         try {
-            promise.resolve(AgentMemoryStore(react).save(id, key, value).toString())
+            promise.resolve(AgentRuntime.get(react).saveMemory(id, key, value).toString())
+        } catch (error: Exception) {
+            fail(promise, error)
+        }
+    }
+
+    @ReactMethod
+    fun saveMemoryEntry(
+        id: String?,
+        key: String,
+        value: String,
+        kind: String,
+        pinned: Boolean,
+        enabled: Boolean,
+        promise: Promise,
+    ) {
+        try {
+            promise.resolve(AgentRuntime.get(react).saveMemoryEntry(id, key, value, kind, pinned, enabled).toString())
         } catch (error: Exception) {
             fail(promise, error)
         }
@@ -196,7 +316,7 @@ class AgentModule(private val react: ReactApplicationContext) : ReactContextBase
     @ReactMethod
     fun deleteMemory(id: String, promise: Promise) {
         try {
-            promise.resolve(AgentMemoryStore(react).delete(id))
+            promise.resolve(AgentRuntime.get(react).deleteMemory(id))
         } catch (error: Exception) {
             fail(promise, error)
         }
