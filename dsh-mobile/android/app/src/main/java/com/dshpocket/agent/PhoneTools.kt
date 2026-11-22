@@ -85,6 +85,22 @@ private fun keyOutput(prefix: String, displayId: Int): ToolOutput {
     return ToolOutput(ToolStatus.ERROR, "$prefix\n${screen.error}")
 }
 
+private fun sleepCancellable(totalMs: Long): Boolean {
+    var remaining = totalMs
+    while (remaining > 0L) {
+        if (PhoneBridge.isCancelled()) return false
+        val slice = remaining.coerceAtMost(50L)
+        try {
+            Thread.sleep(slice)
+        } catch (_: InterruptedException) {
+            Thread.currentThread().interrupt()
+            return false
+        }
+        remaining -= slice
+    }
+    return !PhoneBridge.isCancelled()
+}
+
 private fun stringArgument(call: ToolCall, name: String): String? =
     (call.arguments[name] as? String)?.takeIf { it.isNotBlank() }
 
@@ -134,7 +150,7 @@ private class PhoneOpenTool(
     override val risk = ToolRisk.PHONE
     override val spec = ToolSpec(
         name = "phone_open",
-        description = "Open a launchable app by package name. Requires one-time user approval.",
+        description = "Open a launchable app by package name. Non-sensitive apps run autonomously; system/security settings require approval; payment apps are hard-denied.",
         parameters = mapOf(
             "type" to "object",
             "properties" to mapOf("package" to mapOf("type" to "string")),
@@ -180,7 +196,7 @@ private class PhoneOpenTool(
         val result = PhoneBridge.openApp(context, packageName)
         if (result != "OK") return ToolOutput(ToolStatus.ERROR, result)
         if (PhoneBridge.isSensitivePackage(packageName)) {
-            Thread.sleep(500)
+            if (!sleepCancellable(500)) return ToolOutput(ToolStatus.ERROR, "CANCELLED")
             val resumed = handoff.await("打开的是系统或安全设置，需要你接管手机")
             return ToolOutput(
                 ToolStatus.DENIED,
@@ -215,7 +231,7 @@ private class PhoneTapTool(private val handoff: HandoffGate) : AgentTool {
     override val risk = ToolRisk.PHONE
     override val spec = ToolSpec(
         name = "phone_tap",
-        description = "Tap an element id from phone_screen. Only element ids are accepted, never coordinates. Requires one-time approval.",
+        description = "Tap an element id from phone_screen. Only element ids are accepted, never coordinates. Requires user approval; payment actions are hard-denied.",
         parameters = mapOf(
             "type" to "object",
             "properties" to mapOf("element" to mapOf("type" to "string")),
@@ -230,7 +246,7 @@ private class PhoneTapTool(private val handoff: HandoffGate) : AgentTool {
         val result = OutpostAccessibilityService.instance?.tap(element, PhoneBridge.currentDisplayId())
             ?: return ToolOutput(ToolStatus.ERROR, "ACCESSIBILITY_NOT_CONNECTED")
         if (result != "OK" && result != "OK_GESTURE") return ToolOutput(ToolStatus.ERROR, result)
-        Thread.sleep(350)
+        if (!sleepCancellable(350)) return ToolOutput(ToolStatus.ERROR, "CANCELLED")
         return screenOutput("TAPPED $element ($result)")
     }
 }
@@ -239,7 +255,7 @@ private class PhoneTypeTool(private val handoff: HandoffGate) : AgentTool {
     override val risk = ToolRisk.PHONE
     override val spec = ToolSpec(
         name = "phone_type",
-        description = "Set text in an editable element id (or the focused editable field). Requires one-time approval.",
+        description = "Set text in an editable element id (or the focused editable field). Requires user approval; payment fields/screens are hard-denied.",
         parameters = mapOf(
             "type" to "object",
             "properties" to mapOf(
@@ -265,7 +281,7 @@ private class PhoneTypeTool(private val handoff: HandoffGate) : AgentTool {
             )
         }
         if (result != "OK") return ToolOutput(ToolStatus.ERROR, result)
-        Thread.sleep(250)
+        if (!sleepCancellable(250)) return ToolOutput(ToolStatus.ERROR, "CANCELLED")
         return screenOutput("TYPED${element?.let { " $it" } ?: ""}")
     }
 }
@@ -274,7 +290,7 @@ private class PhoneScrollTool(private val handoff: HandoffGate) : AgentTool {
     override val risk = ToolRisk.PHONE
     override val spec = ToolSpec(
         name = "phone_scroll",
-        description = "Scroll the first scrollable element: up/down/left/right. Requires one-time approval.",
+        description = "Scroll the first scrollable element (up/down/left/right) for browsing/reading autonomously.",
         parameters = mapOf(
             "type" to "object",
             "properties" to mapOf(
@@ -291,7 +307,7 @@ private class PhoneScrollTool(private val handoff: HandoffGate) : AgentTool {
         val result = OutpostAccessibilityService.instance?.scroll(direction, PhoneBridge.currentDisplayId())
             ?: return ToolOutput(ToolStatus.ERROR, "ACCESSIBILITY_NOT_CONNECTED")
         if (result != "OK") return ToolOutput(ToolStatus.ERROR, result)
-        Thread.sleep(300)
+        if (!sleepCancellable(300)) return ToolOutput(ToolStatus.ERROR, "CANCELLED")
         return screenOutput("SCROLLED $direction")
     }
 }
@@ -300,7 +316,7 @@ private class PhoneKeyTool(private val handoff: HandoffGate) : AgentTool {
     override val risk = ToolRisk.PHONE
     override val spec = ToolSpec(
         name = "phone_key",
-        description = "Perform a global key: back/home/recents. No arbitrary keycodes. Requires one-time approval.",
+        description = "Perform a navigation key (back/home/recents) autonomously without arbitrary keycodes.",
         parameters = mapOf(
             "type" to "object",
             "properties" to mapOf(
@@ -326,7 +342,7 @@ private class PhoneKeyTool(private val handoff: HandoffGate) : AgentTool {
             return ToolOutput(ToolStatus.OK, "KEY $key: display empty after injection")
         }
         if (result != "OK") return ToolOutput(ToolStatus.ERROR, result)
-        Thread.sleep(500)
+        if (!sleepCancellable(500)) return ToolOutput(ToolStatus.ERROR, "CANCELLED")
         return keyOutput("KEY $key", displayId)
     }
 }

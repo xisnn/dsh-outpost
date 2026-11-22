@@ -93,7 +93,7 @@ class AgentService : Service() {
      */
     override fun onTimeout(startId: Int, fgsType: Int) {
         updateNotification("系统超时，任务已优雅停止")
-        AgentRuntime.get(this).stop()
+        AgentRuntime.get(this).stop("fgs-system-timeout")
     }
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {

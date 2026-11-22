@@ -67,31 +67,59 @@ class ActionExecutor(
      * the background display disappeared while the approval was pending.
      */
     private val preExecute: ((AgentTool, ToolCall) -> ToolOutput?)? = null,
+    /**
+     * Optional C2 three-tier safety policy (hard-deny / require-approval / autonomous).
+     * When omitted, non-READ tools default to requiring approval.
+     */
+    private val safetyPolicy: ((AgentTool, ToolCall) -> ActionSafetyPolicy.Verdict)? = null,
 ) {
+    fun evaluateSafety(tool: AgentTool, call: ToolCall): ActionSafetyPolicy.Verdict {
+        if (safetyPolicy != null) return safetyPolicy.invoke(tool, call)
+        return if (tool.risk == ToolRisk.READ) {
+            ActionSafetyPolicy.Verdict(ActionSafetyPolicy.Tier.AUTONOMOUS, "READ_AUTONOMOUS", "read-only tool")
+        } else {
+            ActionSafetyPolicy.Verdict(
+                ActionSafetyPolicy.Tier.REQUIRE_APPROVAL,
+                "DEFAULT_APPROVAL",
+                "tool ${call.name} requires approval",
+            )
+        }
+    }
+
+    fun requiresApproval(tool: AgentTool, call: ToolCall): Boolean =
+        evaluateSafety(tool, call).tier == ActionSafetyPolicy.Tier.REQUIRE_APPROVAL
+
     fun execute(runId: String, call: ToolCall, onExecuting: (() -> Unit)? = null): ToolResult {
         val tool = registry.find(call.name)
             ?: return ToolResult(call.id, call.name, ToolStatus.ERROR, "unknown tool: ${call.name}", digestArguments(call.arguments))
         val digest = digestArguments(call.arguments)
         val pre = preApproval?.invoke(tool, call)
         if (pre != null) return ToolResult(call.id, call.name, pre.status, pre.content, digest)
-        if (tool.risk != ToolRisk.READ) {
-            val decision = try {
-                approvals.decide(
-                    ApprovalRequest(
-                        runId = runId,
-                        call = call,
-                        tool = tool.spec,
-                        risk = tool.risk,
-                        digest = digest,
-                        reason = "tool ${call.name} requires approval",
-                    ),
-                )
-            } catch (error: Exception) {
-                return ToolResult(call.id, call.name, ToolStatus.ERROR, "approval unavailable: ${error.message}", digest)
+        val verdict = evaluateSafety(tool, call)
+        when (verdict.tier) {
+            ActionSafetyPolicy.Tier.HARD_DENY -> {
+                return ToolResult(call.id, call.name, ToolStatus.DENIED, "${verdict.code}: ${verdict.reason}", digest)
             }
-            if (decision != ApprovalDecision.ALLOW_ONCE) {
-                return ToolResult(call.id, call.name, ToolStatus.DENIED, "approval rejected", digest)
+            ActionSafetyPolicy.Tier.REQUIRE_APPROVAL -> {
+                val decision = try {
+                    approvals.decide(
+                        ApprovalRequest(
+                            runId = runId,
+                            call = call,
+                            tool = tool.spec,
+                            risk = tool.risk,
+                            digest = digest,
+                            reason = verdict.reason,
+                        ),
+                    )
+                } catch (error: Exception) {
+                    return ToolResult(call.id, call.name, ToolStatus.ERROR, "approval unavailable: ${error.message}", digest)
+                }
+                if (decision != ApprovalDecision.ALLOW_ONCE) {
+                    return ToolResult(call.id, call.name, ToolStatus.DENIED, "approval rejected", digest)
+                }
             }
+            ActionSafetyPolicy.Tier.AUTONOMOUS -> Unit
         }
         val veto = preExecute?.invoke(tool, call)
         if (veto != null) {

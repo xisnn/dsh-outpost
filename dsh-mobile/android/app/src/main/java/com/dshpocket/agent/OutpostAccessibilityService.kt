@@ -492,16 +492,22 @@ class OutpostAccessibilityService : AccessibilityService() {
         }
     }
 
+    fun snapshotSummary(displayId: Int = Display.DEFAULT_DISPLAY): PhoneSnapshot? =
+        runCatching { snapshot(displayId) }.getOrNull()
+
+    fun elementInfo(elementId: String, displayId: Int = Display.DEFAULT_DISPLAY): PhoneElement? =
+        snapshotSummary(displayId)?.elements?.firstOrNull { it.id == elementId }
+
     /**
      * P6-next candidate 3: identity of the node an ordinal resolves to RIGHT NOW
      * on a display, using exactly the fields the approval card rendered. Null
      * when the screen/element cannot be read (caller must fail closed).
      */
     fun nodeIdentity(elementId: String, displayId: Int): String? = runCatching {
-        val s = snapshot(displayId)
-        val e = s.elements.firstOrNull { it.id == elementId } ?: return null
+        val e = elementInfo(elementId, displayId) ?: return null
+        val pkg = snapshotSummary(displayId)?.packageName
         ApprovalNodeBinding.identity(
-            s.packageName,
+            pkg,
             ScreenGuard.ElementSig(
                 id = e.id,
                 text = e.text,

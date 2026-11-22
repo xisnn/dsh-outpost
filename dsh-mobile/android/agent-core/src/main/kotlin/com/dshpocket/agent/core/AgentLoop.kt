@@ -35,8 +35,12 @@ class AgentLoop(
                     model.complete(request)
                 }
             } catch (error: Exception) {
+                if (control.isStopped()) return interrupted(spec, messages, toolResults)
                 store.transition(spec.id, RunPhase.FAILED, "model-error")
                 return RunResult(spec.id, RunPhase.FAILED, null, "model-error: ${error.message}", messages.toList(), toolResults.toList())
+            }
+            if (reply is ModelReply.Failure && control.isStopped()) {
+                return interrupted(spec, messages, toolResults)
             }
             when (reply) {
                 is ModelReply.Text -> {
@@ -62,10 +66,9 @@ class AgentLoop(
                         val tool = executor.registry.find(call.name)
                         val digest = digestArguments(call.arguments)
                         val mayHaveSideEffect = tool != null && tool.risk != ToolRisk.READ
-                        if (mayHaveSideEffect) {
-                            store.toolAwaitingApproval(spec.id, call.id, call.name, digest, true)
-                        } else {
-                            store.toolStarted(spec.id, call.id, call.name, digest, false)
+                        val needsApproval = tool != null && executor.requiresApproval(tool, call)
+                        if (needsApproval) {
+                            store.toolAwaitingApproval(spec.id, call.id, call.name, digest, mayHaveSideEffect)
                         }
                         observer.onToolStarted(call)
                         val result = executor.execute(spec.id, call) {
@@ -131,12 +134,13 @@ class AgentLoop(
         messages: List<AgentMessage>,
         toolResults: List<ToolResult>,
     ): RunResult {
-        store.transition(spec.id, RunPhase.INTERRUPTED, "stopped-by-user")
+        val reason = control.stopReason().ifBlank { "stopped-by-user" }
+        store.transition(spec.id, RunPhase.INTERRUPTED, reason)
         return RunResult(
             spec.id,
             RunPhase.INTERRUPTED,
             null,
-            "stopped-by-user",
+            reason,
             messages,
             toolResults,
         )

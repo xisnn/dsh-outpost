@@ -18,6 +18,11 @@ import {
   type AgentSnapshot,
   type PhoneCapabilities,
 } from '../core/agent';
+import {
+  formatApprovalCountdown,
+  isApprovalAllowDisabled,
+  isApprovalExpired,
+} from '../core/agentApproval';
 
 const PHASE_TEXT: Record<AgentSnapshot['phase'], string> = {
   idle: '未运行',
@@ -46,6 +51,7 @@ export function AgentDemoScreen({ active = true }: { active?: boolean }) {
   const [error, setError] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
   const [cloudBusy, setCloudBusy] = useState(false);
+  const [approvalNow, setApprovalNow] = useState(() => Date.now());
   // A snapshot read error clears on the next successful read; an action error
   // has to survive the 500ms poll, or the user sees it flash and vanish.
   const errorSource = useRef<'read' | 'action' | null>(null);
@@ -229,9 +235,19 @@ export function AgentDemoScreen({ active = true }: { active?: boolean }) {
   const running = phase === 'queued' || phase === 'preparing' || phase === 'running' || phase === 'waiting_user';
   const pending = snapshot?.pendingApproval ?? null;
   const allowBlocked = isApprovalAllowBlocked(pending);
+  const approvalExpired = isApprovalExpired(pending, approvalNow);
+  const allowDisabled = isApprovalAllowDisabled(pending, approvalNow);
+  const approvalCountdown = formatApprovalCountdown(pending, approvalNow);
   const pendingHandoff = snapshot?.pendingHandoff ?? null;
   const recovery = snapshot?.recovery ?? null;
   const paused = snapshot?.paused ?? false;
+
+  useEffect(() => {
+    if (!active || !pending?.expiresAt) return;
+    setApprovalNow(Date.now());
+    const timer = setInterval(() => setApprovalNow(Date.now()), 1000);
+    return () => clearInterval(timer);
+  }, [active, pending?.callId, pending?.digest, pending?.expiresAt]);
 
   return (
     <View style={styles.root}>
@@ -426,7 +442,10 @@ export function AgentDemoScreen({ active = true }: { active?: boolean }) {
         {pending ? (
           <View style={[styles.card, styles.approvalCard]}>
             <Text style={styles.title}>本机审批 · {pending.toolName}</Text>
-            <Text style={styles.meta}>参数摘要 {pending.digest.slice(0, 12)}…</Text>
+            <Text style={styles.meta}>
+              参数摘要 {pending.digest.slice(0, 12)}…{approvalCountdown ? ` · ${approvalCountdown}` : ''}
+            </Text>
+            {pending.reason ? <Text style={styles.hint}>{pending.reason}</Text> : null}
             {Object.entries(pending.arguments).map(([key, value]) => (
               <View key={key} style={styles.argRow}>
                 <Text style={styles.argKey}>{key}</Text>
@@ -435,6 +454,15 @@ export function AgentDemoScreen({ active = true }: { active?: boolean }) {
                 </Text>
               </View>
             ))}
+            {approvalExpired ? (
+              <Text
+                style={styles.approvalWarning}
+                accessibilityRole="alert"
+                accessibilityLiveRegion="polite"
+              >
+                审批已超时失效，本次操作不会执行。
+              </Text>
+            ) : null}
             {allowBlocked ? (
               <Text
                 style={styles.approvalWarning}
@@ -447,10 +475,16 @@ export function AgentDemoScreen({ active = true }: { active?: boolean }) {
             <View style={styles.actions}>
               <Pressable
                 onPress={() => void decide(true)}
-                disabled={busy || allowBlocked}
+                disabled={busy || allowDisabled}
                 accessibilityRole="button"
-                accessibilityLabel={allowBlocked ? '允许一次（后台屏已断开）' : '允许一次'}
-                style={[styles.primaryBtn, busy || allowBlocked ? styles.muted : null]}
+                accessibilityLabel={
+                  approvalExpired
+                    ? '允许一次（已超时失效）'
+                    : allowBlocked
+                      ? '允许一次（后台屏已断开）'
+                      : '允许一次'
+                }
+                style={[styles.primaryBtn, busy || allowDisabled ? styles.muted : null]}
               >
                 <Text style={styles.primaryText}>允许一次</Text>
               </Pressable>

@@ -34,4 +34,16 @@ class RunDeadlineTest {
     @Test fun nonPositiveLimitIsUnverifiable() {
         assertEquals(RunDeadline.Deadline.UNVERIFIABLE, RunDeadline.decision(1_000L, 2_000L, 0L))
     }
+
+    @Test fun remainingMsReturnsPositiveTimeLeftWithinLimit() {
+        assertEquals(RunDeadline.DEFAULT_LIMIT_MS, RunDeadline.remainingMs(1_000L, 1_000L))
+        assertEquals(1L, RunDeadline.remainingMs(1_000L, 1_000L + RunDeadline.DEFAULT_LIMIT_MS - 1))
+    }
+
+    @Test fun remainingMsReturnsZeroWhenExceededOrUnverifiable() {
+        assertEquals(0L, RunDeadline.remainingMs(1_000L, 1_000L + RunDeadline.DEFAULT_LIMIT_MS))
+        assertEquals(0L, RunDeadline.remainingMs(null, 2_000L))
+        assertEquals(0L, RunDeadline.remainingMs(5_000L, 4_000L))
+        assertEquals(0L, RunDeadline.remainingMs(1_000L, 2_000L, 0L))
+    }
 }

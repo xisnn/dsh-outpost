@@ -7,4 +7,6 @@ package com.dshpocket.agent.core
  */
 fun interface RunControl {
     fun beforeStep(): Boolean
+    fun isStopped(): Boolean = false
+    fun stopReason(): String = "stopped-by-user"
 }

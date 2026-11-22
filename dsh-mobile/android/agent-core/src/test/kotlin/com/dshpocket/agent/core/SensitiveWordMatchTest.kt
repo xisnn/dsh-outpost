@@ -52,4 +52,19 @@ class SensitiveWordMatchTest {
         assertEquals(true, SensitiveWordMatch.anySensitive("your pin here", keywords))
         assertEquals(false, SensitiveWordMatch.anySensitive("shipping address", keywords))
     }
+
+    @Test fun exactWordMatchesStandaloneLatinPaymentVerbs() {
+        assertEquals(true, SensitiveWordMatch.matchesExactWord("Pay", "pay"))
+        assertEquals(true, SensitiveWordMatch.matchesExactWord("Pay $9.99", "pay"))
+        assertEquals(true, SensitiveWordMatch.matchesExactWord("Click to pay!", "pay"))
+        assertEquals(true, SensitiveWordMatch.matchesExactWord("Buy now", "buy"))
+    }
+
+    @Test fun exactWordRejectsSubstringsInsideLargerLatinWordsWhileKeepingCjkSubstring() {
+        assertEquals(false, SensitiveWordMatch.matchesExactWord("Inspect payload", "pay"))
+        assertEquals(false, SensitiveWordMatch.matchesExactWord("Repayment plan", "pay"))
+        assertEquals(false, SensitiveWordMatch.matchesExactWord("Display", "pay"))
+        assertEquals(false, SensitiveWordMatch.matchesExactWord("Buyers guide", "buy"))
+        assertEquals(true, SensitiveWordMatch.matchesExactWord("立即支付订单", "支付"))
+    }
 }

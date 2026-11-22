@@ -23,4 +23,9 @@ object RunDeadline {
         if (now < startedAt) return Deadline.UNVERIFIABLE
         return if (now - startedAt >= limitMs) Deadline.EXCEEDED else Deadline.WITHIN
     }
+
+    fun remainingMs(startedAt: Long?, now: Long, limitMs: Long = DEFAULT_LIMIT_MS): Long {
+        if (decision(startedAt, now, limitMs) != Deadline.WITHIN) return 0L
+        return (startedAt!! + limitMs) - now
+    }
 }

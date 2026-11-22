@@ -26,6 +26,7 @@ export interface AgentApproval {
   callId: string;
   toolName: string;
   digest: string;
+  expiresAt?: number;
   reason: string;
   arguments: Record<string, unknown>;
   risk: AgentApprovalRisk;

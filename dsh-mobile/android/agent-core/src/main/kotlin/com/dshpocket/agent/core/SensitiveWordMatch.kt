@@ -30,4 +30,25 @@ object SensitiveWordMatch {
 
     fun anySensitive(value: String, keywords: List<String>): Boolean =
         keywords.any { matches(value, it) }
+
+    /**
+     * Exact token match for short Latin keywords (e.g. "pay", "buy") so they
+     * match "Pay", "Pay $9.99", or "Click to pay!" without matching "payload"
+     * or "display". CJK keywords keep substring semantics.
+     */
+    fun matchesExactWord(value: String, keyword: String): Boolean {
+        if (keyword.isEmpty()) return false
+        val v = value.lowercase()
+        val k = keyword.lowercase()
+        if (k.any { it.code > 0x7F }) return v.contains(k)
+        var idx = v.indexOf(k)
+        while (idx >= 0) {
+            val before = if (idx == 0) ' ' else v[idx - 1]
+            val afterIdx = idx + k.length
+            val after = if (afterIdx >= v.length) ' ' else v[afterIdx]
+            if (!before.isLetterOrDigit() && !after.isLetterOrDigit()) return true
+            idx = v.indexOf(k, idx + 1)
+        }
+        return false
+    }
 }

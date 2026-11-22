@@ -22,4 +22,9 @@ object ApprovalTtl {
         if (now < issuedAt) return Ttl.UNVERIFIABLE
         return if (now - issuedAt >= ttlMs) Ttl.EXPIRED else Ttl.VALID
     }
+
+    fun remainingMs(issuedAt: Long?, now: Long, ttlMs: Long = DEFAULT_TTL_MS): Long {
+        if (decision(issuedAt, now, ttlMs) != Ttl.VALID) return 0L
+        return (issuedAt!! + ttlMs) - now
+    }
 }

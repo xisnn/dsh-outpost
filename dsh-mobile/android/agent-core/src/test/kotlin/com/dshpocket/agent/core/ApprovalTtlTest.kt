@@ -38,4 +38,17 @@ class ApprovalTtlTest {
     @Test fun defaultTtlMatchesButlerTimeout() {
         assertEquals(300_000L, ApprovalTtl.DEFAULT_TTL_MS)
     }
+
+    @Test fun remainingMsReturnsPositiveTimeLeftWithinTtl() {
+        assertEquals(300_000L, ApprovalTtl.remainingMs(1_000L, 1_000L))
+        assertEquals(120_000L, ApprovalTtl.remainingMs(1_000L, 181_000L))
+        assertEquals(1L, ApprovalTtl.remainingMs(1_000L, 1_000L + ApprovalTtl.DEFAULT_TTL_MS - 1))
+    }
+
+    @Test fun remainingMsReturnsZeroWhenExpiredOrUnverifiable() {
+        assertEquals(0L, ApprovalTtl.remainingMs(1_000L, 1_000L + ApprovalTtl.DEFAULT_TTL_MS))
+        assertEquals(0L, ApprovalTtl.remainingMs(1_000L, 1_000L + ApprovalTtl.DEFAULT_TTL_MS + 5_000))
+        assertEquals(0L, ApprovalTtl.remainingMs(null, 2_000L))
+        assertEquals(0L, ApprovalTtl.remainingMs(5_000L, 4_000L))
+    }
 }

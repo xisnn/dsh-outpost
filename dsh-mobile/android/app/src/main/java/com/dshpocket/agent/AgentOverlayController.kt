@@ -121,19 +121,32 @@ class AgentOverlayController(
         val backgroundLost = approval.optBoolean("backgroundLost", false)
         val callId = approval.optString("callId")
         val digest = approval.optString("digest")
+        val expiresAt = approval.optLong("expiresAt", 0L)
+        val now = System.currentTimeMillis()
+        val remainingSec = if (expiresAt > 0L) ((expiresAt - now + 999L) / 1000L).coerceAtLeast(0L) else -1L
+        val expired = expiresAt > 0L && now >= expiresAt
         renderedApprovalCallId = callId.takeIf { it.isNotBlank() }
         renderedApprovalDigest = digest.takeIf { it.isNotBlank() }
         // The digest belongs in the signature: a provider that reuses a call id
         // for a different call would otherwise leave the previous arguments on
         // screen while the buttons answer the new one.
-        val signature = "approval:$callId:$digest:$backgroundLost"
+        val signature = "approval:$callId:$digest:$backgroundLost:$expired:$remainingSec"
         if (signature != lastSignature) {
             cardTitle?.text = "确认手机操作 · ${approval.optString("toolName")}"
+            val reason = approval.optString("reason")
             val args = approval.optJSONObject("arguments")?.toString().orEmpty()
             cardBody?.text = buildString {
+                if (reason.isNotBlank()) append(reason).append('\n')
                 append(args.take(240))
                 if (args.length > 240) append("…")
                 if (digest.isNotBlank()) append("\n摘要 ").append(digest.take(12)).append("…")
+                if (expired) {
+                    append("\n审批已超时失效，本次操作不会执行。")
+                } else if (remainingSec >= 0L) {
+                    val mins = remainingSec / 60L
+                    val secs = remainingSec % 60L
+                    append("\n剩余 %d:%02d 后自动拒绝".format(mins, secs))
+                }
                 if (backgroundLost) append("\n后台屏已断开，允许后不会执行工具。")
             }
             allowButton?.visibility = View.VISIBLE
@@ -142,12 +155,16 @@ class AgentOverlayController(
             resumeHandoffButton?.visibility = View.GONE
             lastSignature = signature
         }
-        // Also update on every poll in case the display state changed without
-        // changing the approval call id.
-        allowButton?.isEnabled = !backgroundLost
-        allowButton?.alpha = if (backgroundLost) 0.5f else 1f
-        allowButton?.contentDescription =
-            if (backgroundLost) "允许一次，后台屏已断开，已禁用" else null
+        // Also update on every poll in case the display state or TTL changed
+        // without changing the approval call id.
+        val allowDisabled = backgroundLost || expired
+        allowButton?.isEnabled = !allowDisabled
+        allowButton?.alpha = if (allowDisabled) 0.5f else 1f
+        allowButton?.contentDescription = when {
+            expired -> "允许一次，审批已超时失效，已禁用"
+            backgroundLost -> "允许一次，后台屏已断开，已禁用"
+            else -> null
+        }
         retryApprovalButton?.visibility = if (backgroundLost) View.VISIBLE else View.GONE
     }
 

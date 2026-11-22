@@ -36,6 +36,11 @@ import {
   type AgentThreadMessage,
 } from '../core/agent';
 import {
+  formatApprovalCountdown,
+  isApprovalAllowDisabled,
+  isApprovalExpired,
+} from '../core/agentApproval';
+import {
   advanceRevealedLength,
   applyStreamEvent,
   isActiveAgentPhase,
@@ -81,6 +86,7 @@ export function AgentButlerScreen({ active = true }: { active?: boolean }) {
   const [backgroundBusy, setBackgroundBusy] = useState(false);
   const [autoStartEnabled, setAutoStartEnabled] = useState(false);
   const [revealedLen, setRevealedLen] = useState(0);
+  const [approvalNow, setApprovalNow] = useState(() => Date.now());
   const scroll = useRef<ScrollView>(null);
   const nearBottomRef = useRef(true);
   const phaseRef = useRef<AgentSnapshot['phase']>('idle');
@@ -417,6 +423,16 @@ export function AgentButlerScreen({ active = true }: { active?: boolean }) {
   const running = isActiveAgentPhase(phase);
   const pending = snapshot?.pendingApproval ?? null;
   const allowBlocked = isApprovalAllowBlocked(pending);
+  const approvalExpired = isApprovalExpired(pending, approvalNow);
+  const allowDisabled = isApprovalAllowDisabled(pending, approvalNow);
+  const approvalCountdown = formatApprovalCountdown(pending, approvalNow);
+
+  useEffect(() => {
+    if (!active || !pending?.expiresAt) return;
+    setApprovalNow(Date.now());
+    const timer = setInterval(() => setApprovalNow(Date.now()), 1000);
+    return () => clearInterval(timer);
+  }, [active, pending?.callId, pending?.digest, pending?.expiresAt]);
   const handoff = snapshot?.pendingHandoff ?? null;
   const recovery = snapshot?.recovery ?? null;
   const queue = snapshot?.queue ?? [];
@@ -695,7 +711,10 @@ export function AgentButlerScreen({ active = true }: { active?: boolean }) {
           <View style={styles.assistantRow}>
             <View style={[styles.assistantBubble, styles.attentionCard]}>
               <Text style={styles.systemTitle}>需要你确认 · {pending.toolName}</Text>
-              <Text style={styles.systemHint}>参数摘要 {pending.digest.slice(0, 12)}…</Text>
+              <Text style={styles.systemHint}>
+                参数摘要 {pending.digest.slice(0, 12)}…{approvalCountdown ? ` · ${approvalCountdown}` : ''}
+              </Text>
+              {pending.reason ? <Text style={styles.systemHint}>{pending.reason}</Text> : null}
               {Object.entries(pending.arguments).map(([key, value]) => (
                 <View key={key} style={styles.argRow}>
                   <Text style={styles.argKey}>{key}</Text>
@@ -704,6 +723,15 @@ export function AgentButlerScreen({ active = true }: { active?: boolean }) {
                   </Text>
                 </View>
               ))}
+              {approvalExpired ? (
+                <Text
+                  style={styles.approvalWarning}
+                  accessibilityRole="alert"
+                  accessibilityLiveRegion="polite"
+                >
+                  审批已超时失效，本次操作不会执行。
+                </Text>
+              ) : null}
               {allowBlocked ? (
                 <Text
                   style={styles.approvalWarning}
@@ -716,10 +744,16 @@ export function AgentButlerScreen({ active = true }: { active?: boolean }) {
               <View style={styles.actions}>
                 <Pressable
                   onPress={() => void decide(true)}
-                  disabled={busy || allowBlocked}
+                  disabled={busy || allowDisabled}
                   accessibilityRole="button"
-                  accessibilityLabel={allowBlocked ? '允许一次（后台屏已断开）' : '允许一次'}
-                  style={[styles.primaryBtn, busy || allowBlocked ? styles.muted : null]}
+                  accessibilityLabel={
+                    approvalExpired
+                      ? '允许一次（已超时失效）'
+                      : allowBlocked
+                        ? '允许一次（后台屏已断开）'
+                        : '允许一次'
+                  }
+                  style={[styles.primaryBtn, busy || allowDisabled ? styles.muted : null]}
                 >
                   <Text style={styles.primaryText}>允许一次</Text>
                 </Pressable>

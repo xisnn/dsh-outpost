@@ -55,11 +55,15 @@ const read = (p) => readFileSync(path.join(repo, p), 'utf8');
 const androidDir = path.join(repo, 'dsh-mobile', 'android');
 const testRoot = path.join(androidDir, 'agent-core', 'src', 'test', 'kotlin', 'com', 'dshpocket', 'agent', 'core');
 
-/** 已知的十三个测试类与它们应有的 @Test 数量（gradlew 实跑核实过 122/0） */
+/** 已知的十四个测试类与它们应有的 @Test 数量（gradlew 实跑核实过 142/0） */
 const EXPECTED = {
+  // C2 安全门：ActionSafetyPolicy 12 条（支付硬禁/三层动作策略/ActionExecutor 闭环）；
+  // AgentLoopTest +2（在途取消写 INTERRUPTED / hard-deny 不问批）；
+  // SensitiveWordMatch/ApprovalTtl/RunDeadline 各 +2。
+  'ActionSafetyPolicyTest.kt': 12,
   // C1 流式 UX：AgentLoopTest 新增 2 条流式 observer 契约（14 -> 16），
   // CloudModelClientTest 新增 5 条 Responses/Anthropic/Gemini 流式增量与失败闭环契约（13 -> 18）。
-  'AgentLoopTest.kt': 16,
+  'AgentLoopTest.kt': 18,
   'CloudModelClientTest.kt': 18,
   'FileRunStoreTest.kt': 7,
   'RunRecoveryTest.kt': 4,
@@ -70,10 +74,10 @@ const EXPECTED = {
   // P6-next：审批节点身份绑定（9）+ 自定义输入 guarded fallback 契约（12）。
   'ApprovalNodeBindingTest.kt': 9,
   'TypeFallbackDecisionTest.kt': 12,
-  // P6-next 批2：敏感词词边界(8) + 审批TTL(7) + run deadline(6) + 取消边界(6) + 键注入三态(5)。
-  'SensitiveWordMatchTest.kt': 8,
-  'ApprovalTtlTest.kt': 7,
-  'RunDeadlineTest.kt': 6,
+  // P6-next 批2：敏感词词边界(10) + 审批TTL(9) + run deadline(8) + 取消边界(6) + 键注入三态(5)。
+  'SensitiveWordMatchTest.kt': 10,
+  'ApprovalTtlTest.kt': 9,
+  'RunDeadlineTest.kt': 8,
   'InterruptPolicyTest.kt': 6,
   'KeyOutcomeDecisionTest.kt': 5,
 };

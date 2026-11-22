@@ -496,4 +496,64 @@ class AgentLoopTest {
             trace,
         )
     }
+
+    @Test
+    fun `in-flight model failure when control is stopped persists interrupted with stop reason`() {
+        val (_, registry) = workspace()
+        val store = MemoryRunStore()
+        var stopped = false
+        val model = object : ModelClient {
+            override fun complete(request: ModelRequest): ModelReply {
+                stopped = true
+                return ModelReply.Failure("model-transport", "Socket closed")
+            }
+        }
+        val result = AgentLoop(
+            model,
+            ActionExecutor(registry, RecordingGate(ApprovalDecision.ALLOW_ONCE)),
+            store,
+            control = object : RunControl {
+                override fun beforeStep(): Boolean = !stopped
+                override fun isStopped(): Boolean = stopped
+                override fun stopReason(): String = "fgs-system-timeout"
+            },
+        ).run(RunSpec("run-abort", "abort in flight", maxSteps = 3))
+
+        assertEquals(RunPhase.INTERRUPTED, result.phase)
+        assertEquals("fgs-system-timeout", result.error)
+        assertEquals(RunPhase.INTERRUPTED, store.snapshot("run-abort")?.phase)
+        assertEquals("fgs-system-timeout", store.snapshot("run-abort")?.reason)
+    }
+
+    @Test
+    fun `safety policy hard deny in agent loop refuses without approval or execution`() {
+        val tool = PhoneVetoTool()
+        val registry = ToolRegistry(listOf(tool))
+        val gate = RecordingGate(ApprovalDecision.ALLOW_ONCE)
+        val store = MemoryRunStore()
+        val model = FakeModel(
+            ModelReply.Calls(listOf(ToolCall("c1", "phone_test"))),
+            ModelReply.Text("stopped payment"),
+        )
+        val executor = ActionExecutor(
+            registry,
+            gate,
+            safetyPolicy = { _, _ ->
+                ActionSafetyPolicy.Verdict(
+                    ActionSafetyPolicy.Tier.HARD_DENY,
+                    "PAYMENT_HARD_DENIED",
+                    "payment action is hard-denied",
+                )
+            },
+        )
+        val result = AgentLoop(model, executor, store)
+            .run(RunSpec("run-hard-deny", "pay", maxSteps = 3))
+
+        assertEquals(RunPhase.COMPLETED, result.phase)
+        assertTrue(gate.requests.isEmpty())
+        assertFalse(tool.executed)
+        assertEquals(ToolStatus.DENIED, result.toolResults.single().status)
+        assertTrue(result.messages.any { it is AgentMessage.Tool && it.content.contains("PAYMENT_HARD_DENIED") })
+        assertFalse(store.snapshot("run-hard-deny")!!.lastToolStatus == "STARTED")
+    }
 }

@@ -67,9 +67,9 @@ object PhoneBridge {
     fun runBackgroundLost(): Boolean = runUsesBackground() && activeDisplayId == Display.DEFAULT_DISPLAY
 
     /**
-     * home/recents are system global actions, not display-targeted: on a
-     * background display they would leak to the main screen. Single rule shared
-     * by the pre-approval veto and the tool so both normalize case identically.
+     * Virtual display key injection supports back/home/recents via Shizuku
+     * `input -d <displayId> keyevent`, keeping actions scoped to the target
+     * display. Any key outside the supported set is refused before approval.
      */
     fun isUnsupportedBackgroundKey(key: String?, displayId: Int): Boolean {
         val normalized = key?.lowercase() ?: return false
@@ -78,6 +78,21 @@ object PhoneBridge {
         return displayId > 0 && displayId != Display.DEFAULT_DISPLAY &&
             normalized !in setOf("back", "home", "recents")
     }
+
+    fun isCancelled(): Boolean =
+        OutpostAccessibilityService.instance?.cancelRequested == true
+
+    private fun cancelledSnapshot(): PhoneSnapshot = PhoneSnapshot(
+        screenId = 0,
+        packageName = null,
+        elements = emptyList(),
+        sensitive = false,
+        sensitiveReason = null,
+        locked = false,
+        truncated = false,
+        error = "CANCELLED",
+        displayId = currentDisplayId(),
+    )
 
     fun currentDisplayId(): Int =
         if (runActive) {
@@ -122,7 +137,7 @@ object PhoneBridge {
     fun backgroundText(text: String): String =
         backgroundTextHandler?.invoke(text) ?: "BACKGROUND_TEXT_UNAVAILABLE"
 
-    private val SENSITIVE_PACKAGES = listOf(
+    private val SENSITIVE_PACKAGES = setOf(
         "com.android.settings",
         "com.google.android.settings",
         "com.android.permissioncontroller",
@@ -202,21 +217,34 @@ object PhoneBridge {
         }
     }
 
+    private fun sleepCancellable(delayMs: Long): Boolean {
+        var remaining = delayMs
+        while (remaining > 0L) {
+            if (isCancelled()) return false
+            val slice = remaining.coerceAtMost(50L)
+            try {
+                Thread.sleep(slice)
+            } catch (_: InterruptedException) {
+                Thread.currentThread().interrupt()
+                return false
+            }
+            remaining -= slice
+        }
+        return !isCancelled()
+    }
+
     /**
      * phone_open must not return the previous screen just because the launch
      * command succeeded. Wait briefly for the requested package to become the
      * active window; callers can turn a timeout into a model-visible error.
      */
     fun waitForPackage(packageName: String, attempts: Int = 20, delayMs: Long = 250): PhoneSnapshot {
+        if (isCancelled()) return cancelledSnapshot()
         var last = snapshot()
         repeat(attempts.coerceAtLeast(0)) {
+            if (isCancelled()) return cancelledSnapshot()
             if (last.error == null && last.packageName == packageName) return last
-            try {
-                Thread.sleep(delayMs)
-            } catch (_: InterruptedException) {
-                Thread.currentThread().interrupt()
-                return last
-            }
+            if (!sleepCancellable(delayMs)) return cancelledSnapshot()
             last = snapshot()
         }
         return last
@@ -228,15 +256,12 @@ object PhoneBridge {
      * failure or (worse) a wrong package.
      */
     fun stableSnapshot(attempts: Int = 6, delayMs: Long = 350): PhoneSnapshot {
+        if (isCancelled()) return cancelledSnapshot()
         var last = snapshot()
         repeat((attempts - 1).coerceAtLeast(0)) {
+            if (isCancelled()) return cancelledSnapshot()
             if (last.locked || (last.error == null && last.packageName != null)) return last
-            try {
-                Thread.sleep(delayMs)
-            } catch (_: InterruptedException) {
-                Thread.currentThread().interrupt()
-                return last
-            }
+            if (!sleepCancellable(delayMs)) return cancelledSnapshot()
             last = snapshot()
         }
         return last

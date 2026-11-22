@@ -5,27 +5,30 @@ import android.os.Build
 import android.os.Handler
 import android.os.Looper
 import com.dshpocket.agent.core.ActionExecutor
-import com.dshpocket.agent.core.ApprovalNodeBinding
-import com.dshpocket.agent.core.ApprovalTtl
-import com.dshpocket.agent.core.InterruptPolicy
-import com.dshpocket.agent.core.RunDeadline
+import com.dshpocket.agent.core.ActionSafetyPolicy
 import com.dshpocket.agent.core.AgentLoop
 import com.dshpocket.agent.core.AgentMessage
+import com.dshpocket.agent.core.AgentTool
 import com.dshpocket.agent.core.ApprovalDecision
 import com.dshpocket.agent.core.ApprovalGate
+import com.dshpocket.agent.core.ApprovalNodeBinding
 import com.dshpocket.agent.core.ApprovalRequest
+import com.dshpocket.agent.core.ApprovalTtl
 import com.dshpocket.agent.core.CloudModelClient
 import com.dshpocket.agent.core.FileRunStore
+import com.dshpocket.agent.core.InterruptPolicy
 import com.dshpocket.agent.core.ModelClient
 import com.dshpocket.agent.core.ModelConfig
 import com.dshpocket.agent.core.ModelReply
 import com.dshpocket.agent.core.ModelRequest
 import com.dshpocket.agent.core.RunControl
+import com.dshpocket.agent.core.RunDeadline
 import com.dshpocket.agent.core.RunObserver
 import com.dshpocket.agent.core.RunPhase
 import com.dshpocket.agent.core.RunRecovery
 import com.dshpocket.agent.core.RunSnapshot
 import com.dshpocket.agent.core.RunSpec
+import com.dshpocket.agent.core.StreamingModelClient
 import com.dshpocket.agent.core.ToolCall
 import com.dshpocket.agent.core.ToolOutput
 import com.dshpocket.agent.core.ToolRegistry
@@ -90,12 +93,15 @@ class AgentRuntime private constructor(context: Context) {
     @Volatile private var approvalIssuedAt: Long? = null
     @Volatile private var runStartedAt: Long? = null
     @Volatile private var activeModel: ModelClient? = null
+    @Volatile private var networkInFlight = false
+    @Volatile private var toolLoopRunning = false
     @Volatile private var streamListener: ((StreamUpdate) -> Unit)? = null
     private var decision: ApprovalDecision? = null
     private var pendingHandoff: String? = null
     private var handoffResume: Boolean? = null
     private var paused = false
     private var stopped = false
+    private var stopReason: String = "stopped-by-user"
     private var backgroundLost = false
     private var finalText: String? = null
     private var lastError: String? = null
@@ -135,6 +141,70 @@ class AgentRuntime private constructor(context: Context) {
 
     private fun emitStream(update: StreamUpdate?) {
         if (update != null) streamListener?.invoke(update)
+    }
+
+    private fun isRunStopped(): Boolean {
+        lock.lock()
+        return try {
+            stopped
+        } finally {
+            lock.unlock()
+        }
+    }
+
+    private fun currentStopReason(): String {
+        lock.lock()
+        return try {
+            stopReason
+        } finally {
+            lock.unlock()
+        }
+    }
+
+    private inner class TrackedModelClient(
+        private val delegate: ModelClient,
+    ) : StreamingModelClient {
+        override fun complete(request: ModelRequest): ModelReply = complete(request) { }
+
+        override fun complete(request: ModelRequest, onText: (String) -> Unit): ModelReply {
+            if (isRunStopped()) {
+                return ModelReply.Failure("cancelled", currentStopReason())
+            }
+            networkInFlight = true
+            return try {
+                if (delegate is StreamingModelClient) {
+                    delegate.complete(request, onText)
+                } else {
+                    delegate.complete(request)
+                }
+            } finally {
+                networkInFlight = false
+            }
+        }
+
+        override fun cancelInFlight() {
+            delegate.cancelInFlight()
+        }
+    }
+
+    private fun buildSafetyContext(tool: AgentTool, call: ToolCall): ActionSafetyPolicy.ActionContext {
+        val isPhone = tool.risk == ToolRisk.PHONE
+        val displayId = if (isPhone) PhoneBridge.currentDisplayId() else 0
+        val snap = if (isPhone) OutpostAccessibilityService.instance?.snapshotSummary(displayId) else null
+        val elementId = call.arguments["element"] as? String
+        val el = if (!elementId.isNullOrBlank()) snap?.elements?.firstOrNull { it.id == elementId } else null
+        val targetPkg = if (tool.spec.name == "phone_open") call.arguments["package"] as? String else null
+        return ActionSafetyPolicy.ActionContext(
+            toolName = tool.spec.name,
+            risk = tool.risk,
+            arguments = call.arguments,
+            targetPackage = targetPkg,
+            screenPackage = snap?.packageName,
+            targetText = el?.text,
+            targetDescription = el?.description,
+            screenSensitiveReason = snap?.sensitiveReason,
+            sensitivePackage = !targetPkg.isNullOrBlank() && PhoneBridge.isSensitivePackage(targetPkg),
+        )
     }
 
     private data class QueuedTask(
@@ -262,6 +332,9 @@ class AgentRuntime private constructor(context: Context) {
         handoffResume = null
         paused = false
         stopped = false
+        stopReason = "stopped-by-user"
+        networkInFlight = false
+        toolLoopRunning = false
         backgroundLost = false
         finalText = null
         lastError = null
@@ -277,14 +350,16 @@ class AgentRuntime private constructor(context: Context) {
         recordThread: Boolean = false,
         backgroundExpected: Boolean = expectedBackground(),
     ) {
+        val trackedModel = TrackedModelClient(model)
         runStartedAt = System.currentTimeMillis()
-        activeModel = model
+        activeModel = trackedModel
         OutpostAccessibilityService.instance?.cancelRequested = false
         val prior = if (recordThread) thread.priorMessages() else emptyList()
         if (recordThread) thread.append("user", goal)
         var result: com.dshpocket.agent.core.RunResult? = null
         var interruptedByStop = false
         var interruptedPartial: String? = null
+        var recordedStopReason = "stopped-by-user"
         var backgroundBound = false
         try {
             val toolList = mutableListOf(
@@ -334,15 +409,17 @@ class AgentRuntime private constructor(context: Context) {
                 }
 
                 override fun onToolStarted(call: com.dshpocket.agent.core.ToolCall) {
+                    toolLoopRunning = true
                     appendEvent("tool_started", call.name, null, call.id)
                 }
 
                 override fun onToolFinished(call: com.dshpocket.agent.core.ToolCall, result: ToolResult) {
+                    toolLoopRunning = false
                     appendEvent("tool_finished", call.name, result.status.name, result.content.take(120))
                 }
             }
             val runResult = AgentLoop(
-                model,
+                trackedModel,
                 ActionExecutor(
                     ToolRegistry(toolList),
                     gate,
@@ -366,29 +443,51 @@ class AgentRuntime private constructor(context: Context) {
                         // the next beforeStep pauses the Run.
                         if (tool.risk == ToolRisk.PHONE && PhoneBridge.runBackgroundLost()) {
                             ToolOutput(ToolStatus.ERROR, "BACKGROUND_DISPLAY_LOST")
-                        } else if (tool.risk == ToolRisk.PHONE && approvalBoundElement) {
-                            // P6-next candidate 3: re-resolve the approved ordinal
-                            // and compare node identity. Refusal only; a stale or
-                            // unverifiable node requires a fresh snapshot+approval.
-                            val live = OutpostAccessibilityService.instance?.nodeIdentity(
-                                call.arguments["element"] as? String ?: "",
-                                PhoneBridge.currentDisplayId(),
-                            )
-                            when (ApprovalNodeBinding.decision(approvalNodeIdentity, live)) {
-                                ApprovalNodeBinding.Binding.ALLOW -> null
-                                ApprovalNodeBinding.Binding.STALE_NODE ->
-                                    ToolOutput(ToolStatus.ERROR, "STALE_NODE: approval bound to a different node; re-snapshot and re-approve")
-                                ApprovalNodeBinding.Binding.UNVERIFIABLE ->
-                                    ToolOutput(ToolStatus.ERROR, "APPROVAL_NODE_UNVERIFIABLE")
-                            }
                         } else {
-                            null
+                            val bindingFailure = if (tool.risk == ToolRisk.PHONE && approvalBoundElement) {
+                                // P6-next candidate 3: re-resolve the approved ordinal
+                                // and compare node identity. Refusal only; a stale or
+                                // unverifiable node requires a fresh snapshot+approval.
+                                val live = OutpostAccessibilityService.instance?.nodeIdentity(
+                                    call.arguments["element"] as? String ?: "",
+                                    PhoneBridge.currentDisplayId(),
+                                )
+                                when (ApprovalNodeBinding.decision(approvalNodeIdentity, live)) {
+                                    ApprovalNodeBinding.Binding.ALLOW -> null
+                                    ApprovalNodeBinding.Binding.STALE_NODE ->
+                                        ToolOutput(ToolStatus.ERROR, "STALE_NODE: approval bound to a different node; re-snapshot and re-approve")
+                                    ApprovalNodeBinding.Binding.UNVERIFIABLE ->
+                                        ToolOutput(ToolStatus.ERROR, "APPROVAL_NODE_UNVERIFIABLE")
+                                }
+                            } else {
+                                null
+                            }
+                            if (bindingFailure != null) {
+                                bindingFailure
+                            } else if (tool.risk == ToolRisk.PHONE) {
+                                // Defense-in-depth: re-evaluate C2 payment hard-deny right before execution.
+                                val verdict = ActionSafetyPolicy.evaluate(buildSafetyContext(tool, call))
+                                if (verdict.tier == ActionSafetyPolicy.Tier.HARD_DENY) {
+                                    ToolOutput(ToolStatus.DENIED, "${verdict.code}: ${verdict.reason}")
+                                } else {
+                                    null
+                                }
+                            } else {
+                                null
+                            }
                         }
+                    },
+                    safetyPolicy = { tool, call ->
+                        ActionSafetyPolicy.evaluate(buildSafetyContext(tool, call))
                     },
                 ),
                 runs,
                 systemPrompt = AgentLoop.DEFAULT_SYSTEM_PROMPT + memory.promptBlock(),
-                control = RunControl { beforeStep() },
+                control = object : RunControl {
+                    override fun beforeStep(): Boolean = this@AgentRuntime.beforeStep()
+                    override fun isStopped(): Boolean = this@AgentRuntime.isRunStopped()
+                    override fun stopReason(): String = this@AgentRuntime.currentStopReason()
+                },
                 observer = observer,
             ).run(RunSpec(id, goal, maxSteps = maxSteps, priorMessages = prior))
             result = runResult
@@ -400,6 +499,11 @@ class AgentRuntime private constructor(context: Context) {
                     runResult.phase == RunPhase.FAILED &&
                     runResult.error?.startsWith("model-transport:") == true
                 interruptedByStop = abortedInFlight || runResult.phase == RunPhase.INTERRUPTED
+                recordedStopReason = if (runResult.phase == RunPhase.INTERRUPTED && !runResult.error.isNullOrBlank()) {
+                    runResult.error!!
+                } else {
+                    stopReason
+                }
                 if (interruptedByStop) interruptedPartial = partial
                 pending = null
                 pendingHandoff = null
@@ -415,7 +519,7 @@ class AgentRuntime private constructor(context: Context) {
                     runResult.phase.name.lowercase()
                 }
                 finalText = runResult.finalText
-                lastError = if (abortedInFlight) "stopped-by-user" else runResult.error
+                lastError = if (abortedInFlight) recordedStopReason else runResult.error
                 terminalUpdate = buildStreamUpdateLocked(immediate = true)
             } finally {
                 lock.unlock()
@@ -424,12 +528,19 @@ class AgentRuntime private constructor(context: Context) {
         } catch (error: Exception) {
             finishWithFailure(id, "agent-error: ${error.message}")
         } finally {
+            networkInFlight = false
+            toolLoopRunning = false
             if (backgroundBound) PhoneBridge.endRun()
             if (recordThread) {
                 val answer = result?.finalText
                     ?: if (interruptedByStop) {
+                        val stopTag = when (recordedStopReason) {
+                            "run-deadline-exceeded" -> "已超时自动停止（30 分钟上限）"
+                            "fgs-system-timeout" -> "系统前台服务超时，已优雅停止"
+                            else -> "已中断"
+                        }
                         val partial = interruptedPartial
-                        if (!partial.isNullOrBlank()) "$partial\n\n（已中断）" else "任务已中断"
+                        if (!partial.isNullOrBlank()) "$partial\n\n（$stopTag）" else "任务$stopTag"
                     } else {
                         result?.let { "任务未完成：${it.error ?: it.phase.name.lowercase()}" }
                             ?: "任务失败：${lastError ?: "未知错误"}"
@@ -446,6 +557,7 @@ class AgentRuntime private constructor(context: Context) {
                     runId = candidate.id
                     active = true
                     currentStep = 0
+                    stopReason = "stopped-by-user"
                     liveText.setLength(0)
                     liveEvents.clear()
                     eventSequence = 0
@@ -504,8 +616,16 @@ class AgentRuntime private constructor(context: Context) {
             // (butler local-approvals parity: now >= expiresAt => rejected).
             if (allow) {
                 when (ApprovalTtl.decision(approvalIssuedAt, System.currentTimeMillis())) {
-                    ApprovalTtl.Ttl.EXPIRED -> return error("APPROVAL_EXPIRED")
-                    ApprovalTtl.Ttl.UNVERIFIABLE -> return error("APPROVAL_TTL_UNVERIFIABLE")
+                    ApprovalTtl.Ttl.EXPIRED -> {
+                        decision = ApprovalDecision.REJECT
+                        approvalChanged.signalAll()
+                        return error("APPROVAL_EXPIRED")
+                    }
+                    ApprovalTtl.Ttl.UNVERIFIABLE -> {
+                        decision = ApprovalDecision.REJECT
+                        approvalChanged.signalAll()
+                        return error("APPROVAL_TTL_UNVERIFIABLE")
+                    }
                     ApprovalTtl.Ttl.VALID -> {}
                 }
             }
@@ -612,28 +732,33 @@ class AgentRuntime private constructor(context: Context) {
         return snapshot()
     }
 
-    fun stop(): JSONObject {
+    private fun stopInternalLocked(reason: String): StreamUpdate {
+        stopReason = reason
+        queue.clear()
+        stopped = true
+        // P6-next #25: timely cancellation using live network/tool flight state.
+        val cancelAction = InterruptPolicy.decision(true, networkInFlight, toolLoopRunning)
+        if (cancelAction == InterruptPolicy.Action.ABORT_IN_FLIGHT) {
+            activeModel?.cancelInFlight()
+            OutpostAccessibilityService.instance?.cancelRequested = true
+        } else if (cancelAction == InterruptPolicy.Action.ABORT_AT_NEXT_CHECK) {
+            OutpostAccessibilityService.instance?.cancelRequested = true
+        }
+        paused = false
+        backgroundLost = false
+        fallbackPhase = RunPhase.STOPPING.name.lowercase()
+        approvalChanged.signalAll()
+        controlChanged.signalAll()
+        return buildStreamUpdateLocked(immediate = true)
+    }
+
+    @JvmOverloads
+    fun stop(reason: String = "stopped-by-user"): JSONObject {
         val update: StreamUpdate?
         lock.lock()
         try {
             if (!active) return error("NO_ACTIVE_RUN")
-            queue.clear()
-            stopped = true
-            // P6-next #25: timely cancellation. Conservative in-flight window =
-            // the active run; abort the model call and signal tool loops.
-            val cancelAction = InterruptPolicy.decision(true, active, active)
-            if (cancelAction == InterruptPolicy.Action.ABORT_IN_FLIGHT ||
-                cancelAction == InterruptPolicy.Action.ABORT_AT_NEXT_CHECK
-            ) {
-                activeModel?.cancelInFlight()
-                OutpostAccessibilityService.instance?.cancelRequested = true
-            }
-            paused = false
-            backgroundLost = false
-            fallbackPhase = RunPhase.STOPPING.name.lowercase()
-            approvalChanged.signalAll()
-            controlChanged.signalAll()
-            update = buildStreamUpdateLocked(immediate = true)
+            update = stopInternalLocked(reason)
         } finally {
             lock.unlock()
         }
@@ -743,6 +868,9 @@ class AgentRuntime private constructor(context: Context) {
     }
 
     private fun awaitApproval(request: ApprovalRequest): ApprovalDecision {
+        var expired = false
+        var update: StreamUpdate? = null
+        val result: ApprovalDecision
         lock.lock()
         try {
             pending = request
@@ -760,39 +888,66 @@ class AgentRuntime private constructor(context: Context) {
             }
             fallbackPhase = RunPhase.WAITING_USER.name.lowercase()
             approvalChanged.signalAll()
+            var deadlineHit = false
             while (decision == null && !stopped) {
-                approvalChanged.await()
+                val now = System.currentTimeMillis()
+                if (RunDeadline.decision(runStartedAt, now) != RunDeadline.Deadline.WITHIN) {
+                    deadlineHit = true
+                    stopInternalLocked("run-deadline-exceeded")
+                    break
+                }
+                val ttlRem = ApprovalTtl.remainingMs(approvalIssuedAt, now)
+                if (ttlRem <= 0L) {
+                    expired = true
+                    break
+                }
+                val deadlineRem = RunDeadline.remainingMs(runStartedAt, now)
+                val waitMs = minOf(ttlRem, deadlineRem).coerceAtLeast(1L)
+                approvalChanged.await(waitMs, TimeUnit.MILLISECONDS)
             }
-            val result = if (stopped) ApprovalDecision.REJECT else (decision ?: ApprovalDecision.REJECT)
+            result = if (stopped || expired || deadlineHit) {
+                ApprovalDecision.REJECT
+            } else {
+                decision ?: ApprovalDecision.REJECT
+            }
             pending = null
             decision = null
             approvalBoundElement = false
             approvalNodeIdentity = null
             approvalIssuedAt = null
             fallbackPhase = if (stopped) RunPhase.STOPPING.name.lowercase() else RunPhase.RUNNING.name.lowercase()
-            return result
+            update = buildStreamUpdateLocked(immediate = true)
         } finally {
             lock.unlock()
         }
+        if (expired) {
+            appendEvent("approval_expired", request.call.name, "DENIED", "approval expired after TTL")
+        }
+        emitStream(update)
+        return result
     }
 
     private fun beforeStep(): Boolean {
+        var deadlineUpdate: StreamUpdate? = null
         lock.lock()
         try {
             while (!stopped) {
+                val now = System.currentTimeMillis()
+                // P6-next #23: app-layer deadline; graceful stop, fail closed.
+                if (RunDeadline.decision(runStartedAt, now) != RunDeadline.Deadline.WITHIN) {
+                    deadlineUpdate = stopInternalLocked("run-deadline-exceeded")
+                    return false
+                }
                 if (paused) {
-                    controlChanged.await()
+                    val rem = RunDeadline.remainingMs(runStartedAt, now).coerceAtLeast(1L)
+                    controlChanged.await(rem, TimeUnit.MILLISECONDS)
                     continue
                 }
                 if (PhoneBridge.runBackgroundLost()) {
                     backgroundLost = true
-                    controlChanged.await(250, TimeUnit.MILLISECONDS)
+                    val rem = minOf(250L, RunDeadline.remainingMs(runStartedAt, now)).coerceAtLeast(1L)
+                    controlChanged.await(rem, TimeUnit.MILLISECONDS)
                     continue
-                }
-                // P6-next #23: app-layer deadline; graceful stop, fail closed.
-                if (RunDeadline.decision(runStartedAt, System.currentTimeMillis()) != RunDeadline.Deadline.WITHIN) {
-                    stop()
-                    return false
                 }
                 backgroundLost = false
                 return true
@@ -800,17 +955,27 @@ class AgentRuntime private constructor(context: Context) {
             return false
         } finally {
             lock.unlock()
+            emitStream(deadlineUpdate)
         }
     }
 
     private fun awaitHandoff(reason: String): Boolean {
+        var update: StreamUpdate? = null
         lock.lock()
         try {
             pendingHandoff = reason
             handoffResume = null
             fallbackPhase = RunPhase.WAITING_USER.name.lowercase()
             approvalChanged.signalAll()
-            while (handoffResume == null && !stopped) controlChanged.await()
+            while (handoffResume == null && !stopped) {
+                val now = System.currentTimeMillis()
+                if (RunDeadline.decision(runStartedAt, now) != RunDeadline.Deadline.WITHIN) {
+                    update = stopInternalLocked("run-deadline-exceeded")
+                    break
+                }
+                val rem = RunDeadline.remainingMs(runStartedAt, now).coerceAtLeast(1L)
+                controlChanged.await(rem, TimeUnit.MILLISECONDS)
+            }
             val resumed = !stopped && handoffResume == true
             pendingHandoff = null
             handoffResume = null
@@ -818,6 +983,7 @@ class AgentRuntime private constructor(context: Context) {
             return resumed
         } finally {
             lock.unlock()
+            emitStream(update)
         }
     }
 
