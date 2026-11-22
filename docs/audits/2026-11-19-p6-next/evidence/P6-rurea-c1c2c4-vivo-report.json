@@ -1,0 +1,226 @@
+{
+  "reports": [
+    {
+      "generatedAt": "2026-11-22T07:30:06.188Z",
+      "accessibilityInitial": {
+        "supported": true,
+        "accessibilityEnabled": true,
+        "accessibilityConnected": true,
+        "overlayAllowed": false,
+        "screenLocked": false
+      },
+      "accessibilityFinal": {
+        "supported": true,
+        "accessibilityEnabled": true,
+        "accessibilityConnected": true,
+        "overlayAllowed": false,
+        "screenLocked": false
+      },
+      "passed": 7,
+      "total": 7,
+      "allOk": true,
+      "scenarios": [
+        {
+          "name": "C1_STREAM_COMPAT",
+          "ok": true,
+          "details": {
+            "phase": "completed",
+            "goal": "[C1_STREAM_COMPAT]",
+            "text": "第一段，第二段，第三段，完成🎉",
+            "streamPushCount": 6,
+            "distinctStreamLengths": [
+              3,
+              7,
+              11,
+              16
+            ]
+          }
+        },
+        {
+          "name": "C1_STREAM_RESPONSES",
+          "ok": true,
+          "details": {
+            "phase": "completed",
+            "text": "Responses 流式增量验证成功",
+            "streamPushCount": 5,
+            "distinctStreamLengths": [
+              10,
+              14,
+              18
+            ]
+          }
+        },
+        {
+          "name": "C1_C2_MIDSTREAM_STOP",
+          "ok": true,
+          "details": {
+            "partialSeen": "半截输出",
+            "phase": "interrupted",
+            "error": "stopped-by-user",
+            "stopLatencyMs": 126,
+            "historyPhase": "interrupted",
+            "historyReason": "stopped-by-user",
+            "threadLastText": "半截输出\n\n（已中断）"
+          }
+        },
+        {
+          "name": "C4_MODEL_AUTH_401",
+          "ok": true,
+          "details": {
+            "phase": "failed",
+            "error": "http-401: {\"error\":{\"message\":\"Incorrect API key provided\"}}",
+            "goal": "[C4_HTTP_401]",
+            "category": "model_auth",
+            "title": "模型 API Key 认证失败（401）",
+            "firstAction": "open_settings"
+          }
+        },
+        {
+          "name": "C4_FAULT_RETRY_503_AND_SOCKET_DROP",
+          "ok": true,
+          "details": {
+            "fail503Error": "http-503: {\"error\":{\"message\":\"upstream overloaded\"}}",
+            "fail503Category": "model_provider",
+            "retry503Phase": "completed",
+            "retry503Text": "C4_RETRY_503_OK",
+            "failDropError": "model-transport: EOFException",
+            "failDropCategory": "network",
+            "retryDropPhase": "completed",
+            "retryDropText": "C4_RETRY_NET_OK"
+          }
+        },
+        {
+          "name": "C4_BACKGROUND_NOT_READY",
+          "ok": true,
+          "details": {
+            "rejectedCode": "BACKGROUND_NOT_READY",
+            "rejectedMessage": "未安装 Shizuku；请先安装并启动 Shizuku",
+            "bgState": "shizuku_not_running",
+            "category": "background_display",
+            "actionIds": [
+              "open_background",
+              "disable_auto_start",
+              "dismiss"
+            ],
+            "recoveredPhase": "completed",
+            "recoveredText": "C4_BG_RECOVERED_OK"
+          }
+        },
+        {
+          "name": "C2_THREE_TIER_POLICY",
+          "ok": true,
+          "details": {
+            "phase": "completed",
+            "text": "C2_POLICY_DONE",
+            "approvals": [
+              {
+                "toolName": "phone_open",
+                "callId": "stub-2",
+                "reason": "sensitive or invalid package requires approval",
+                "expiresAt": 1795332904288,
+                "countdown": "剩余 5:00 后自动拒绝",
+                "expiredAtObservation": false,
+                "decision": "reject"
+              },
+              {
+                "toolName": "workspace_write",
+                "callId": "stub-3",
+                "reason": "workspace write requires user approval",
+                "expiresAt": 1795332904426,
+                "countdown": "剩余 5:00 后自动拒绝",
+                "expiredAtObservation": false,
+                "decision": "allow"
+              },
+              {
+                "toolName": "phone_tap",
+                "callId": "stub-4",
+                "reason": "tap action requires user approval",
+                "expiresAt": 1795332904604,
+                "countdown": "剩余 5:00 后自动拒绝",
+                "expiredAtObservation": false,
+                "decision": "reject"
+              }
+            ],
+            "events": [
+              {
+                "toolName": "phone_open",
+                "status": "DENIED",
+                "detail": "PAYMENT_HARD_DENIED: payment or banking app is hard-denied"
+              },
+              {
+                "toolName": "phone_open",
+                "status": "DENIED",
+                "detail": "approval rejected"
+              },
+              {
+                "toolName": "workspace_write",
+                "status": "OK",
+                "detail": "wrote 11 bytes to c2-vivo-probe.txt"
+              },
+              {
+                "toolName": "phone_tap",
+                "status": "DENIED",
+                "detail": "approval rejected"
+              },
+              {
+                "toolName": "phone_open",
+                "status": "OK",
+                "detail": "OPENED com.android.bbkcalculator\n{\"screenId\":14,\"displayId\":0,\"package\":\"com.android.bbkcalculator\",\"sensitive\":false,\"r"
+              },
+              {
+                "toolName": "phone_screen",
+                "status": "OK",
+                "detail": "{\"screenId\":15,\"displayId\":0,\"package\":\"com.android.bbkcalculator\",\"sensitive\":false,\"reason\":null,\"locked\":false,\"trunc"
+              },
+              {
+                "toolName": "phone_scroll",
+                "status": "ERROR",
+                "detail": "NO_SCROLLABLE"
+              },
+              {
+                "toolName": "phone_key",
+                "status": "OK",
+                "detail": "KEY back\n{\"screenId\":26,\"displayId\":0,\"package\":\"com.dshoutpost.p1.p6next\",\"sensitive\":true,\"reason\":\"DSH Outpost itself"
+              }
+            ]
+          }
+        }
+      ]
+    }
+  ],
+  "trace": [
+    "chat:[C1_STREAM_COMPAT]:attempt=1:tools=0",
+    "chat:completed:compat",
+    "responses:[C1_STREAM_RESPONSES]:attempt=1",
+    "responses:completed",
+    "chat:[C1_MIDSTREAM_STOP]:attempt=1:tools=0",
+    "chat:[C1_MIDSTREAM_STOP]:client-closed",
+    "chat:[C4_HTTP_401]:attempt=1:tools=0",
+    "chat:[C4_HTTP_503]:attempt=1:tools=0",
+    "chat:[C4_HTTP_503]:attempt=2:tools=0",
+    "chat:completed:503-retry",
+    "chat:[C4_SOCKET_DROP]:attempt=1:tools=0",
+    "chat:[C4_SOCKET_DROP]:attempt=2:tools=0",
+    "chat:completed:socket-retry",
+    "chat:[C4_BG_RECOVERED]:attempt=1:tools=0",
+    "chat:completed:bg-recovered",
+    "chat:[C2_POLICY_SUITE]:attempt=1:tools=0",
+    "c2:step=0:call:phone_open",
+    "chat:[C2_POLICY_SUITE]:attempt=2:tools=1",
+    "c2:step=1:call:phone_open",
+    "chat:[C2_POLICY_SUITE]:attempt=3:tools=2",
+    "c2:step=2:call:workspace_write",
+    "chat:[C2_POLICY_SUITE]:attempt=4:tools=3",
+    "c2:step=3:call:phone_tap",
+    "chat:[C2_POLICY_SUITE]:attempt=5:tools=4",
+    "c2:step=4:call:phone_open",
+    "chat:[C2_POLICY_SUITE]:attempt=6:tools=5",
+    "c2:step=5:call:phone_screen",
+    "chat:[C2_POLICY_SUITE]:attempt=7:tools=6",
+    "c2:step=6:call:phone_scroll",
+    "chat:[C2_POLICY_SUITE]:attempt=8:tools=7",
+    "c2:step=7:call:phone_key",
+    "chat:[C2_POLICY_SUITE]:attempt=9:tools=8",
+    "c2:step=8:text:C2_POLICY_DONE"
+  ]
+}
