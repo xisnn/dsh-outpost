@@ -55,10 +55,12 @@ const read = (p) => readFileSync(path.join(repo, p), 'utf8');
 const androidDir = path.join(repo, 'dsh-mobile', 'android');
 const testRoot = path.join(androidDir, 'agent-core', 'src', 'test', 'kotlin', 'com', 'dshpocket', 'agent', 'core');
 
-/** 已知的十三个测试类与它们应有的 @Test 数量（gradlew 实跑核实过 115/0） */
+/** 已知的十三个测试类与它们应有的 @Test 数量（gradlew 实跑核实过 122/0） */
 const EXPECTED = {
-  'AgentLoopTest.kt': 14,
-  'CloudModelClientTest.kt': 13,
+  // C1 流式 UX：AgentLoopTest 新增 2 条流式 observer 契约（14 -> 16），
+  // CloudModelClientTest 新增 5 条 Responses/Anthropic/Gemini 流式增量与失败闭环契约（13 -> 18）。
+  'AgentLoopTest.kt': 16,
+  'CloudModelClientTest.kt': 18,
   'FileRunStoreTest.kt': 7,
   'RunRecoveryTest.kt': 4,
   // P4-0.1 P0-3 设备控制安全：屏幕生成绑定 + phone_open 预发射拒绝。

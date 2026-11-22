@@ -26,6 +26,7 @@ class AgentLoop(
         for (step in 1..spec.maxSteps) {
             if (!control.beforeStep()) return interrupted(spec, messages, toolResults)
             store.step(spec.id, step)
+            observer.onStepStarted(step)
             val reply = try {
                 val request = ModelRequest(compact(messages), executor.registry.specs)
                 if (model is StreamingModelClient) {

@@ -67,7 +67,7 @@
 > native 直连云模型；新增 RureaApp agent-first 外壳 + index.rurea.js + DSH_RUREA_ENTRY flag，
 > emulator 装机 boot 直达 agent 主界面、无 dsh 配对/网关。dsh 客户端留一个入口（AgentSettings showDshEntry）。
 > A2.3 默认切换 + 品牌化已验通（见 10_A2_3_BRANDING.md；包名保持 com.dshpocket 保凭据/升级连续性）。
-> A3 测试链拆分已完成（见 11_A3_TEST_CHAIN_SPLIT.md：agentChain 2 + dshChain 104，CI 双链各自触发，不重不漏）。
+> A3 测试链拆分已完成（见 11_A3_TEST_CHAIN_SPLIT.md：agentChain + dshChain，CI run 44915891619 绿，不重不漏）。
 > 剩 A4 独立发布线 + 包名迁移决策（敏感，另批）。
 
 | 阶段 | 内容 | 验收标准 |
@@ -105,8 +105,7 @@
 
 目标：从「骨架」到「可交给真实用户」。按优先级：
 
-1. **C1 UI 增量流式**：现同步解析完整 SSE → 增量渲染（CloudModel 已留 onText 回调契约，
-   改 UI 层即可，非敏感）。验收：打字机式增量显示 + 可中断。
+1. **C1 UI 增量流式**：**已完成（2026-11-22，见 12_C1_STREAMING_UX.md）**。4/4 云协议全走 `transport.stream` 逐 delta 流式（补齐 `OPENAI_RESPONSES` + fail-closed）、native 40ms 合并推送 `agentStream` + 180ms 活跃兜底轮询、多步重置与在途停止干净归因、打字机平滑（emoji 代理对安全 + `reduceMotion`）+ 零闪烁 `settling` 过渡 + 近底跟随；agent-core JVM 122/122、`:app:compileDebugKotlin` 绿、`test:agentStream` 归入 `test:agentChain`。
 2. **C2 安全门落地**（敏感，逐项批）：审批 TTL(#17)、onTimeout 自限时(#23)、可中断取消(#25)、
    敏感词误报收敛(#15，不放宽方向)、home/recents 语义(候选2)。验收：各门 JVM 契约 + 真验。
 3. **C3 记忆/持久化深度**：RunStore 持久化 + 跨会话记忆（敏感，批准）。验收：重启恢复 + 迁移规程。

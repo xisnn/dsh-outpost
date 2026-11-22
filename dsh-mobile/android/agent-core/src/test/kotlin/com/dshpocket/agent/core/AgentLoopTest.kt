@@ -383,4 +383,117 @@ class AgentLoopTest {
         val sent = model.requests.last().messages.filterIsInstance<AgentMessage.Tool>()
         assertEquals(listOf("payload-c1", "payload-c2"), sent.map { it.content })
     }
+
+    private class FakeStreamingModel(
+        private val steps: List<Pair<List<String>, ModelReply>>,
+    ) : StreamingModelClient {
+        private var index = 0
+
+        override fun complete(request: ModelRequest): ModelReply = complete(request) { }
+
+        override fun complete(request: ModelRequest, onText: (String) -> Unit): ModelReply {
+            val (deltas, reply) = steps.getOrNull(index++)
+                ?: return ModelReply.Failure("no-reply", "fake streaming model exhausted")
+            for (delta in deltas) onText(delta)
+            return reply
+        }
+    }
+
+    @Test
+    fun `streaming model emits step start and incremental text deltas across steps`() {
+        val (workspace, registry) = workspace()
+        Files.writeString(workspace.root.resolve("input.txt"), "hello")
+        val model = FakeStreamingModel(
+            listOf(
+                listOf("Reading ", "file...") to ModelReply.Calls(
+                    listOf(ToolCall("c1", "workspace_read", mapOf("path" to "input.txt"))),
+                    "Reading file...",
+                ),
+                listOf("File ", "says ", "hello.") to ModelReply.Text("File says hello."),
+            ),
+        )
+        val trace = mutableListOf<String>()
+        val observer = object : RunObserver {
+            override fun onStepStarted(step: Int) {
+                trace += "step:$step"
+            }
+
+            override fun onText(delta: String) {
+                trace += "delta:$delta"
+            }
+        }
+        val result = AgentLoop(
+            model,
+            ActionExecutor(registry, RecordingGate(ApprovalDecision.ALLOW_ONCE)),
+            MemoryRunStore(),
+            observer = observer,
+        ).run(RunSpec("run-stream", "read and explain", maxSteps = 4))
+
+        assertEquals(RunPhase.COMPLETED, result.phase)
+        assertEquals("File says hello.", result.finalText)
+        assertEquals(
+            listOf(
+                "step:1",
+                "delta:Reading ",
+                "delta:file...",
+                "step:2",
+                "delta:File ",
+                "delta:says ",
+                "delta:hello.",
+            ),
+            trace,
+        )
+    }
+
+    @Test
+    fun `streaming observer receives tool lifecycle alongside text deltas`() {
+        val (workspace, registry) = workspace()
+        Files.writeString(workspace.root.resolve("input.txt"), "ok")
+        val model = FakeStreamingModel(
+            listOf(
+                listOf("Checking") to ModelReply.Calls(
+                    listOf(ToolCall("c1", "workspace_read", mapOf("path" to "input.txt"))),
+                    "Checking",
+                ),
+                listOf("All done") to ModelReply.Text("All done"),
+            ),
+        )
+        val trace = mutableListOf<String>()
+        val observer = object : RunObserver {
+            override fun onStepStarted(step: Int) {
+                trace += "step:$step"
+            }
+
+            override fun onText(delta: String) {
+                trace += "text:$delta"
+            }
+
+            override fun onToolStarted(call: ToolCall) {
+                trace += "tool_start:${call.name}"
+            }
+
+            override fun onToolFinished(call: ToolCall, result: ToolResult) {
+                trace += "tool_end:${call.name}:${result.status}"
+            }
+        }
+        val result = AgentLoop(
+            model,
+            ActionExecutor(registry, RecordingGate(ApprovalDecision.ALLOW_ONCE)),
+            MemoryRunStore(),
+            observer = observer,
+        ).run(RunSpec("run-stream-tools", "check", maxSteps = 4))
+
+        assertEquals(RunPhase.COMPLETED, result.phase)
+        assertEquals(
+            listOf(
+                "step:1",
+                "text:Checking",
+                "tool_start:workspace_read",
+                "tool_end:workspace_read:OK",
+                "step:2",
+                "text:All done",
+            ),
+            trace,
+        )
+    }
 }

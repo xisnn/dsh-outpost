@@ -146,6 +146,133 @@ class CloudModelClientTest {
     }
 
     @Test
+    fun `openai responses emits text deltas while streaming`() {
+        val transport = FakeTransport(
+            HttpResponse(
+                200,
+                sse(
+                    "data: {\"type\":\"response.output_text.delta\",\"delta\":\"Hello\"}",
+                    "data: {\"type\":\"response.output_text.delta\",\"delta\":\" world\"}",
+                    "data: " + """{"type":"response.completed","response":{"status":"completed","output":[{"type":"message","content":[{"type":"output_text","text":"Hello world"}]}]}}""",
+                ),
+            ),
+        )
+        val deltas = mutableListOf<String>()
+        val reply = CloudModelClient(config(ModelProtocol.OPENAI_RESPONSES, "https://api.example/v1"), transport)
+            .complete(request()) { deltas += it }
+
+        assertEquals(listOf("Hello", " world"), deltas)
+        assertEquals("Hello world", (reply as ModelReply.Text).text)
+        assertTrue(bodyOf(transport)["stream"]!!.jsonPrimitive.content == "true")
+    }
+
+    @Test
+    fun `openai responses parses streamed completed response with function call`() {
+        val transport = FakeTransport(
+            HttpResponse(
+                200,
+                sse(
+                    "data: {\"type\":\"response.output_text.delta\",\"delta\":\"working\"}",
+                    "data: " + """{"type":"response.completed","response":{"status":"completed","output":[{"type":"message","content":[{"type":"output_text","text":"working"}]},{"type":"function_call","call_id":"call_3","name":"workspace_read","arguments":"{\"path\":\"input.txt\"}"}]}}""",
+                ),
+            ),
+        )
+        val reply = CloudModelClient(config(ModelProtocol.OPENAI_RESPONSES, "https://api.example/v1"), transport)
+            .complete(request())
+
+        assertTrue(reply is ModelReply.Calls)
+        val calls = reply as ModelReply.Calls
+        assertEquals("working", calls.text)
+        assertEquals("call_3", calls.calls.single().id)
+        assertEquals("input.txt", calls.calls.single().arguments["path"])
+    }
+
+    @Test
+    fun `openai responses fails closed on failed incomplete or malformed sse`() {
+        val failed = CloudModelClient(
+            config(ModelProtocol.OPENAI_RESPONSES, "https://api.example/v1"),
+            FakeTransport(
+                HttpResponse(
+                    200,
+                    sse(
+                        "data: {\"type\":\"response.output_text.delta\",\"delta\":\"partial\"}",
+                        "data: {\"type\":\"response.failed\",\"response\":{\"status\":\"failed\",\"error\":{\"message\":\"rate limited\"}}}",
+                    ),
+                ),
+            ),
+        ).complete(request())
+        assertTrue(failed is ModelReply.Failure)
+        assertEquals("provider-error", (failed as ModelReply.Failure).code)
+        assertTrue(failed.message.contains("rate limited"))
+
+        val incomplete = CloudModelClient(
+            config(ModelProtocol.OPENAI_RESPONSES, "https://api.example/v1"),
+            FakeTransport(
+                HttpResponse(
+                    200,
+                    sse(
+                        "data: {\"type\":\"response.output_text.delta\",\"delta\":\"cut off\"}",
+                        "data: {\"type\":\"response.incomplete\",\"response\":{\"status\":\"incomplete\",\"incomplete_details\":{\"reason\":\"max_output_tokens\"}}}",
+                    ),
+                ),
+            ),
+        ).complete(request())
+        assertTrue(incomplete is ModelReply.Failure)
+        assertEquals("provider-error", (incomplete as ModelReply.Failure).code)
+        assertTrue(incomplete.message.contains("max_output_tokens"))
+
+        val malformed = CloudModelClient(
+            config(ModelProtocol.OPENAI_RESPONSES, "https://api.example/v1"),
+            FakeTransport(HttpResponse(200, "data: {not-valid-json")),
+        ).complete(request())
+        assertTrue(malformed is ModelReply.Failure)
+        assertEquals("protocol-error", (malformed as ModelReply.Failure).code)
+    }
+
+    @Test
+    fun `anthropic emits text deltas while streaming`() {
+        val transport = FakeTransport(
+            HttpResponse(
+                200,
+                sse(
+                    "event: content_block_delta\ndata: {\"type\":\"content_block_delta\",\"index\":0,\"delta\":{\"type\":\"text_delta\",\"text\":\"Hello\"}}",
+                    "event: content_block_delta\ndata: {\"type\":\"content_block_delta\",\"index\":0,\"delta\":{\"type\":\"text_delta\",\"text\":\" Claude\"}}",
+                    "event: message_delta\ndata: {\"type\":\"message_delta\",\"delta\":{\"stop_reason\":\"end_turn\"}}",
+                    "event: message_stop\ndata: {\"type\":\"message_stop\"}",
+                ),
+            ),
+        )
+        val deltas = mutableListOf<String>()
+        val reply = CloudModelClient(config(ModelProtocol.ANTHROPIC, "https://api.anthropic.com"), transport)
+            .complete(request()) { deltas += it }
+
+        assertEquals(listOf("Hello", " Claude"), deltas)
+        assertEquals("Hello Claude", (reply as ModelReply.Text).text)
+    }
+
+    @Test
+    fun `gemini emits text deltas while streaming and skips thought parts`() {
+        val transport = FakeTransport(
+            HttpResponse(
+                200,
+                sse(
+                    "data: {\"candidates\":[{\"content\":{\"parts\":[{\"text\":\"internal reasoning\",\"thought\":true}]}}]}",
+                    "data: {\"candidates\":[{\"content\":{\"parts\":[{\"text\":\"Hello \"}]}}]}",
+                    "data: {\"candidates\":[{\"content\":{\"parts\":[{\"text\":\"Gemini\"}]},\"finishReason\":\"STOP\"}]}",
+                ),
+            ),
+        )
+        val deltas = mutableListOf<String>()
+        val reply = CloudModelClient(
+            config(ModelProtocol.GEMINI, "https://generativelanguage.googleapis.com"),
+            transport,
+        ).complete(request()) { deltas += it }
+
+        assertEquals(listOf("Hello ", "Gemini"), deltas)
+        assertEquals("Hello Gemini", (reply as ModelReply.Text).text)
+    }
+
+    @Test
     fun `anthropic maps system and parses text deltas`() {
         val transport = FakeTransport(
             HttpResponse(

@@ -4,6 +4,8 @@ import android.app.KeyguardManager
 import android.content.Intent
 import android.net.Uri
 import android.os.Build
+import android.os.Handler
+import android.os.Looper
 import android.provider.Settings
 import com.facebook.react.ReactPackage
 import com.facebook.react.bridge.NativeModule
@@ -11,15 +13,37 @@ import com.facebook.react.bridge.Promise
 import com.facebook.react.bridge.ReactApplicationContext
 import com.facebook.react.bridge.ReactContextBaseJavaModule
 import com.facebook.react.bridge.ReactMethod
+import com.facebook.react.modules.core.DeviceEventManagerModule
 import com.facebook.react.uimanager.ViewManager
 import com.dshpocket.agent.background.BackgroundDisplayController
 import com.dshpocket.agent.background.BackgroundModeStore
 import org.json.JSONObject
 import java.util.concurrent.Executors
+import java.util.concurrent.atomic.AtomicInteger
 
 /** P6-0 thin bridge: the native runtime owns the run; RN reads snapshots and decides approvals. */
 class AgentModule(private val react: ReactApplicationContext) : ReactContextBaseJavaModule(react) {
+    companion object {
+        private const val STREAM_EVENT_NAME = "agentStream"
+        private const val STREAM_THROTTLE_MS = 40L
+    }
+
     override fun getName() = "OutpostAgent"
+
+    private val streamListeners = AtomicInteger(0)
+    private val streamLock = Any()
+    private val streamMain = Handler(Looper.getMainLooper())
+    private var lastStreamEmitAt = 0L
+    private var pendingStreamUpdate: AgentRuntime.StreamUpdate? = null
+    private val flushStream = Runnable {
+        val next = synchronized(streamLock) {
+            val item = pendingStreamUpdate
+            pendingStreamUpdate = null
+            if (item != null) lastStreamEmitAt = System.currentTimeMillis()
+            item
+        }
+        if (next != null) emitStreamNow(next)
+    }
 
     /** Daemon, so a pending background-display wait can never hold the process open. */
     private val startExecutor = Executors.newSingleThreadExecutor { runnable ->
@@ -407,20 +431,72 @@ class AgentModule(private val react: ReactApplicationContext) : ReactContextBase
 
     @ReactMethod
     fun addListener(eventName: String) {
-        // The P6-0 client polls snapshots; this keeps NativeEventEmitter callers harmless.
+        if (eventName != STREAM_EVENT_NAME || !supported()) return
+        if (streamListeners.incrementAndGet() == 1) {
+            AgentRuntime.get(react).setStreamListener { update -> onRuntimeStream(update) }
+        }
     }
 
     @ReactMethod
     fun removeListeners(count: Double) {
-        // No native listener registry yet.
+        val remove = count.toInt().coerceAtLeast(1)
+        val remaining = streamListeners.updateAndGet { current -> (current - remove).coerceAtLeast(0) }
+        if (remaining == 0) detachStreamListener()
     }
 
     override fun invalidate() {
+        detachStreamListener()
         // Interrupts an in-flight startAndWait, which treats interruption as "stop
         // waiting" and returns rather than blocking on a module being torn down.
         runCatching { startExecutor.shutdownNow() }
         runCatching { BackgroundDisplayController.close(react) }
         super.invalidate()
+    }
+
+    private fun onRuntimeStream(update: AgentRuntime.StreamUpdate) {
+        if (streamListeners.get() <= 0) return
+        if (update.immediate) {
+            synchronized(streamLock) {
+                pendingStreamUpdate = null
+                lastStreamEmitAt = System.currentTimeMillis()
+            }
+            streamMain.removeCallbacks(flushStream)
+            emitStreamNow(update)
+            return
+        }
+        val delayMs: Long
+        synchronized(streamLock) {
+            pendingStreamUpdate = update
+            val elapsed = System.currentTimeMillis() - lastStreamEmitAt
+            delayMs = if (elapsed >= STREAM_THROTTLE_MS) 0L else STREAM_THROTTLE_MS - elapsed
+        }
+        streamMain.removeCallbacks(flushStream)
+        if (delayMs == 0L) {
+            streamMain.post(flushStream)
+        } else {
+            streamMain.postDelayed(flushStream, delayMs)
+        }
+    }
+
+    private fun emitStreamNow(update: AgentRuntime.StreamUpdate) {
+        if (streamListeners.get() <= 0 || !react.hasActiveReactInstance()) return
+        val payload = JSONObject()
+            .put("runId", update.runId ?: JSONObject.NULL)
+            .put("phase", update.phase)
+            .put("step", update.step)
+            .put("streamText", update.streamText ?: JSONObject.NULL)
+            .toString()
+        runCatching {
+            react.getJSModule(DeviceEventManagerModule.RCTDeviceEventEmitter::class.java)
+                .emit(STREAM_EVENT_NAME, payload)
+        }
+    }
+
+    private fun detachStreamListener() {
+        streamListeners.set(0)
+        synchronized(streamLock) { pendingStreamUpdate = null }
+        streamMain.removeCallbacks(flushStream)
+        if (supported()) runCatching { AgentRuntime.get(react).setStreamListener(null) }
     }
 
     private fun supported() = Build.VERSION.SDK_INT >= 26

@@ -81,6 +81,7 @@ class AgentRuntime private constructor(context: Context) {
 
     private var runId: String? = null
     private var active = false
+    private var currentStep = 0
     private var pending: ApprovalRequest? = null
     // P6-next candidate 3: node identity captured when the approval is rendered.
     @Volatile private var approvalBoundElement = false
@@ -89,6 +90,7 @@ class AgentRuntime private constructor(context: Context) {
     @Volatile private var approvalIssuedAt: Long? = null
     @Volatile private var runStartedAt: Long? = null
     @Volatile private var activeModel: ModelClient? = null
+    @Volatile private var streamListener: ((StreamUpdate) -> Unit)? = null
     private var decision: ApprovalDecision? = null
     private var pendingHandoff: String? = null
     private var handoffResume: Boolean? = null
@@ -107,6 +109,33 @@ class AgentRuntime private constructor(context: Context) {
     private val liveText = StringBuilder()
     private val liveEvents = mutableListOf<JSONObject>()
     private var eventSequence = 0
+
+    data class StreamUpdate(
+        val runId: String?,
+        val phase: String,
+        val step: Int,
+        val streamText: String?,
+        val immediate: Boolean,
+    )
+
+    fun setStreamListener(listener: ((StreamUpdate) -> Unit)?) {
+        streamListener = listener
+    }
+
+    private fun buildStreamUpdateLocked(immediate: Boolean): StreamUpdate {
+        val phase = when {
+            pending != null || pendingHandoff != null -> "waiting_user"
+            stopped -> fallbackPhase
+            active -> RunPhase.RUNNING.name.lowercase()
+            else -> fallbackPhase
+        }
+        val text = if (active && liveText.isNotEmpty()) liveText.toString() else null
+        return StreamUpdate(runId, phase, currentStep, text, immediate)
+    }
+
+    private fun emitStream(update: StreamUpdate?) {
+        if (update != null) streamListener?.invoke(update)
+    }
 
     private data class QueuedTask(
         val id: String,
@@ -220,6 +249,7 @@ class AgentRuntime private constructor(context: Context) {
         val id = UUID.randomUUID().toString()
         runId = id
         active = true
+        currentStep = 0
         // A finish recorded for a previous run must not stop the service that
         // this run is about to ask for.
         finishUnobserved = false
@@ -253,6 +283,8 @@ class AgentRuntime private constructor(context: Context) {
         val prior = if (recordThread) thread.priorMessages() else emptyList()
         if (recordThread) thread.append("user", goal)
         var result: com.dshpocket.agent.core.RunResult? = null
+        var interruptedByStop = false
+        var interruptedPartial: String? = null
         var backgroundBound = false
         try {
             val toolList = mutableListOf(
@@ -271,13 +303,34 @@ class AgentRuntime private constructor(context: Context) {
             }
             val gate = ApprovalGate { request -> awaitApproval(request) }
             val observer = object : RunObserver {
-                override fun onText(delta: String) {
+                override fun onStepStarted(step: Int) {
+                    val update: StreamUpdate?
                     lock.lock()
                     try {
-                        if (active) liveText.append(delta)
+                        currentStep = step
+                        if (active) liveText.setLength(0)
+                        update = if (active) buildStreamUpdateLocked(immediate = true) else null
                     } finally {
                         lock.unlock()
                     }
+                    emitStream(update)
+                }
+
+                override fun onText(delta: String) {
+                    if (delta.isEmpty()) return
+                    val update: StreamUpdate?
+                    lock.lock()
+                    try {
+                        if (active && !stopped) {
+                            liveText.append(delta)
+                            update = buildStreamUpdateLocked(immediate = false)
+                        } else {
+                            update = null
+                        }
+                    } finally {
+                        lock.unlock()
+                    }
+                    emitStream(update)
                 }
 
                 override fun onToolStarted(call: com.dshpocket.agent.core.ToolCall) {
@@ -339,8 +392,15 @@ class AgentRuntime private constructor(context: Context) {
                 observer = observer,
             ).run(RunSpec(id, goal, maxSteps = maxSteps, priorMessages = prior))
             result = runResult
+            var terminalUpdate: StreamUpdate? = null
             lock.lock()
             try {
+                val partial = liveText.toString().trim().ifEmpty { null }
+                val abortedInFlight = stopped &&
+                    runResult.phase == RunPhase.FAILED &&
+                    runResult.error?.startsWith("model-transport:") == true
+                interruptedByStop = abortedInFlight || runResult.phase == RunPhase.INTERRUPTED
+                if (interruptedByStop) interruptedPartial = partial
                 pending = null
                 pendingHandoff = null
                 handoffResume = null
@@ -349,20 +409,31 @@ class AgentRuntime private constructor(context: Context) {
                 backgroundLost = false
                 active = false
                 liveText.setLength(0)
-                fallbackPhase = runResult.phase.name.lowercase()
+                fallbackPhase = if (abortedInFlight) {
+                    RunPhase.INTERRUPTED.name.lowercase()
+                } else {
+                    runResult.phase.name.lowercase()
+                }
                 finalText = runResult.finalText
-                lastError = runResult.error
+                lastError = if (abortedInFlight) "stopped-by-user" else runResult.error
+                terminalUpdate = buildStreamUpdateLocked(immediate = true)
             } finally {
                 lock.unlock()
             }
+            emitStream(terminalUpdate)
         } catch (error: Exception) {
             finishWithFailure(id, "agent-error: ${error.message}")
         } finally {
             if (backgroundBound) PhoneBridge.endRun()
             if (recordThread) {
                 val answer = result?.finalText
-                    ?: result?.let { "任务未完成：${it.error ?: it.phase.name.lowercase()}" }
-                    ?: "任务失败：${lastError ?: "未知错误"}"
+                    ?: if (interruptedByStop) {
+                        val partial = interruptedPartial
+                        if (!partial.isNullOrBlank()) "$partial\n\n（已中断）" else "任务已中断"
+                    } else {
+                        result?.let { "任务未完成：${it.error ?: it.phase.name.lowercase()}" }
+                            ?: "任务失败：${lastError ?: "未知错误"}"
+                    }
                 thread.append("assistant", answer)
             }
             var next: QueuedTask? = null
@@ -374,6 +445,7 @@ class AgentRuntime private constructor(context: Context) {
                     // service alive and carries the thread into the next task.
                     runId = candidate.id
                     active = true
+                    currentStep = 0
                     liveText.setLength(0)
                     liveEvents.clear()
                     eventSequence = 0
@@ -541,6 +613,7 @@ class AgentRuntime private constructor(context: Context) {
     }
 
     fun stop(): JSONObject {
+        val update: StreamUpdate?
         lock.lock()
         try {
             if (!active) return error("NO_ACTIVE_RUN")
@@ -560,9 +633,11 @@ class AgentRuntime private constructor(context: Context) {
             fallbackPhase = RunPhase.STOPPING.name.lowercase()
             approvalChanged.signalAll()
             controlChanged.signalAll()
+            update = buildStreamUpdateLocked(immediate = true)
         } finally {
             lock.unlock()
         }
+        emitStream(update)
         return snapshot()
     }
 
@@ -747,6 +822,7 @@ class AgentRuntime private constructor(context: Context) {
     }
 
     private fun finishWithFailure(id: String, message: String) {
+        val update: StreamUpdate?
         lock.lock()
         try {
             active = false
@@ -758,9 +834,11 @@ class AgentRuntime private constructor(context: Context) {
             backgroundLost = false
             fallbackPhase = RunPhase.FAILED.name.lowercase()
             lastError = message
+            update = buildStreamUpdateLocked(immediate = true)
         } finally {
             lock.unlock()
         }
+        emitStream(update)
         try {
             runs.transition(id, RunPhase.FAILED, message)
         } catch (_: Exception) {

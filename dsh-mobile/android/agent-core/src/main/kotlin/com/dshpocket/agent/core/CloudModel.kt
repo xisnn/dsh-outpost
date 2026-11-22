@@ -54,9 +54,9 @@ data class ModelConfig(
  * There is no cross-provider fallback: one run uses exactly one configured
  * provider/model, and any protocol or transport problem is a visible failure.
  *
- * P6-1 deliberately parses the complete SSE body before returning. The loop is
- * synchronous today; incremental UI streaming can be added later without
- * changing the provider-neutral reply contract.
+ * All four protocols stream text deltas incrementally via [HttpTransport.stream]
+ * and [onText] while accumulating the SSE body to parse structured tool calls
+ * and terminal failures without changing the provider-neutral reply contract.
  */
 class CloudModelClient(
     private val config: ModelConfig,
@@ -126,22 +126,20 @@ class CloudModelClient(
         val body = buildJsonObject {
             put("model", config.model)
             put("max_output_tokens", config.maxOutputTokens)
+            put("stream", true)
             if (system != null) put("instructions", system)
             put("input", responsesInput(request.messages))
             if (request.tools.isNotEmpty()) put("tools", responsesTools(request.tools))
         }.toString()
-        val response = transport.post(
+        val response = transport.stream(
             HttpRequest(
                 url = endpoint(config.baseUrl, "/responses"),
                 headers = bearerHeaders(),
                 body = body,
             ),
-        )
+        ) { event -> responsesTextDelta(event)?.let(onText) }
         httpFailure(response)?.let { return it }
-        val reply = parseResponsesResponse(response.body)
-        if (reply is ModelReply.Text) onText(reply.text)
-        if (reply is ModelReply.Calls && !reply.text.isNullOrBlank()) onText(reply.text)
-        return reply
+        return parseResponsesResponse(response.body)
     }
 
     private fun anthropic(request: ModelRequest, onText: (String) -> Unit): ModelReply {
@@ -340,6 +338,15 @@ private fun openAiTextDelta(event: SseEvent): String? {
     return delta["content"].textContent()
 }
 
+private fun responsesTextDelta(event: SseEvent): String? {
+    val data = event.data.trim()
+    if (data.isEmpty() || data == "[DONE]") return null
+    val root = parseObject(data) ?: return null
+    val type = event.event ?: root.string("type")
+    if (type != "response.output_text.delta") return null
+    return root.string("delta")?.takeIf { it.isNotEmpty() }
+}
+
 private fun anthropicTextDelta(event: SseEvent): String? {
     val root = parseObject(event.data) ?: return null
     val type = event.event ?: root.string("type")
@@ -509,7 +516,44 @@ private fun responsesTools(tools: List<ToolSpec>): JsonArray = buildJsonArray {
 }
 
 private fun parseResponsesResponse(body: String): ModelReply {
+    val events = parseSse(body)
+    if (events.isNotEmpty()) {
+        var completed: JsonObject? = null
+        for (event in events) {
+            val data = event.data.trim()
+            if (data.isEmpty() || data == "[DONE]") continue
+            if (event.event == "error") return ModelReply.Failure("provider-error", providerMessage(data))
+            val root = parseObject(data)
+                ?: return ModelReply.Failure("protocol-error", "invalid SSE JSON from provider")
+            providerError(root)?.let { return it }
+            when (event.event ?: root.string("type")) {
+                "response.completed" -> completed = root["response"] as? JsonObject ?: completed
+                "response.failed" -> {
+                    val nested = (root["response"] as? JsonObject)?.let { providerError(it) }
+                    return nested ?: ModelReply.Failure("provider-error", "provider reported a failed response")
+                }
+                "response.incomplete" -> {
+                    val reason = ((root["response"] as? JsonObject)
+                        ?.get("incomplete_details") as? JsonObject)
+                        ?.string("reason")
+                    val detail = if (!reason.isNullOrBlank()) {
+                        "provider returned an incomplete response ($reason)"
+                    } else {
+                        "provider returned an incomplete response"
+                    }
+                    return ModelReply.Failure("provider-error", detail)
+                }
+                "error" -> return ModelReply.Failure("provider-error", providerMessage(data))
+            }
+        }
+        return if (completed != null) parseResponsesObject(completed)
+        else ModelReply.Failure("empty-reply", "provider returned no completed response")
+    }
     val root = parseObject(body) ?: return ModelReply.Failure("protocol-error", "invalid JSON from provider")
+    return parseResponsesObject(root)
+}
+
+private fun parseResponsesObject(root: JsonObject): ModelReply {
     providerError(root)?.let { return it }
     val status = root.string("status")
     if (status == "failed") {

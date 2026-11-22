@@ -20,10 +20,12 @@ import AsyncStorage from '@react-native-async-storage/async-storage';
 
 import { ChatComposer } from '../components/ChatComposer';
 import { AgentScreenOffNotice } from '../components/AgentScreenOffNotice';
+import { AgentStreamingBubble } from '../components/AgentStreamingBubble';
 import { Header } from '../components/Header';
 import { MotionPressable as Pressable } from '../components/MotionPressable';
 import { useNav } from '../nav/NavHost';
 import { useTheme } from '../design/theme';
+import { useReduceMotion } from '../design/useReduceMotion';
 import {
   agentClient,
   APPROVAL_BACKGROUND_LOST_TEXT,
@@ -33,6 +35,17 @@ import {
   type AgentSnapshot,
   type AgentThreadMessage,
 } from '../core/agent';
+import {
+  advanceRevealedLength,
+  applyStreamEvent,
+  isActiveAgentPhase,
+  isTerminalAgentPhase,
+  resolveStreamingBubble,
+  safeSlice,
+  snapshotPollIntervalMs,
+  TYPEWRITER_TICK_MS,
+} from '../core/agentStream';
+import { distanceFromBottom, NEAR_BOTTOM_PX } from '../core/scrollFollow';
 
 const CONSENT_KEY = 'agent_consent_v1';
 const MAX_DRAFT = 4000;
@@ -54,6 +67,7 @@ const failureText = (failure: unknown): string => String((failure as Error)?.mes
 export function AgentButlerScreen({ active = true }: { active?: boolean }) {
   const tv = useTheme();
   const nav = useNav();
+  const reduceMotion = useReduceMotion();
   const styles = useMemo(() => makeStyles(tv), [tv]);
   const [snapshot, setSnapshot] = useState<AgentSnapshot | null>(null);
   const [settings, setSettings] = useState<AgentModelSettings | null>(null);
@@ -66,7 +80,11 @@ export function AgentButlerScreen({ active = true }: { active?: boolean }) {
   const [backgroundFrame, setBackgroundFrame] = useState<string | null>(null);
   const [backgroundBusy, setBackgroundBusy] = useState(false);
   const [autoStartEnabled, setAutoStartEnabled] = useState(false);
+  const [revealedLen, setRevealedLen] = useState(0);
   const scroll = useRef<ScrollView>(null);
+  const nearBottomRef = useRef(true);
+  const phaseRef = useRef<AgentSnapshot['phase']>('idle');
+  const streamScopeRef = useRef('');
   const autoStartRef = useRef(false);
   // A snapshot read error clears on the next successful read; an action error
   // has to survive the 700ms poll, or the user sees it flash and vanish.
@@ -136,6 +154,10 @@ export function AgentButlerScreen({ active = true }: { active?: boolean }) {
   }, []);
 
   useEffect(() => {
+    phaseRef.current = snapshot?.phase ?? 'idle';
+  }, [snapshot?.phase]);
+
+  useEffect(() => {
     if (!active) return;
     let stopped = false;
     let timer: ReturnType<typeof setTimeout> | undefined;
@@ -143,8 +165,16 @@ export function AgentButlerScreen({ active = true }: { active?: boolean }) {
       timer = setTimeout(() => {
         if (stopped) return;
         void refresh().finally(() => { if (!stopped) schedule(); });
-      }, 700);
+      }, snapshotPollIntervalMs(phaseRef.current));
     };
+    const unsubscribeStream = agentClient.subscribeStream((event) => {
+      if (stopped) return;
+      setSnapshot((prev) => applyStreamEvent(prev, event));
+      if (isTerminalAgentPhase(event.phase)) {
+        void refresh();
+        void refreshThread();
+      }
+    });
     void refresh();
     void refreshSettings();
     void refreshThread();
@@ -155,6 +185,7 @@ export function AgentButlerScreen({ active = true }: { active?: boolean }) {
     const backgroundTimer = setInterval(() => { if (!stopped) void refreshBackground(); }, 1500);
     return () => {
       stopped = true;
+      unsubscribeStream();
       if (timer !== undefined) clearTimeout(timer);
       clearInterval(threadTimer);
       clearInterval(backgroundTimer);
@@ -187,6 +218,7 @@ export function AgentButlerScreen({ active = true }: { active?: boolean }) {
       nav.push('AgentSettings');
       return;
     }
+    nearBottomRef.current = true;
     setBusy(true);
     errorSource.current = null;
     setError(null);
@@ -209,6 +241,7 @@ export function AgentButlerScreen({ active = true }: { active?: boolean }) {
   }, [busy, consent, draft, nav, refreshThread, settings?.hasKey, settings?.model]);
 
   const stop = useCallback(() => {
+    if (busy || phaseRef.current === 'stopping') return;
     setBusy(true);
     errorSource.current = null;
     setError(null);
@@ -223,7 +256,7 @@ export function AgentButlerScreen({ active = true }: { active?: boolean }) {
         setBusy(false);
       }
     })();
-  }, [refreshThread]);
+  }, [busy, refreshThread]);
 
   const decide = useCallback(async (allow: boolean) => {
     const pending = snapshot?.pendingApproval;
@@ -381,22 +414,59 @@ export function AgentButlerScreen({ active = true }: { active?: boolean }) {
   }, []);
 
   const phase = snapshot?.phase ?? 'idle';
-  const running = phase === 'queued' || phase === 'preparing' || phase === 'running' || phase === 'waiting_user';
+  const running = isActiveAgentPhase(phase);
   const pending = snapshot?.pendingApproval ?? null;
   const allowBlocked = isApprovalAllowBlocked(pending);
   const handoff = snapshot?.pendingHandoff ?? null;
   const recovery = snapshot?.recovery ?? null;
   const queue = snapshot?.queue ?? [];
   const events = snapshot?.events ?? [];
-  const streamText = snapshot?.streamText ?? '';
   const configured = Boolean(settings?.hasKey && settings.model);
-  const showWorking = running && !pending && !handoff;
   // `running` excludes failed, so the phase text never renders on failure and
   // the run's own error would leave the screen showing nothing at all.
   const runFailure = phase === 'failed' ? (snapshot?.error ?? '任务失败') : null;
   const backgroundPermissionMissing = Boolean(
     background && background.shizukuRunning && !background.permissionGranted,
   );
+  const streamingBubble = useMemo(
+    () => resolveStreamingBubble({ snapshot, thread, backgroundPermissionMissing }),
+    [snapshot, thread, backgroundPermissionMissing],
+  );
+  const streamScope = `${snapshot?.runId ?? ''}:${snapshot?.step ?? 0}`;
+  const instantReveal =
+    reduceMotion || streamingBubble.mode === 'settling' || streamingBubble.mode === 'stopping';
+
+  useEffect(() => {
+    const targetLen = streamingBubble.targetText.length;
+    if (!streamingBubble.visible || targetLen === 0) {
+      streamScopeRef.current = streamScope;
+      setRevealedLen(0);
+      return;
+    }
+    if (instantReveal) {
+      streamScopeRef.current = streamScope;
+      setRevealedLen(targetLen);
+      return;
+    }
+    if (streamScopeRef.current !== streamScope) {
+      streamScopeRef.current = streamScope;
+      setRevealedLen(advanceRevealedLength(0, targetLen, false));
+      return;
+    }
+    if (revealedLen > targetLen) {
+      setRevealedLen(targetLen);
+      return;
+    }
+    if (revealedLen >= targetLen) return;
+    const timer = setTimeout(() => {
+      setRevealedLen((current) => advanceRevealedLength(current, targetLen, false));
+    }, TYPEWRITER_TICK_MS);
+    return () => clearTimeout(timer);
+  }, [instantReveal, revealedLen, streamScope, streamingBubble.targetText.length, streamingBubble.visible]);
+
+  const visibleStreamText = instantReveal
+    ? streamingBubble.targetText
+    : safeSlice(streamingBubble.targetText, revealedLen);
   const backgroundNeedsAttention = Boolean(
     !snapshot?.backgroundLost &&
     autoStartEnabled &&
@@ -446,8 +516,10 @@ export function AgentButlerScreen({ active = true }: { active?: boolean }) {
   }, [background, openShizuku, retryBackground]);
 
   useEffect(() => {
-    if (!active) return;
-    const timer = setTimeout(() => scroll.current?.scrollToEnd({ animated: true }), 60);
+    if (!active || !nearBottomRef.current) return;
+    const timer = setTimeout(() => {
+      if (nearBottomRef.current) scroll.current?.scrollToEnd({ animated: true });
+    }, 60);
     return () => clearTimeout(timer);
   }, [active, thread.length, running, pending, handoff, queue.length]);
 
@@ -496,7 +568,19 @@ export function AgentButlerScreen({ active = true }: { active?: boolean }) {
         style={styles.scroll}
         contentContainerStyle={styles.messages}
         keyboardShouldPersistTaps="handled"
-        onContentSizeChange={() => scroll.current?.scrollToEnd({ animated: false })}
+        scrollEventThrottle={64}
+        onScroll={(event) => {
+          const { contentSize, contentOffset, layoutMeasurement } = event.nativeEvent;
+          nearBottomRef.current =
+            distanceFromBottom({
+              contentHeight: contentSize.height,
+              offsetY: contentOffset.y,
+              viewportHeight: layoutMeasurement.height,
+            }) <= NEAR_BOTTOM_PX;
+        }}
+        onContentSizeChange={() => {
+          if (nearBottomRef.current) scroll.current?.scrollToEnd({ animated: false });
+        }}
       >
         {recovery ? (
           <View style={[styles.systemCard, styles.attentionCard]}>
@@ -678,22 +762,17 @@ export function AgentButlerScreen({ active = true }: { active?: boolean }) {
           </View>
         ) : null}
 
-        {showWorking ? (
-          <View style={styles.assistantRow}>
-            <View style={styles.assistantBubble}>
-              <View style={styles.workingRow}>
-                <ActivityIndicator size="small" color={tv.colors.accent} />
-                <Text style={styles.workingText}>
-                  {snapshot?.backgroundLost
-                    ? (backgroundPermissionMissing ? '等待 Shizuku 授权…' : '等待后台屏恢复…')
-                    : phase === 'waiting_user'
-                      ? '等你处理…'
-                      : `${PHASE_TEXT[phase]}${snapshot?.step ? ` · 第 ${snapshot.step} 步` : ''}${snapshot?.backgroundDisplayId ? ' · 后台屏' : ''}`}
-                </Text>
-              </View>
-              {streamText ? <Text style={styles.streamText} selectable>{streamText}</Text> : null}
-            </View>
-          </View>
+        {streamingBubble.visible && streamingBubble.mode !== 'hidden' ? (
+          <AgentStreamingBubble
+            mode={streamingBubble.mode}
+            statusLabel={streamingBubble.statusLabel}
+            text={visibleStreamText}
+            showCursor={streamingBubble.showCursor}
+            canStop={streamingBubble.canStop}
+            stopDisabled={busy || phase === 'stopping'}
+            reduceMotion={reduceMotion}
+            onStop={() => void stop()}
+          />
         ) : null}
 
         {events.length > 0 ? (

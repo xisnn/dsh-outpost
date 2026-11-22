@@ -1,4 +1,13 @@
-import { NativeModules, Platform } from 'react-native';
+import { NativeEventEmitter, NativeModules, Platform } from 'react-native';
+
+export const AGENT_STREAM_EVENT = 'agentStream';
+
+export interface AgentStreamEvent {
+  runId: string | null;
+  phase: AgentPhase;
+  step: number;
+  streamText: string | null;
+}
 
 export type AgentPhase =
   | 'idle'
@@ -255,6 +264,22 @@ export const agentClient = {
     JSON.parse(await native().getBackgroundAutoStart()) as BackgroundAutoStart,
   setBackgroundAutoStart: async (enabled: boolean) =>
     JSON.parse(await native().setBackgroundAutoStart(enabled)) as BackgroundAutoStart,
+  subscribeStream: (listener: (event: AgentStreamEvent) => void): (() => void) => {
+    const bridge = NativeModules.OutpostAgent as NativeAgent | undefined;
+    if (Platform.OS !== 'android' || !bridge || typeof NativeEventEmitter !== 'function') {
+      return () => undefined;
+    }
+    const emitter = new NativeEventEmitter(bridge as never);
+    const subscription = emitter.addListener(AGENT_STREAM_EVENT, (raw: unknown) => {
+      if (typeof raw !== 'string') return;
+      try {
+        listener(JSON.parse(raw) as AgentStreamEvent);
+      } catch {
+        // Ignore malformed event payloads; snapshot polling remains authoritative.
+      }
+    });
+    return () => subscription.remove();
+  },
 };
 
 export const PROTOCOL_LABELS: Record<AgentProtocol, string> = {

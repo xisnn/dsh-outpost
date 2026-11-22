@@ -467,6 +467,13 @@ export function AgentDemoScreen({ active = true }: { active?: boolean }) {
           </View>
         ) : null}
 
+        {running && snapshot?.streamText ? (
+          <View style={styles.card}>
+            <Text style={styles.label}>流式输出</Text>
+            <Text style={styles.body} selectable>{snapshot.streamText}</Text>
+          </View>
+        ) : null}
+
         {snapshot?.text ? (
           <View style={styles.card}>
             <Text style={styles.label}>结果</Text>
