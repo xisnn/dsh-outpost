@@ -83,6 +83,7 @@ class AgentRuntime private constructor(context: Context) {
     private val controlChanged = lock.newCondition()
 
     private var runId: String? = null
+    private var currentGoal: String? = null
     private var active = false
     private var currentStep = 0
     private var pending: ApprovalRequest? = null
@@ -238,8 +239,9 @@ class AgentRuntime private constructor(context: Context) {
             PhoneBridge.runUsesBackground()
 
     fun startDemo(): JSONObject {
+        val demoGoal = "P6 demo: read input and write output"
         val backgroundExpected = expectedBackground()
-        val id = beginRun() ?: return snapshot()
+        val id = beginRun(demoGoal) ?: return snapshot()
         lock.lock()
         try { queue.clear() } finally { lock.unlock() }
         try {
@@ -254,7 +256,7 @@ class AgentRuntime private constructor(context: Context) {
             executeRun(
                 id = id,
                 model = DemoModel(),
-                goal = "P6 demo: read input and write output",
+                goal = demoGoal,
                 maxSteps = 6,
                 backgroundExpected = backgroundExpected,
             )
@@ -288,7 +290,7 @@ class AgentRuntime private constructor(context: Context) {
                 )
                 return snapshotLocked()
             }
-            id = startRunLocked()
+            id = startRunLocked(goal.trim())
         } finally {
             lock.unlock()
         }
@@ -305,19 +307,20 @@ class AgentRuntime private constructor(context: Context) {
         return snapshot()
     }
 
-    private fun beginRun(): String? {
+    private fun beginRun(goal: String? = null): String? {
         lock.lock()
         try {
             if (active) return null
-            return startRunLocked()
+            return startRunLocked(goal)
         } finally {
             lock.unlock()
         }
     }
 
-    private fun startRunLocked(): String {
+    private fun startRunLocked(goal: String? = null): String {
         val id = UUID.randomUUID().toString()
         runId = id
+        currentGoal = goal
         active = true
         currentStep = 0
         // A finish recorded for a previous run must not stop the service that
@@ -537,6 +540,7 @@ class AgentRuntime private constructor(context: Context) {
                         val stopTag = when (recordedStopReason) {
                             "run-deadline-exceeded" -> "已超时自动停止（30 分钟上限）"
                             "fgs-system-timeout" -> "系统前台服务超时，已优雅停止"
+                            "screen-off" -> "屏幕已关闭，任务已自动停止"
                             else -> "已中断"
                         }
                         val partial = interruptedPartial
@@ -555,6 +559,7 @@ class AgentRuntime private constructor(context: Context) {
                     // Reuse the same reset path as a fresh run; this keeps the
                     // service alive and carries the thread into the next task.
                     runId = candidate.id
+                    currentGoal = candidate.goal
                     active = true
                     currentStep = 0
                     stopReason = "stopped-by-user"
@@ -805,6 +810,7 @@ class AgentRuntime private constructor(context: Context) {
             .put("supported", true)
             .put("ok", true)
             .put("runId", id ?: JSONObject.NULL)
+            .put("goal", currentGoal ?: run?.goal ?: JSONObject.NULL)
             .put("phase", phase)
             .put("step", run?.step ?: 0)
             .put("paused", paused)

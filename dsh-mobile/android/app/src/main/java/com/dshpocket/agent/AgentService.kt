@@ -34,7 +34,7 @@ class AgentService : Service() {
     private val screenReceiver = object : BroadcastReceiver() {
         override fun onReceive(context: Context?, intent: Intent?) {
             if (intent?.action == Intent.ACTION_SCREEN_OFF) {
-                AgentRuntime.get(this@AgentService).stop()
+                AgentRuntime.get(this@AgentService).stop("screen-off")
                 updateNotification("屏幕已锁定，手机任务停止")
             }
         }

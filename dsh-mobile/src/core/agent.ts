@@ -60,6 +60,7 @@ export interface AgentSnapshot {
   /** False only on a refused action; `parse` turns that into a thrown code. */
   ok: boolean;
   runId: string | null;
+  goal?: string | null;
   phase: AgentPhase;
   step: number;
   paused: boolean;
@@ -209,7 +210,12 @@ const parse = (text: string): AgentSnapshot => {
   // Native reports a refused action as a resolved { ok: false, code } payload
   // rather than a rejected promise. Without this the caller would render it as
   // a valid snapshot and, for startCloud, discard the draft that was sent.
-  if (parsed.ok === false) throw new Error(parsed.code ?? 'AGENT_ACTION_REFUSED');
+  if (parsed.ok === false) {
+    const code = parsed.code ?? 'AGENT_ACTION_REFUSED';
+    const err = new Error(code) as Error & { code?: string };
+    err.code = code;
+    throw err;
+  }
   return parsed;
 };
 const parseSettings = (text: string): AgentModelSettings =>

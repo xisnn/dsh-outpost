@@ -5,6 +5,7 @@
 import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { Alert, ScrollView, StyleSheet, Text, TextInput, View } from 'react-native';
 
+import { AgentRecoveryCard } from '../components/AgentRecoveryCard';
 import { Header } from '../components/Header';
 import { MotionPressable as Pressable } from '../components/MotionPressable';
 import { useNav } from '../nav/NavHost';
@@ -16,6 +17,7 @@ import {
   PROTOCOL_LABELS,
   type AgentModelSettings,
   type AgentSnapshot,
+  type BackgroundDisplayStatus,
   type PhoneCapabilities,
 } from '../core/agent';
 import {
@@ -23,6 +25,16 @@ import {
   isApprovalAllowDisabled,
   isApprovalExpired,
 } from '../core/agentApproval';
+import {
+  classifyAgentFailure,
+  extractAgentError,
+  formatCrashRecoveryReason,
+  hasRunSideEffects,
+  isRecoverableInterruptedReason,
+  type AgentRecoveryActionId,
+} from '../core/agentRecovery';
+
+const DEMO_GOAL = 'P6 demo: read input and write output';
 
 const PHASE_TEXT: Record<AgentSnapshot['phase'], string> = {
   idle: '未运行',
@@ -36,7 +48,11 @@ const PHASE_TEXT: Record<AgentSnapshot['phase'], string> = {
   interrupted: '已中断',
 };
 
-const failureText = (failure: unknown): string => String((failure as Error)?.message ?? failure);
+interface DemoActionError {
+  code: string | null;
+  message: string;
+  source: 'read' | 'action';
+}
 
 export function AgentDemoScreen({ active = true }: { active?: boolean }) {
   const tv = useTheme();
@@ -47,8 +63,11 @@ export function AgentDemoScreen({ active = true }: { active?: boolean }) {
   const [settingsError, setSettingsError] = useState<string | null>(null);
   const [phone, setPhone] = useState<PhoneCapabilities | null>(null);
   const [phoneError, setPhoneError] = useState<string | null>(null);
+  const [background, setBackground] = useState<BackgroundDisplayStatus | null>(null);
+  const [autoStartEnabled, setAutoStartEnabled] = useState(false);
   const [goal, setGoal] = useState('读取 input.txt，然后告诉我里面有什么。');
-  const [error, setError] = useState<string | null>(null);
+  const [actionError, setActionError] = useState<DemoActionError | null>(null);
+  const [dismissedRunKey, setDismissedRunKey] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
   const [cloudBusy, setCloudBusy] = useState(false);
   const [approvalNow, setApprovalNow] = useState(() => Date.now());
@@ -59,19 +78,28 @@ export function AgentDemoScreen({ active = true }: { active?: boolean }) {
   // tap of a double-press synchronously.
   const deciding = useRef(false);
 
+  const reportError = useCallback((source: 'read' | 'action', failure: unknown) => {
+    const parsed = extractAgentError(failure);
+    errorSource.current = source;
+    setActionError({ code: parsed.code, message: parsed.message, source });
+  }, []);
+
+  const clearError = useCallback(() => {
+    errorSource.current = null;
+    setActionError(null);
+  }, []);
+
   const refresh = useCallback(async () => {
     try {
       const next = await agentClient.snapshot();
       setSnapshot(next);
       if (errorSource.current === 'read') {
-        errorSource.current = null;
-        setError(null);
+        clearError();
       }
     } catch (failure) {
-      errorSource.current = 'read';
-      setError(failureText(failure));
+      reportError('read', failure);
     }
-  }, []);
+  }, [clearError, reportError]);
 
   const refreshSettings = useCallback(async () => {
     try {
@@ -85,6 +113,17 @@ export function AgentDemoScreen({ active = true }: { active?: boolean }) {
       setPhoneError(null);
     } catch (failure) {
       setPhoneError(String((failure as Error)?.message ?? failure));
+    }
+    try {
+      setBackground(await agentClient.backgroundStatus());
+    } catch {
+      // Optional background status for classifying background-mode errors.
+    }
+    try {
+      const autoStart = await agentClient.getBackgroundAutoStart();
+      setAutoStartEnabled(autoStart.enabled);
+    } catch {
+      // Optional auto-start state.
     }
   }, []);
 
@@ -112,37 +151,40 @@ export function AgentDemoScreen({ active = true }: { active?: boolean }) {
 
   const start = useCallback(async () => {
     setBusy(true);
-    errorSource.current = null;
-    setError(null);
+    clearError();
     try {
       setSnapshot(await agentClient.startDemo());
     } catch (failure) {
-      errorSource.current = 'action';
-      setError(failureText(failure));
+      reportError('action', failure);
     } finally {
       setBusy(false);
     }
-  }, []);
+  }, [clearError, reportError]);
 
-  const runCloud = useCallback(async () => {
+  const runCloudWithGoal = useCallback(async (targetGoal: string) => {
+    if (!settings?.hasKey || !settings.model) {
+      nav.push('AgentSettings');
+      return;
+    }
     setCloudBusy(true);
-    errorSource.current = null;
-    setError(null);
+    clearError();
     try {
-      setSnapshot(await agentClient.startCloud(goal));
+      setSnapshot(await agentClient.startCloud(targetGoal));
     } catch (failure) {
-      errorSource.current = 'action';
-      setError(failureText(failure));
+      reportError('action', failure);
     } finally {
       setCloudBusy(false);
     }
-  }, [goal]);
+  }, [clearError, nav, reportError, settings?.hasKey, settings?.model]);
+
+  const runCloud = useCallback(async () => {
+    await runCloudWithGoal(goal);
+  }, [goal, runCloudWithGoal]);
 
   const confirmCloud = useCallback(() => {
     if (!settings?.hasKey || !settings.model) return;
     if (!goal.trim()) {
-      errorSource.current = 'action';
-      setError('请先填写云端任务');
+      reportError('action', new Error('EMPTY_GOAL'));
       return;
     }
     Alert.alert(
@@ -153,83 +195,73 @@ export function AgentDemoScreen({ active = true }: { active?: boolean }) {
         { text: '继续', onPress: () => void runCloud() },
       ],
     );
-  }, [goal, runCloud, settings]);
+  }, [goal, reportError, runCloud, settings]);
 
   const togglePause = useCallback(async () => {
     setBusy(true);
-    errorSource.current = null;
-    setError(null);
+    clearError();
     try {
       setSnapshot(snapshot?.paused ? await agentClient.resume() : await agentClient.pause());
     } catch (failure) {
-      errorSource.current = 'action';
-      setError(failureText(failure));
+      reportError('action', failure);
     } finally {
       setBusy(false);
     }
-  }, [snapshot?.paused]);
+  }, [clearError, reportError, snapshot?.paused]);
 
   const stopRun = useCallback(async () => {
     setBusy(true);
-    errorSource.current = null;
-    setError(null);
+    clearError();
     try {
       setSnapshot(await agentClient.stop());
     } catch (failure) {
-      errorSource.current = 'action';
-      setError(failureText(failure));
+      reportError('action', failure);
     } finally {
       setBusy(false);
     }
-  }, []);
+  }, [clearError, reportError]);
 
   const dismissRecovery = useCallback(async () => {
     setBusy(true);
-    errorSource.current = null;
-    setError(null);
+    clearError();
     try {
       setSnapshot(await agentClient.dismissRecovery());
     } catch (failure) {
-      errorSource.current = 'action';
-      setError(failureText(failure));
+      reportError('action', failure);
     } finally {
       setBusy(false);
     }
-  }, []);
+  }, [clearError, reportError]);
 
   const resumeHandoff = useCallback(async () => {
     setBusy(true);
-    errorSource.current = null;
-    setError(null);
+    clearError();
     try {
       setSnapshot(await agentClient.resumeHandoff());
     } catch (failure) {
-      errorSource.current = 'action';
-      setError(failureText(failure));
+      reportError('action', failure);
     } finally {
       setBusy(false);
     }
-  }, []);
+  }, [clearError, reportError]);
 
   const decide = useCallback(async (allow: boolean) => {
     const pending = snapshot?.pendingApproval;
     if (!pending || deciding.current) return;
     deciding.current = true;
     setBusy(true);
-    errorSource.current = null;
-    setError(null);
+    clearError();
     try {
       // The digest the card rendered travels with the decision: native rejects
       // it if the pending call changed, which a callId alone cannot detect.
       setSnapshot(await agentClient.decide(pending.callId, pending.digest, allow));
     } catch (failure) {
-      errorSource.current = 'action';
-      setError(failureText(failure));
+      reportError('action', failure);
     } finally {
       deciding.current = false;
       setBusy(false);
     }
-  }, [snapshot]);
+  }, [clearError, reportError, snapshot]);
 
   const phase = snapshot?.phase ?? 'idle';
   const running = phase === 'queued' || phase === 'preparing' || phase === 'running' || phase === 'waiting_user';
@@ -241,6 +273,107 @@ export function AgentDemoScreen({ active = true }: { active?: boolean }) {
   const pendingHandoff = snapshot?.pendingHandoff ?? null;
   const recovery = snapshot?.recovery ?? null;
   const paused = snapshot?.paused ?? false;
+  const events = snapshot?.events ?? [];
+  const sideEffects = hasRunSideEffects(events);
+  const runFailureKey = snapshot &&
+    (phase === 'failed' || (phase === 'interrupted' && isRecoverableInterruptedReason(snapshot.error)))
+    ? `${snapshot.runId ?? ''}:${phase}:${snapshot.error ?? ''}`
+    : null;
+  const runFailurePlan = useMemo(() => {
+    if (!snapshot || !runFailureKey || runFailureKey === dismissedRunKey) return null;
+    return classifyAgentFailure({
+      raw: snapshot.error ?? (phase === 'failed' ? '任务失败' : null),
+      source: phase === 'interrupted' ? 'interrupted' : 'run',
+      goal: snapshot.goal ?? null,
+      hasSideEffects: sideEffects,
+      background,
+      autoStartEnabled,
+    });
+  }, [autoStartEnabled, background, dismissedRunKey, phase, runFailureKey, sideEffects, snapshot]);
+  const actionErrorPlan = useMemo(() => {
+    if (!actionError) return null;
+    return classifyAgentFailure({
+      raw: actionError.message,
+      code: actionError.code,
+      source: actionError.source,
+      goal: goal.trim() || snapshot?.goal || null,
+      hasSideEffects: false,
+      background,
+      autoStartEnabled,
+    });
+  }, [actionError, autoStartEnabled, background, goal, snapshot?.goal]);
+
+  const handleRecoveryAction = useCallback(
+    async (actionId: AgentRecoveryActionId, targetGoal: string | null, kind: 'run' | 'action') => {
+      const clearSource = () => {
+        if (kind === 'run' && runFailureKey) setDismissedRunKey(runFailureKey);
+        if (kind === 'action') clearError();
+      };
+      switch (actionId) {
+        case 'dismiss':
+          clearSource();
+          break;
+        case 'refresh_snapshot':
+          if (kind === 'action') clearError();
+          await Promise.all([refresh(), refreshSettings()]);
+          break;
+        case 'edit_goal':
+          if (targetGoal) setGoal(targetGoal);
+          clearSource();
+          break;
+        case 'retry_goal':
+          clearSource();
+          if (targetGoal === DEMO_GOAL) {
+            await start();
+          } else if (targetGoal) {
+            await runCloudWithGoal(targetGoal);
+          }
+          break;
+        case 'open_settings':
+          nav.push('AgentSettings');
+          break;
+        case 'open_background':
+          nav.push('BackgroundDisplay');
+          break;
+        case 'open_accessibility':
+          try {
+            await agentClient.openAccessibilitySettings();
+          } catch (failure) {
+            reportError('action', failure);
+          }
+          break;
+        case 'open_shizuku':
+          if (kind === 'action') clearError();
+          try {
+            const res = await agentClient.backgroundOpenShizuku();
+            if (!res.opened) {
+              reportError('action', new Error(res.installed ? '未能打开 Shizuku' : '未安装 Shizuku'));
+            }
+          } catch (failure) {
+            reportError('action', failure);
+          }
+          break;
+        case 'retry_background':
+          if (kind === 'action') clearError();
+          try {
+            setBackground(await agentClient.backgroundRetry());
+          } catch (failure) {
+            reportError('action', failure);
+          }
+          break;
+        case 'disable_auto_start':
+          clearSource();
+          try {
+            await agentClient.setBackgroundAutoStart(false);
+            setAutoStartEnabled(false);
+          } catch (failure) {
+            reportError('action', failure);
+          }
+          break;
+      }
+    },
+    [clearError, nav, refresh, refreshSettings, reportError, runCloudWithGoal, runFailureKey, start],
+  );
 
   useEffect(() => {
     if (!active || !pending?.expiresAt) return;
@@ -274,7 +407,7 @@ export function AgentDemoScreen({ active = true }: { active?: boolean }) {
         {recovery ? (
           <View style={[styles.card, styles.recoveryCard]}>
             <Text style={styles.title}>上次任务中断</Text>
-            <Text style={styles.body}>{recovery.reason ?? '进程中断，任务没有恢复。'}</Text>
+            <Text style={styles.body}>{formatCrashRecoveryReason(recovery)}</Text>
             <Text style={styles.hint}>
               旧审批已失效，不会自动复活或重放。{recovery.requiresReconciliation
                 ? ' 崩溃时可能正在执行有副作用的工具，结果未知；请先确认手机/文件状态。'
@@ -304,7 +437,6 @@ export function AgentDemoScreen({ active = true }: { active?: boolean }) {
             {snapshot?.runId ? <Text style={styles.meta}>{snapshot.runId.slice(0, 8)}</Text> : null}
           </View>
           <Text style={styles.hint}>step {snapshot?.step ?? 0}{snapshot?.error ? ` · ${snapshot.error}` : ''}</Text>
-          {error ? <Text style={styles.error}>{error}</Text> : null}
           <View style={styles.actions}>
             <Pressable
               onPress={() => void start()}
@@ -340,6 +472,28 @@ export function AgentDemoScreen({ active = true }: { active?: boolean }) {
             ) : null}
           </View>
         </View>
+
+        {runFailurePlan ? (
+          <View style={styles.recoveryCardWrap}>
+            <AgentRecoveryCard
+              plan={runFailurePlan}
+              compact
+              busy={busy || cloudBusy}
+              onAction={(actionId) => void handleRecoveryAction(actionId, snapshot?.goal ?? null, 'run')}
+            />
+          </View>
+        ) : null}
+
+        {actionErrorPlan ? (
+          <View style={styles.recoveryCardWrap}>
+            <AgentRecoveryCard
+              plan={actionErrorPlan}
+              compact
+              busy={busy || cloudBusy}
+              onAction={(actionId) => void handleRecoveryAction(actionId, goal.trim() || snapshot?.goal || null, 'action')}
+            />
+          </View>
+        ) : null}
 
         <View style={styles.card}>
           <View style={styles.row}>
@@ -550,6 +704,7 @@ function makeStyles(tv: ReturnType<typeof useTheme>) {
     },
     approvalCard: { borderColor: C.warning },
     recoveryCard: { borderColor: C.warning },
+    recoveryCardWrap: { marginHorizontal: tv.layout.screenPadding },
     row: { flexDirection: 'row', alignItems: 'center' },
     dot: { width: 8, height: 8, borderRadius: 4, marginRight: tv.space.sm },
     title: { flexShrink: 1, color: C.text, fontSize: tv.type.sm, fontWeight: '600' },

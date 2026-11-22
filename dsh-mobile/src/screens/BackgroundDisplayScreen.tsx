@@ -24,6 +24,10 @@ import {
   agentClient,
   type BackgroundDisplayStatus,
 } from '../core/agent';
+import {
+  canStopBackgroundDisplay,
+  isBackgroundFailureState,
+} from '../core/agentRecovery';
 
 const EMPTY: BackgroundDisplayStatus = {
   supported: false,
@@ -159,6 +163,20 @@ export function BackgroundDisplayScreen() {
     }
   }, []);
 
+  const retry = useCallback(async () => {
+    setBusy(true);
+    errorSource.current = null;
+    setError(null);
+    try {
+      setStatus(await agentClient.backgroundRetry());
+    } catch (failure) {
+      errorSource.current = 'action';
+      setError(failureText(failure));
+    } finally {
+      setBusy(false);
+    }
+  }, []);
+
   const stop = useCallback(async () => {
     setBusy(true);
     errorSource.current = null;
@@ -196,6 +214,10 @@ export function BackgroundDisplayScreen() {
   const usable = connected && status.permissionGranted;
   const needsAuthorize = status.shizukuRunning && !status.permissionGranted;
   const startLabel = needsAuthorize ? '重新授权后台屏' : '启动后台屏';
+  const connecting = status.state === 'binding' || status.state === 'retrying';
+  const canStop = canStopBackgroundDisplay(status);
+  const canRetry = isBackgroundFailureState(status.state) && !status.connected;
+  const stopLabel = status.connected ? '停止并释放' : '取消连接';
 
   return (
     <View style={styles.root}>
@@ -237,6 +259,14 @@ export function BackgroundDisplayScreen() {
           <Row styles={styles} label="displayId" value={status.displayId > 0 ? String(status.displayId) : '—'} />
           <Row styles={styles} label="画面" value={status.frameAvailable ? '有帧' : '暂无'} good={status.frameAvailable} />
           <Text style={styles.state}>状态：{status.state}</Text>
+          {connecting ? (
+            <View style={styles.progressRow}>
+              <ActivityIndicator size="small" color={tv.colors.accent} />
+              <Text style={styles.progressText}>
+                {status.state === 'retrying' ? '后台屏连接已断开，正在自动重试…' : '正在绑定 Shizuku 后台屏服务…'}
+              </Text>
+            </View>
+          ) : null}
           {needsAuthorize ? (
             <Text style={styles.error}>
               {status.state === 'permission_revoked'
@@ -258,6 +288,17 @@ export function BackgroundDisplayScreen() {
           >
             <Text style={styles.primaryText}>{busy ? '处理中…' : startLabel}</Text>
           </Pressable>
+          {canRetry ? (
+            <Pressable
+              onPress={() => void retry()}
+              disabled={busy}
+              accessibilityRole="button"
+              accessibilityLabel="重试连接后台屏"
+              style={[styles.secondaryBtn, busy ? styles.muted : null]}
+            >
+              <Text style={styles.secondaryText}>重试连接</Text>
+            </Pressable>
+          ) : null}
           {status.installed && !status.shizukuRunning ? (
             <Pressable
               onPress={() => void openShizuku()}
@@ -289,12 +330,12 @@ export function BackgroundDisplayScreen() {
           </Pressable>
           <Pressable
             onPress={() => void stop()}
-            disabled={busy || !status.connected}
+            disabled={busy || !canStop}
             accessibilityRole="button"
-            accessibilityLabel="停止并释放后台屏"
-            style={[styles.dangerBtn, busy || !status.connected ? styles.muted : null]}
+            accessibilityLabel={stopLabel}
+            style={[styles.dangerBtn, busy || !canStop ? styles.muted : null]}
           >
-            <Text style={styles.dangerText}>停止并释放</Text>
+            <Text style={styles.dangerText}>{stopLabel}</Text>
           </Pressable>
         </View>
 
@@ -382,6 +423,8 @@ function makeStyles(tv: ReturnType<typeof useTheme>) {
     value: { color: C.textSecondary, fontSize: tv.type.xs, textAlign: 'right', flexShrink: 1 },
     good: { color: C.success },
     state: { color: C.textFaint, fontSize: tv.type.micro, marginTop: tv.space.sm },
+    progressRow: { flexDirection: 'row', alignItems: 'center', gap: 8, marginTop: tv.space.sm },
+    progressText: { color: C.textSecondary, fontSize: tv.type.xs, flex: 1 },
     error: { color: C.danger, fontSize: tv.type.xs, lineHeight: tv.type.xs * 1.5, marginTop: tv.space.sm },
     actions: { flexDirection: 'row', flexWrap: 'wrap', gap: 8, marginHorizontal: tv.layout.screenPadding },
     primaryBtn: {

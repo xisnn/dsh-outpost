@@ -108,7 +108,7 @@
 1. **C1 UI 增量流式**：**已完成（2026-11-22，见 12_C1_STREAMING_UX.md）**。4/4 云协议全走 `transport.stream` 逐 delta 流式（补齐 `OPENAI_RESPONSES` + fail-closed）、native 40ms 合并推送 `agentStream` + 180ms 活跃兜底轮询、多步重置与在途停止干净归因、打字机平滑（emoji 代理对安全 + `reduceMotion`）+ 零闪烁 `settling` 过渡 + 近底跟随；agent-core JVM 122/122、`:app:compileDebugKotlin` 绿、`test:agentStream` 归入 `test:agentChain`。
 2. **C2 安全门落地**：**已完成（2026-11-22，见 13_C2_SAFETY_GATES.md）**。落地 Rurea 三层动作策略（`ActionSafetyPolicy` + `preExecute` 双层支付硬禁，无批准通道；读/滚动/导航键/非敏感 `phone_open` 保守自主；`phone_tap`/`phone_type`/`workspace_write`/敏感包/未知动作 fail-closed 走审批）、`#17` 审批 300s 自动过期与双端倒计时、`#23` 全等待路径 `RunDeadline` 上限与超时归因、`#25` 真实在途状态追踪与 `RunStore` `INTERRUPTED` 持久化；agent-core JVM **142/142**、`:app:compileDebugKotlin` 绿、`test:agentC2` 归入 `test:agentChain`。真机/模拟器端到端验收待后续设备窗口补齐。
 3. **C3 记忆/持久化深度**：RunStore 持久化 + 跨会话记忆（敏感，批准）。验收：重启恢复 + 迁移规程。
-4. **C4 错误恢复 UX**：模型/网络/副屏失败的可见恢复路径（非敏感为主）。验收：故障注入下不卡死、有恢复按钮。
+4. **C4 错误恢复 UX**：**已完成（2026-11-22，见 14_C4_ERROR_RECOVERY_UX.md）**。落地 12 类故障归因与一步恢复规划（`agentRecovery.ts`）、可折叠详情卡 `AgentRecoveryCard`（副作用警示 + `edit_goal` 回填优先 + 永不卡死的 `dismiss`）、`AgentService` 息屏停因与 `AgentRuntime` `goal` 快照、三端页面（`AgentButlerScreen`/`AgentDemoScreen`/`BackgroundDisplayScreen`）恢复闭环与 `AppState` 回前台即时刷新；`test:agentC4` 归入 `test:agentChain`，Android 编译与 JVM 142/142 绿。真机故障往返验收待后续设备窗口连同 C1+C2 合并补齐。
 5. **C5 本地运行时(#37)**：libproot 缺失解锁（官方打包或注入），让 agent 可离线跑本地模型。BLOCKED→需资源。
 
 ---

@@ -8,6 +8,7 @@ import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import {
   ActivityIndicator,
   Alert,
+  AppState,
   Image,
   KeyboardAvoidingView,
   Platform,
@@ -18,6 +19,7 @@ import {
 } from 'react-native';
 import AsyncStorage from '@react-native-async-storage/async-storage';
 
+import { AgentRecoveryCard } from '../components/AgentRecoveryCard';
 import { ChatComposer } from '../components/ChatComposer';
 import { AgentScreenOffNotice } from '../components/AgentScreenOffNotice';
 import { AgentStreamingBubble } from '../components/AgentStreamingBubble';
@@ -41,6 +43,17 @@ import {
   isApprovalExpired,
 } from '../core/agentApproval';
 import {
+  classifyAgentFailure,
+  extractAgentError,
+  formatCrashRecoveryReason,
+  formatTimelineEvent,
+  hasAccessibilityToolError,
+  hasRunSideEffects,
+  isBackgroundFailureState,
+  isRecoverableInterruptedReason,
+  type AgentRecoveryActionId,
+} from '../core/agentRecovery';
+import {
   advanceRevealedLength,
   applyStreamEvent,
   isActiveAgentPhase,
@@ -55,19 +68,11 @@ import { distanceFromBottom, NEAR_BOTTOM_PX } from '../core/scrollFollow';
 const CONSENT_KEY = 'agent_consent_v1';
 const MAX_DRAFT = 4000;
 
-const PHASE_TEXT: Record<AgentSnapshot['phase'], string> = {
-  idle: '等待任务',
-  queued: '已排队',
-  preparing: '准备中',
-  running: '执行中',
-  waiting_user: '等待你',
-  stopping: '停止中',
-  completed: '已完成',
-  failed: '失败',
-  interrupted: '已中断',
-};
-
-const failureText = (failure: unknown): string => String((failure as Error)?.message ?? failure);
+interface ButlerActionError {
+  code: string | null;
+  message: string;
+  source: 'read' | 'action';
+}
 
 export function AgentButlerScreen({ active = true }: { active?: boolean }) {
   const tv = useTheme();
@@ -80,7 +85,9 @@ export function AgentButlerScreen({ active = true }: { active?: boolean }) {
   const [draft, setDraft] = useState('');
   const [busy, setBusy] = useState(false);
   const [consent, setConsent] = useState<boolean | null>(null);
-  const [error, setError] = useState<string | null>(null);
+  const [actionError, setActionError] = useState<ButlerActionError | null>(null);
+  const [dismissedRunKey, setDismissedRunKey] = useState<string | null>(null);
+  const [dismissedBgState, setDismissedBgState] = useState<string | null>(null);
   const [background, setBackground] = useState<BackgroundDisplayStatus | null>(null);
   const [backgroundFrame, setBackgroundFrame] = useState<string | null>(null);
   const [backgroundBusy, setBackgroundBusy] = useState(false);
@@ -99,27 +106,35 @@ export function AgentButlerScreen({ active = true }: { active?: boolean }) {
   // tap of a double-press synchronously.
   const deciding = useRef(false);
 
+  const reportError = useCallback((source: 'read' | 'action', failure: unknown) => {
+    const parsed = extractAgentError(failure);
+    errorSource.current = source;
+    setActionError({ code: parsed.code, message: parsed.message, source });
+  }, []);
+
+  const clearError = useCallback(() => {
+    errorSource.current = null;
+    setActionError(null);
+  }, []);
+
   const refresh = useCallback(async () => {
     try {
       setSnapshot(await agentClient.snapshot());
       if (errorSource.current === 'read') {
-        errorSource.current = null;
-        setError(null);
+        clearError();
       }
     } catch (failure) {
-      errorSource.current = 'read';
-      setError(failureText(failure));
+      reportError('read', failure);
     }
-  }, []);
+  }, [clearError, reportError]);
 
   const refreshSettings = useCallback(async () => {
     try {
       setSettings(await agentClient.getModelSettings());
     } catch (failure) {
-      errorSource.current = 'read';
-      setError(failureText(failure));
+      reportError('read', failure);
     }
-  }, []);
+  }, [reportError]);
 
   const refreshThread = useCallback(async () => {
     try {
@@ -181,6 +196,13 @@ export function AgentButlerScreen({ active = true }: { active?: boolean }) {
         void refreshThread();
       }
     });
+    const appStateSub = AppState.addEventListener('change', (nextState) => {
+      if (!stopped && nextState === 'active') {
+        void refresh();
+        void refreshSettings();
+        void refreshBackground();
+      }
+    });
     void refresh();
     void refreshSettings();
     void refreshThread();
@@ -192,6 +214,7 @@ export function AgentButlerScreen({ active = true }: { active?: boolean }) {
     return () => {
       stopped = true;
       unsubscribeStream();
+      appStateSub.remove();
       if (timer !== undefined) clearTimeout(timer);
       clearInterval(threadTimer);
       clearInterval(backgroundTimer);
@@ -201,7 +224,7 @@ export function AgentButlerScreen({ active = true }: { active?: boolean }) {
 
   useEffect(() => {
     if (!active) return;
-  const phase = snapshot?.phase ?? 'idle';
+    const phase = snapshot?.phase ?? 'idle';
     if (phase === 'completed' || phase === 'failed' || phase === 'interrupted') {
       void refreshThread();
     }
@@ -212,12 +235,11 @@ export function AgentButlerScreen({ active = true }: { active?: boolean }) {
     void AsyncStorage.setItem(CONSENT_KEY, '1').catch(() => undefined);
   }, []);
 
-  const send = useCallback(() => {
-    const text = draft.trim();
+  const submitGoal = useCallback((rawGoal: string, clearMatchingDraft: boolean) => {
+    const text = rawGoal.trim();
     if (!text || busy) return;
     if (!consent) {
-      errorSource.current = 'action';
-      setError('请先阅读并同意数据发送说明');
+      reportError('action', new Error('请先阅读并同意数据发送说明'));
       return;
     }
     if (!settings?.hasKey || !settings.model) {
@@ -226,92 +248,88 @@ export function AgentButlerScreen({ active = true }: { active?: boolean }) {
     }
     nearBottomRef.current = true;
     setBusy(true);
-    errorSource.current = null;
-    setError(null);
+    clearError();
     void (async () => {
       try {
         setSnapshot(await agentClient.startCloud(text));
-        // Keep a draft edited while the request was in flight; clear only the
-        // text that was actually sent.
-        setDraft((current) => (current === text ? '' : current));
+        if (clearMatchingDraft) {
+          // Keep a draft edited while the request was in flight; clear only the
+          // text that was actually sent.
+          setDraft((current) => (current === text ? '' : current));
+        }
         await refreshThread();
       } catch (failure) {
         // Keep the draft on failure (for example BACKGROUND_NOT_READY) so the
         // user can re-authorize and send it again.
-        errorSource.current = 'action';
-        setError(failureText(failure));
+        reportError('action', failure);
       } finally {
         setBusy(false);
       }
     })();
-  }, [busy, consent, draft, nav, refreshThread, settings?.hasKey, settings?.model]);
+  }, [busy, clearError, consent, nav, refreshThread, reportError, settings?.hasKey, settings?.model]);
+
+  const send = useCallback(() => {
+    submitGoal(draft, true);
+  }, [draft, submitGoal]);
 
   const stop = useCallback(() => {
     if (busy || phaseRef.current === 'stopping') return;
     setBusy(true);
-    errorSource.current = null;
-    setError(null);
+    clearError();
     void (async () => {
       try {
         setSnapshot(await agentClient.stop());
         await refreshThread();
       } catch (failure) {
-        errorSource.current = 'action';
-        setError(failureText(failure));
+        reportError('action', failure);
       } finally {
         setBusy(false);
       }
     })();
-  }, [busy, refreshThread]);
+  }, [busy, clearError, refreshThread, reportError]);
 
   const decide = useCallback(async (allow: boolean) => {
     const pending = snapshot?.pendingApproval;
     if (!pending || deciding.current) return;
     deciding.current = true;
     setBusy(true);
-    errorSource.current = null;
-    setError(null);
+    clearError();
     try {
       // The digest the card rendered travels with the decision: native rejects
       // it if the pending call changed, which a callId alone cannot detect.
       setSnapshot(await agentClient.decide(pending.callId, pending.digest, allow));
     } catch (failure) {
-      errorSource.current = 'action';
-      setError(failureText(failure));
+      reportError('action', failure);
     } finally {
       deciding.current = false;
       setBusy(false);
     }
-  }, [snapshot]);
+  }, [clearError, reportError, snapshot]);
 
   const resumeHandoff = useCallback(async () => {
     setBusy(true);
-    errorSource.current = null;
-    setError(null);
+    clearError();
     try {
       setSnapshot(await agentClient.resumeHandoff());
       await refreshThread();
     } catch (failure) {
-      errorSource.current = 'action';
-      setError(failureText(failure));
+      reportError('action', failure);
     } finally {
       setBusy(false);
     }
-  }, [refreshThread]);
+  }, [clearError, refreshThread, reportError]);
 
   const dismissRecovery = useCallback(async () => {
     setBusy(true);
-    errorSource.current = null;
-    setError(null);
+    clearError();
     try {
       setSnapshot(await agentClient.dismissRecovery());
     } catch (failure) {
-      errorSource.current = 'action';
-      setError(failureText(failure));
+      reportError('action', failure);
     } finally {
       setBusy(false);
     }
-  }, []);
+  }, [clearError, reportError]);
 
   const clearThread = useCallback(() => {
     Alert.alert('清空本机对话？', '任务历史记录会保留，但后续任务不再携带之前的对话上下文。', [
@@ -321,20 +339,18 @@ export function AgentButlerScreen({ active = true }: { active?: boolean }) {
         style: 'destructive',
         onPress: () => {
           void (async () => {
-            errorSource.current = null;
-            setError(null);
+            clearError();
             try {
               setSnapshot(await agentClient.clearThread());
               await refreshThread();
             } catch (failure) {
-              errorSource.current = 'action';
-              setError(failureText(failure));
+              reportError('action', failure);
             }
           })();
         },
       },
     ]);
-  }, [refreshThread]);
+  }, [clearError, refreshThread, reportError]);
 
   useEffect(() => {
     if (!active || !background?.connected) {
@@ -362,62 +378,63 @@ export function AgentButlerScreen({ active = true }: { active?: boolean }) {
 
   const retryBackground = useCallback(async () => {
     setBackgroundBusy(true);
-    errorSource.current = null;
-    setError(null);
+    clearError();
+    setDismissedBgState(null);
     try {
       setBackground(await agentClient.backgroundRetry());
     } catch (failure) {
-      errorSource.current = 'action';
-      setError(failureText(failure));
+      reportError('action', failure);
     } finally {
       setBackgroundBusy(false);
     }
-  }, []);
+  }, [clearError, reportError]);
 
   const openShizuku = useCallback(async () => {
     setBackgroundBusy(true);
-    errorSource.current = null;
-    setError(null);
+    clearError();
     try {
       const result = await agentClient.backgroundOpenShizuku();
       if (!result.opened) {
-        errorSource.current = 'action';
-        setError(result.installed ? '未能打开 Shizuku' : '未安装 Shizuku');
+        reportError('action', new Error(result.installed ? '未能打开 Shizuku' : '未安装 Shizuku'));
       }
     } catch (failure) {
-      errorSource.current = 'action';
-      setError(failureText(failure));
+      reportError('action', failure);
     } finally {
       setBackgroundBusy(false);
     }
-  }, []);
+  }, [clearError, reportError]);
+
+  const openAccessibility = useCallback(async () => {
+    clearError();
+    try {
+      await agentClient.openAccessibilitySettings();
+    } catch (failure) {
+      reportError('action', failure);
+    }
+  }, [clearError, reportError]);
 
   const disableAutoStart = useCallback(async () => {
-    errorSource.current = null;
-    setError(null);
+    clearError();
     try {
       await agentClient.setBackgroundAutoStart(false);
       setAutoStartEnabled(false);
     } catch (failure) {
-      errorSource.current = 'action';
-      setError(failureText(failure));
+      reportError('action', failure);
     }
-  }, []);
+  }, [clearError, reportError]);
 
   const stopBackground = useCallback(async () => {
     setBackgroundBusy(true);
-    errorSource.current = null;
-    setError(null);
+    clearError();
     try {
       setBackground(await agentClient.backgroundStop());
       setBackgroundFrame(null);
     } catch (failure) {
-      errorSource.current = 'action';
-      setError(failureText(failure));
+      reportError('action', failure);
     } finally {
       setBackgroundBusy(false);
     }
-  }, []);
+  }, [clearError, reportError]);
 
   const phase = snapshot?.phase ?? 'idle';
   const running = isActiveAgentPhase(phase);
@@ -438,9 +455,91 @@ export function AgentButlerScreen({ active = true }: { active?: boolean }) {
   const queue = snapshot?.queue ?? [];
   const events = snapshot?.events ?? [];
   const configured = Boolean(settings?.hasKey && settings.model);
-  // `running` excludes failed, so the phase text never renders on failure and
-  // the run's own error would leave the screen showing nothing at all.
-  const runFailure = phase === 'failed' ? (snapshot?.error ?? '任务失败') : null;
+  const sideEffects = hasRunSideEffects(events);
+  const runFailureKey = snapshot &&
+    (phase === 'failed' || (phase === 'interrupted' && isRecoverableInterruptedReason(snapshot.error)))
+    ? `${snapshot.runId ?? ''}:${phase}:${snapshot.error ?? ''}`
+    : null;
+  const runFailurePlan = useMemo(() => {
+    if (!snapshot || !runFailureKey || runFailureKey === dismissedRunKey) return null;
+    return classifyAgentFailure({
+      raw: snapshot.error ?? (phase === 'failed' ? '任务失败' : null),
+      source: phase === 'interrupted' ? 'interrupted' : 'run',
+      goal: snapshot.goal ?? null,
+      hasSideEffects: sideEffects,
+      background,
+      autoStartEnabled,
+    });
+  }, [autoStartEnabled, background, dismissedRunKey, phase, runFailureKey, sideEffects, snapshot]);
+  const actionErrorPlan = useMemo(() => {
+    if (!actionError) return null;
+    return classifyAgentFailure({
+      raw: actionError.message,
+      code: actionError.code,
+      source: actionError.source,
+      goal: draft.trim() || snapshot?.goal || null,
+      hasSideEffects: false,
+      background,
+      autoStartEnabled,
+    });
+  }, [actionError, autoStartEnabled, background, draft, snapshot?.goal]);
+
+  const handleRecoveryAction = useCallback(
+    async (actionId: AgentRecoveryActionId, targetGoal: string | null, kind: 'run' | 'action') => {
+      const clearSource = () => {
+        if (kind === 'run' && runFailureKey) setDismissedRunKey(runFailureKey);
+        if (kind === 'action') clearError();
+      };
+      switch (actionId) {
+        case 'dismiss':
+          clearSource();
+          break;
+        case 'refresh_snapshot':
+          if (kind === 'action') clearError();
+          await Promise.all([refresh(), refreshSettings(), refreshBackground()]);
+          break;
+        case 'edit_goal':
+          if (targetGoal) setDraft(targetGoal);
+          clearSource();
+          break;
+        case 'retry_goal':
+          clearSource();
+          if (targetGoal) submitGoal(targetGoal, false);
+          break;
+        case 'open_settings':
+          nav.push('AgentSettings');
+          break;
+        case 'open_background':
+          nav.push('BackgroundDisplay');
+          break;
+        case 'open_accessibility':
+          await openAccessibility();
+          break;
+        case 'open_shizuku':
+          await openShizuku();
+          break;
+        case 'retry_background':
+          await retryBackground();
+          break;
+        case 'disable_auto_start':
+          await disableAutoStart();
+          break;
+      }
+    },
+    [
+      clearError,
+      disableAutoStart,
+      nav,
+      openAccessibility,
+      openShizuku,
+      refresh,
+      refreshBackground,
+      refreshSettings,
+      retryBackground,
+      runFailureKey,
+      submitGoal,
+    ],
+  );
   const backgroundPermissionMissing = Boolean(
     background && background.shizukuRunning && !background.permissionGranted,
   );
@@ -483,20 +582,21 @@ export function AgentButlerScreen({ active = true }: { active?: boolean }) {
   const visibleStreamText = instantReveal
     ? streamingBubble.targetText
     : safeSlice(streamingBubble.targetText, revealedLen);
-  const backgroundNeedsAttention = Boolean(
-    !snapshot?.backgroundLost &&
-    autoStartEnabled &&
+  useEffect(() => {
+    if (background?.connected) setDismissedBgState(null);
+  }, [background?.connected]);
+
+  const bgFailureNeedsAttention = Boolean(
     background &&
-    (
-      !background.shizukuRunning ||
-      !background.permissionGranted ||
-      (
-        !background.connected &&
-        ['error', 'disconnected', 'retry_exhausted', 'retrying',
-          'permission_revoked', 'permission_denied', 'permission_required'].includes(background.state)
-      )
-    ),
+      (autoStartEnabled
+        ? !background.shizukuRunning ||
+          !background.permissionGranted ||
+          (!background.connected && isBackgroundFailureState(background.state))
+        : !background.connected &&
+          isBackgroundFailureState(background.state) &&
+          background.state !== dismissedBgState),
   );
+  const backgroundNeedsAttention = Boolean(!snapshot?.backgroundLost && bgFailureNeedsAttention);
   const backgroundIssueTitle = !background
     ? ''
     : !background.shizukuRunning
@@ -508,12 +608,12 @@ export function AgentButlerScreen({ active = true }: { active?: boolean }) {
     ? ''
     : !background.shizukuRunning
       ? (background.installed
-          ? '后台模式已开启；启动 Shizuku 后回来重试，权限仍在时会自动恢复。'
-          : '后台模式已开启，但还没有安装 Shizuku。安装并启动后再回来授权。')
+          ? '启动 Shizuku 后回来重试，权限仍在时会自动恢复。'
+          : '还没有安装 Shizuku。安装并启动后再回来授权。')
       : !background.permissionGranted
         ? (background.state === 'permission_denied'
             ? '上一次授权被拒绝。重新授权后会自动创建后台屏。'
-            : '后台模式已开启，但 Shizuku 授权已被撤销。重新授权后会自动恢复，任务不会切回主屏。')
+            : 'Shizuku 授权已被撤销。重新授权后会自动恢复，任务不会切回主屏。')
         : (background.error ?? background.state);
   const backgroundIssueAction = !background
     ? '重试'
@@ -537,7 +637,7 @@ export function AgentButlerScreen({ active = true }: { active?: boolean }) {
       if (nearBottomRef.current) scroll.current?.scrollToEnd({ animated: true });
     }, 60);
     return () => clearTimeout(timer);
-  }, [active, thread.length, running, pending, handoff, queue.length]);
+  }, [active, thread.length, running, pending, handoff, queue.length, runFailurePlan, actionErrorPlan]);
 
   return (
     <KeyboardAvoidingView
@@ -601,15 +701,37 @@ export function AgentButlerScreen({ active = true }: { active?: boolean }) {
         {recovery ? (
           <View style={[styles.systemCard, styles.attentionCard]}>
             <Text style={styles.systemTitle}>上次任务中断</Text>
-            <Text style={styles.systemText}>{recovery.reason ?? '进程中断，任务没有恢复。'}</Text>
+            <Text style={styles.systemText}>{formatCrashRecoveryReason(recovery)}</Text>
             <Text style={styles.systemHint}>
               旧审批已失效，不会自动复活或重放。{recovery.requiresReconciliation
                 ? ' 崩溃时可能正在执行有副作用的工具，结果未知。'
                 : ' 这次没有未知副作用记录。'}
             </Text>
-            <Pressable onPress={() => void dismissRecovery()} style={styles.smallAction}>
-              <Text style={styles.smallActionText}>知道了</Text>
-            </Pressable>
+            <View style={styles.actions}>
+              {recovery.goal ? (
+                <Pressable
+                  onPress={() => {
+                    setDraft(recovery.goal!);
+                    void dismissRecovery();
+                  }}
+                  disabled={busy}
+                  accessibilityRole="button"
+                  accessibilityLabel="填入上次任务到输入框"
+                  style={[styles.secondaryBtn, busy ? styles.muted : null]}
+                >
+                  <Text style={styles.secondaryText}>填入输入框</Text>
+                </Pressable>
+              ) : null}
+              <Pressable
+                onPress={() => void dismissRecovery()}
+                disabled={busy}
+                accessibilityRole="button"
+                accessibilityLabel="知道了"
+                style={styles.smallAction}
+              >
+                <Text style={styles.smallActionText}>知道了</Text>
+              </Pressable>
+            </View>
           </View>
         ) : null}
 
@@ -681,17 +803,51 @@ export function AgentButlerScreen({ active = true }: { active?: boolean }) {
                   ? '任务已暂停在下一步，重新授权后会自动继续；不会切回主屏操作。'
                   : '任务已暂停在下一步，不会切回主屏继续操作。重试后台屏恢复后可继续。'}
               </Text>
+              {background?.error ? (
+                <Text style={styles.systemHint}>{background.error}</Text>
+              ) : null}
               <View style={styles.actions}>
+                {background && !background.shizukuRunning && background.installed ? (
+                  <>
+                    <Pressable
+                      onPress={() => void openShizuku()}
+                      disabled={backgroundBusy}
+                      accessibilityRole="button"
+                      accessibilityLabel="打开 Shizuku"
+                      style={[styles.primaryBtn, backgroundBusy ? styles.muted : null]}
+                    >
+                      <Text style={styles.primaryText}>{backgroundBusy ? '处理中…' : '打开 Shizuku'}</Text>
+                    </Pressable>
+                    <Pressable
+                      onPress={() => void retryBackground()}
+                      disabled={backgroundBusy}
+                      accessibilityRole="button"
+                      accessibilityLabel="重试后台屏并继续任务"
+                      style={[styles.secondaryBtn, backgroundBusy ? styles.muted : null]}
+                    >
+                      <Text style={styles.secondaryText}>重试后台屏</Text>
+                    </Pressable>
+                  </>
+                ) : (
+                  <Pressable
+                    onPress={() => void retryBackground()}
+                    disabled={backgroundBusy}
+                    accessibilityRole="button"
+                    accessibilityLabel={backgroundPermissionMissing ? '重新授权后台屏并继续任务' : '重试后台屏并继续任务'}
+                    style={[styles.primaryBtn, backgroundBusy ? styles.muted : null]}
+                  >
+                    <Text style={styles.primaryText}>
+                      {backgroundBusy ? '处理中…' : backgroundPermissionMissing ? '重新授权' : '重试后台屏'}
+                    </Text>
+                  </Pressable>
+                )}
                 <Pressable
-                  onPress={() => void retryBackground()}
-                  disabled={backgroundBusy}
+                  onPress={() => nav.push('BackgroundDisplay')}
                   accessibilityRole="button"
-                  accessibilityLabel={backgroundPermissionMissing ? '重新授权后台屏并继续任务' : '重试后台屏并继续任务'}
-                  style={[styles.primaryBtn, backgroundBusy ? styles.muted : null]}
+                  accessibilityLabel="打开后台屏设置"
+                  style={styles.secondaryBtn}
                 >
-                  <Text style={styles.primaryText}>
-                    {backgroundBusy ? '处理中…' : backgroundPermissionMissing ? '重新授权' : '重试后台屏'}
-                  </Text>
+                  <Text style={styles.secondaryText}>后台屏设置</Text>
                 </Pressable>
                 <Pressable
                   onPress={() => void stop()}
@@ -813,34 +969,56 @@ export function AgentButlerScreen({ active = true }: { active?: boolean }) {
           <View style={styles.assistantRow}>
             <View style={styles.timeline}>
               <Text style={styles.timelineTitle}>执行记录</Text>
-              {events.slice(-8).map((event) => (
-                <View key={`${event.seq}-${event.type}`} style={styles.timelineRow}>
-                  <View style={[styles.timelineDot, event.type === 'tool_finished' ? styles.timelineDotDone : null]} />
-                  <Text style={styles.timelineText} numberOfLines={2}>
-                    {event.type === 'tool_started'
-                      ? `调用 ${event.toolName ?? '工具'}`
-                      : `${event.toolName ?? '工具'} · ${event.status === 'OK' ? '完成' : event.status === 'DENIED' ? '已拒绝' : '错误'}`}
-                  </Text>
-                </View>
-              ))}
+              {events.slice(-8).map((event) => {
+                const formatted = formatTimelineEvent(event);
+                return (
+                  <View key={`${event.seq}-${event.type}`} style={styles.timelineRow}>
+                    <View
+                      style={[
+                        styles.timelineDot,
+                        formatted.tone === 'ok'
+                          ? styles.timelineDotDone
+                          : formatted.tone === 'warning'
+                            ? styles.timelineDotWarning
+                            : formatted.tone === 'error'
+                              ? styles.timelineDotError
+                              : null,
+                      ]}
+                    />
+                    <Text style={styles.timelineText} numberOfLines={2}>
+                      {formatted.label}
+                    </Text>
+                  </View>
+                );
+              })}
+              {!running && hasAccessibilityToolError(events) ? (
+                <Pressable
+                  onPress={() => void openAccessibility()}
+                  accessibilityRole="button"
+                  accessibilityLabel="打开无障碍设置"
+                  style={styles.smallAction}
+                >
+                  <Text style={styles.smallActionText}>打开无障碍设置</Text>
+                </Pressable>
+              ) : null}
             </View>
           </View>
         ) : null}
 
-        {runFailure ? (
-          <View style={styles.assistantRow}>
-            <View style={[styles.assistantBubble, styles.errorCard]}>
-              <Text style={styles.error}>{PHASE_TEXT.failed} · {runFailure}</Text>
-            </View>
-          </View>
+        {runFailurePlan ? (
+          <AgentRecoveryCard
+            plan={runFailurePlan}
+            busy={busy || backgroundBusy}
+            onAction={(actionId) => void handleRecoveryAction(actionId, snapshot?.goal ?? null, 'run')}
+          />
         ) : null}
 
-        {error ? (
-          <View style={styles.assistantRow}>
-            <View style={[styles.assistantBubble, styles.errorCard]}>
-              <Text style={styles.error}>{error}</Text>
-            </View>
-          </View>
+        {actionErrorPlan ? (
+          <AgentRecoveryCard
+            plan={actionErrorPlan}
+            busy={busy || backgroundBusy}
+            onAction={(actionId) => void handleRecoveryAction(actionId, draft.trim() || snapshot?.goal || null, 'action')}
+          />
         ) : null}
 
         {queue.length > 0 ? (
@@ -884,14 +1062,35 @@ export function AgentButlerScreen({ active = true }: { active?: boolean }) {
               {backgroundBusy ? '…' : backgroundIssueAction}
             </Text>
           </Pressable>
-          <Pressable
-            onPress={() => void disableAutoStart()}
-            accessibilityRole="button"
-            accessibilityLabel="关闭自动启动后台屏"
-            style={styles.bgRecoveryAction}
-          >
-            <Text style={styles.bgRecoveryActionText}>关闭自动</Text>
-          </Pressable>
+          {autoStartEnabled ? (
+            <Pressable
+              onPress={() => void disableAutoStart()}
+              accessibilityRole="button"
+              accessibilityLabel="关闭自动启动后台屏"
+              style={styles.bgRecoveryAction}
+            >
+              <Text style={styles.bgRecoveryActionText}>关闭自动</Text>
+            </Pressable>
+          ) : (
+            <>
+              <Pressable
+                onPress={() => nav.push('BackgroundDisplay')}
+                accessibilityRole="button"
+                accessibilityLabel="打开后台屏设置"
+                style={styles.bgRecoveryAction}
+              >
+                <Text style={styles.bgRecoveryActionText}>后台屏设置</Text>
+              </Pressable>
+              <Pressable
+                onPress={() => setDismissedBgState(background?.state ?? null)}
+                accessibilityRole="button"
+                accessibilityLabel="忽略后台屏提示"
+                style={styles.bgRecoveryAction}
+              >
+                <Text style={styles.bgRecoveryActionText}>忽略</Text>
+              </Pressable>
+            </>
+          )}
         </View>
       ) : null}
 
@@ -1032,6 +1231,17 @@ function makeStyles(tv: ReturnType<typeof useTheme>) {
       justifyContent: 'center',
     },
     primaryText: { color: C.onAccent, fontSize: tv.type.sm, fontWeight: '600' },
+    secondaryBtn: {
+      alignSelf: 'flex-start',
+      minHeight: 40,
+      paddingHorizontal: 14,
+      borderRadius: tv.radius.sm,
+      borderWidth: StyleSheet.hairlineWidth,
+      borderColor: C.borderStrong,
+      alignItems: 'center',
+      justifyContent: 'center',
+    },
+    secondaryText: { color: C.text, fontSize: tv.type.sm },
     dangerBtn: {
       alignSelf: 'flex-start',
       minHeight: 40,
@@ -1067,6 +1277,8 @@ function makeStyles(tv: ReturnType<typeof useTheme>) {
     timelineRow: { flexDirection: 'row', alignItems: 'center', marginTop: 6 },
     timelineDot: { width: 6, height: 6, borderRadius: 3, backgroundColor: C.warning, marginRight: 7 },
     timelineDotDone: { backgroundColor: C.success },
+    timelineDotWarning: { backgroundColor: C.warning },
+    timelineDotError: { backgroundColor: C.danger },
     timelineText: { flex: 1, color: C.textSecondary, fontSize: tv.type.xs, lineHeight: tv.type.xs * 1.5 },
     error: { color: C.danger, fontSize: tv.type.xs, lineHeight: tv.type.xs * 1.5 },
     queueChip: {
