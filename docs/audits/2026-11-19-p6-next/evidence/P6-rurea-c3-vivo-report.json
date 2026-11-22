@@ -1,0 +1,84 @@
+{
+  "suite": "c3",
+  "generatedAt": "2026-11-22T10:52:00.982Z",
+  "passedStages": 4,
+  "totalStages": 4,
+  "allOk": true,
+  "stages": [
+    {
+      "stage": 1,
+      "ok": true,
+      "details": {
+        "migratedOk": true,
+        "crashDetected": true,
+        "memoryOk": true,
+        "sessionAndHistoryOk": true,
+        "storageStatus": {
+          "schemaVersion": 2,
+          "fromVersion": 1,
+          "toVersion": 2,
+          "status": "migrated",
+          "downgradeBlocked": false,
+          "migratedAt": 1795344711234,
+          "backupPath": "agent-backups/v1-1795344711234",
+          "quarantinedFiles": [],
+          "warnings": [
+            "记忆迁移时清理了 1 条重名记忆（已保留最新修改）。"
+          ],
+          "error": null
+        },
+        "backupMemExists": true,
+        "backupThrExists": true,
+        "initialRecoveryRunId": "run-v1-crash",
+        "dupRejected": true,
+        "budgetUsedChars": 125,
+        "activeSessionTitle": "[C3_PERSIST_RUN]",
+        "runPhase": "completed",
+        "runText": "C3_PERSIST_OK",
+        "persistedEventCount": 2
+      }
+    },
+    {
+      "stage": 2,
+      "ok": true,
+      "details": {
+        "idempotentOk": true,
+        "backupCount": 1,
+        "crashSurvivedSecondRestart": true,
+        "dataSurvivedRestart": true,
+        "ackOk": true,
+        "recoveryBeforeAck": "run-v1-crash",
+        "recoveryAfterAck": null,
+        "reconciledAt": 1795344714214
+      }
+    },
+    {
+      "stage": 3,
+      "ok": true,
+      "details": {
+        "recoveryClearedOnRestart": true,
+        "memBytes": 480,
+        "threadBytes": 455
+      }
+    },
+    {
+      "stage": 4,
+      "ok": true,
+      "details": {
+        "status": "downgrade_blocked",
+        "downgradeBlocked": true,
+        "fromVersion": 99,
+        "noticeTone": "danger",
+        "startCode": "STORAGE_DOWNGRADE_BLOCKED",
+        "sessionCode": "STORAGE_DOWNGRADE_BLOCKED",
+        "memoryCode": "STORAGE_DOWNGRADE_BLOCKED",
+        "recoveryTitle": "本机存储版本高于当前应用",
+        "filesUntouched": true
+      }
+    }
+  ],
+  "trace": [
+    "tool:workspace_list:c3-stub-1",
+    "text:C3_PERSIST_OK"
+  ]
+}

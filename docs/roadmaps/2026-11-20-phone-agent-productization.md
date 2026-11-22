@@ -85,11 +85,9 @@
 目标：手势**执行**（非仅决策逻辑）在设备可回归验证。instrument 路在两环境都验不了
 （vivo 死锁 / emulator a11y 不绑 instrument 进程），必须换正常进程 harness。
 
-> **状态（2026-11-21）：B1+B2 已在 API35 emulator 验通**（见 07_RUREA_B1B2_ACCEPTANCE.md）。
-> 正常进程 Run harness 建成（隔离 JS 入口 + 反应式 loopback 桩模型 + 自动批准，复用已批准桥）；
-> phone_open/screen/type/tap/key 真打副屏见效（displayId=8, completed）；scroll 空靶 NO_SCROLLABLE
-> （机制与 tap/type/key 共用已证）。**B3 vivo 真机亦验通（8/8 工具 OK，见 08_RUREA_B3_VIVO.md）：
-> 正常进程路绕开 instrument 死锁 + 保活 Shizuku 管理器解 provider null**。其它 ROM 待设备；B4 CI 回归固化待后续。
+> **状态（2026-11-22）：B1+B2（emulator）、B3（vivo 真机）与 B4（回归固化）均已完成**（见 07_RUREA_B1B2_ACCEPTANCE.md、08_RUREA_B3_VIVO.md、17_B4_REGRESSION_AND_C3_VIVO.md、docs/rurea-acceptance-runbook.md）。
+> 正常进程统一验收 Runner（`scripts/run-rurea-acceptance.mjs`）已固化 `b2` / `c1c2c4` / `c3` 三套件隔离测试入口；
+> GitHub 模拟器工作流 `.github/workflows/rurea-acceptance.yml` 与真机运维规程及明确 `BLOCKED` 清单已落地。其它 OEM ROM 矩阵与 `Shizuku` 全量离主线程重构待后续设备与授权。
 
 | 阶段 | 内容 | 验收标准 |
 |---|---|---|
@@ -107,7 +105,7 @@
 
 1. **C1 UI 增量流式**：**已完成 + vivo 真机验通（2026-11-22，见 12_C1_STREAMING_UX.md、15_C1C2C4_VIVO_ACCEPTANCE.md）**。4/4 云协议全走 `transport.stream` 逐 delta 流式（补齐 `OPENAI_RESPONSES` + fail-closed）、native 40ms 合并推送 `agentStream` + 180ms 活跃兜底轮询、多步重置与在途停止干净归因、打字机平滑（emoji 代理对安全 + `reduceMotion`）+ 零闪烁 `settling` 过渡 + 近底跟随；agent-core JVM 122/122、`:app:compileDebugKotlin` 绿、`test:agentStream` 归入 `test:agentChain`，vivo `762a319` 上 COMPAT/Responses 原生流式推送与 126ms 在途停止实测通过。
 2. **C2 安全门落地**：**已完成 + vivo 真机策略门/TTL 验通（2026-11-22，见 13_C2_SAFETY_GATES.md、15_C1C2C4_VIVO_ACCEPTANCE.md）**。落地 Rurea 三层动作策略（`ActionSafetyPolicy` + `preExecute` 双层支付硬禁，无批准通道；读/滚动/导航键/非敏感 `phone_open` 保守自主；`phone_tap`/`phone_type`/`workspace_write`/敏感包/未知动作 fail-closed 走审批）、`#17` 审批 300s 自动过期与双端倒计时、`#23` 全等待路径 `RunDeadline` 上限与超时归因、`#25` 真实在途状态追踪与 `RunStore` `INTERRUPTED` 持久化；agent-core JVM **142/142**、`:app:compileDebugKotlin` 绿、`test:agentC2` 归入 `test:agentChain`，vivo `762a319` 上支付宝硬拒 0 审批 / 读/写/按键/开普通应用三层策略与实钟倒计时实测通过。
-3. **C3 记忆/持久化深度**：**已完成核心实现与自动化门禁验证（2026-11-22，见 16_C3_PERSISTENCE_MEMORY.md）**。落地纯 JVM Stop-the-World 迁移器 `StorageMigrator`（`storage-manifest.json`、迁移前 `fd.sync` 备份、fail-closed 降级保护 `STORAGE_DOWNGRADE_BLOCKED`、损坏 JSON `*.corrupt.<ts>` 隔离）、`FileRunStore` 时间线/核对时间持久化与 `RunRecovery.pendingReconciliation` 二次冷重启恢复、`AgentMemoryStore` v2（分类/置顶/开关/修重名 key/2400 字注入预算可见）与 `AgentThreadStore` v2 多会话；新增 `AgentHistoryScreen` 与对话气泡显式「存为记忆」确认卡片（零静默提取）；agent-core JVM **158/158**、`:app:compileDebugKotlin` 绿、`test:agentC3` 归入 `test:agentChain`；待选做 vivo 真机冷重启与 v1→v2 迁移验收。
+3. **C3 记忆/持久化深度**：**已完成 + vivo 真机 4 次冷重启与迁移验通（2026-11-22，见 16_C3_PERSISTENCE_MEMORY.md、17_B4_REGRESSION_AND_C3_VIVO.md）**。落地纯 JVM Stop-the-World 迁移器 `StorageMigrator`（`storage-manifest.json`、迁移前 `fd.sync` 备份、fail-closed 降级保护 `STORAGE_DOWNGRADE_BLOCKED`、损坏 JSON `*.corrupt.<ts>` 隔离）、`FileRunStore` 时间线/核对时间持久化与 `RunRecovery.pendingReconciliation` 二次冷重启恢复、`AgentMemoryStore` v2（分类/置顶/开关/修重名 key/2400 字注入预算可见）与 `AgentThreadStore` v2 多会话；新增 `AgentHistoryScreen` 与对话气泡显式「存为记忆」确认卡片（零静默提取）；agent-core JVM **158/158**、`:app:compileDebugKotlin` 绿、`test:agentC3` 归入 `test:agentChain`；vivo `762a319` 上 4 次 `am force-stop` 冷重启、v1→v2 迁移备份、二次重启未核对存活与 `v99` 降级只读保护全部通过（`allOk: true`）。
 4. **C4 错误恢复 UX**：**已完成 + vivo 真机故障恢复验通（2026-11-22，见 14_C4_ERROR_RECOVERY_UX.md、15_C1C2C4_VIVO_ACCEPTANCE.md）**。落地 12 类故障归因与一步恢复规划（`agentRecovery.ts`）、可折叠详情卡 `AgentRecoveryCard`（副作用警示 + `edit_goal` 回填优先 + 永不卡死的 `dismiss`）、`AgentService` 息屏停因与 `AgentRuntime` `goal` 快照、三端页面（`AgentButlerScreen`/`AgentDemoScreen`/`BackgroundDisplayScreen`）恢复闭环与 `AppState` 回前台即时刷新；`test:agentC4` 归入 `test:agentChain`，Android 编译与 JVM 142/142 绿，vivo `762a319` 上 401/503/断流重试/`BACKGROUND_NOT_READY` 实测通过。
 5. **C5 本地运行时(#37)**：libproot 缺失解锁（官方打包或注入），让 agent 可离线跑本地模型。BLOCKED→需资源。
 
